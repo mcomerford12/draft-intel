@@ -1,0 +1,57 @@
+# Keeper manifest — EXPECTED STATE, not ledger truth (see §2 of the charter).
+# Retention price = floor(0.75 * sleeper_auction_value). Prices are DERIVED by
+# the tool at Sprint 0, then reconciled against what is actually loaded in Sleeper.
+#
+# player_id MUST be resolved from GET /v1/players/nfl and confirmed by position.
+# Do NOT match on name alone — see the name-collision warning below.
+
+league:
+  teams: 10
+  budget: 200
+  keepers_per_team: 2
+  retention_rule: "floor(0.75 * sleeper_auction_value)"
+  value_snapshot_date: TBD   # must be confirmed with the commissioner
+
+user_team: "Me"   # owner of Josh Allen + Drake London; set roster_id at Sprint 0
+
+teams:
+  - owner: "AJ"
+    keepers:
+      - {name: "Christian McCaffrey", pos: RB, player_id: TBD, price: DERIVED}
+      - {name: "Zay Flowers",         pos: WR, player_id: TBD, price: DERIVED}
+  - owner: "Jake"
+    keepers:
+      - {name: "Jalen Hurts",         pos: QB, player_id: TBD, price: DERIVED}
+      - {name: "Jahmyr Gibbs",        pos: RB, player_id: TBD, price: DERIVED}
+  - owner: "Me"
+    keepers:
+      - {name: "Josh Allen",          pos: QB, player_id: TBD, price: DERIVED}  # ⚠ collision: LB Josh Allen
+      - {name: "Drake London",        pos: WR, player_id: TBD, price: DERIVED}
+  - owner: "Mason"
+    keepers:
+      - {name: "Ja'Marr Chase",       pos: WR, player_id: TBD, price: DERIVED}
+      - {name: "Amon-Ra St. Brown",   pos: WR, player_id: TBD, price: DERIVED}
+  - owner: "Connor"
+    keepers:
+      - {name: "Lamar Jackson",       pos: QB, player_id: TBD, price: DERIVED}
+      - {name: "Jaxon Smith-Njigba",  pos: WR, player_id: TBD, price: DERIVED}
+  - owner: "Keenan"
+    keepers:
+      - {name: "Caleb Williams",      pos: QB, player_id: TBD, price: DERIVED}  # ⚠ two Williams QB/RB
+      - {name: "Kyren Williams",      pos: RB, player_id: TBD, price: DERIVED}
+  - owner: "Steve"
+    keepers:
+      - {name: "Trevor Lawrence",     pos: QB, player_id: TBD, price: DERIVED}
+      - {name: "Bijan Robinson",      pos: RB, player_id: TBD, price: DERIVED}
+  - owner: "Willie"
+    keepers:
+      - {name: "Jayden Daniels",      pos: QB, player_id: TBD, price: DERIVED}
+      - {name: "Jonathan Taylor",     pos: RB, player_id: TBD, price: DERIVED}
+  - owner: "Burt"
+    keepers:
+      - {name: "Breece Hall",         pos: RB, player_id: TBD, price: DERIVED}
+      - {name: "George Pickens",      pos: WR, player_id: TBD, price: DERIVED}
+  - owner: "TD"
+    keepers:
+      - {name: "Bo Nix",              pos: QB, player_id: TBD, price: DERIVED}
+      - {name: "Puka Nacua",          pos: WR, player_id: TBD, price: DERIVED}

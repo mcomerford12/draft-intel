@@ -1,0 +1,96 @@
+# Keeper manifest — EXPECTED STATE, not ledger truth (see §2 of the charter).
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# SCHEMA CHANGE vs. the original manifest (see docs/CHARTER_REFINEMENTS.md, C1)
+#
+# The original file carried `price: DERIVED`, which conflated three different
+# numbers: Sleeper's published auction value, our own computed market_value, and
+# whatever the commissioner actually loaded. ΣK_t sets `total_live_money`, which
+# scales EVERY price in the model, so this could not stay ambiguous.
+#
+# Retention price is now an OBSERVED FACT WITH RECORDED PROVENANCE:
+#
+#   price:        integer dollars, or null if not yet known
+#   price_source: sleeper_draft_room | commissioner | estimated | null
+#
+# Resolution order, highest authority first:
+#   1. sleeper_draft_room — metadata.amount on a keeper pick, or read off the
+#      draft room screen and entered via the override layer. AUTHORITATIVE.
+#   2. commissioner       — supplied directly by the commissioner. AUTHORITATIVE.
+#   3. estimated          — floor(0.75 * market_value) computed by the tool.
+#      NOT truth. Every number downstream of an estimated price is badged as
+#      estimated in the UI and in `make prep` output.
+#
+# floor(0.75 * value) is therefore a RECONCILIATION CHECK, not a price source.
+# It drives the divergence alerting in §2; it never writes to the ledger.
+#
+# The user has confirmed prices come from Sleeper auction values ON DRAFT DAY,
+# so every price below is expected to be null until 2026-09-04. The pre-draft
+# board is an ESTIMATE. This is why the sub-200ms keeper-set revaluation (§1.1)
+# is critical path rather than a convenience.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# player_id MUST be resolved from GET /v1/players/nfl and confirmed by position.
+# Do NOT match on name alone — see the name-collision warning below.
+# Once resolved, ALL downstream logic keys on player_id, never on the name.
+
+league:
+  teams: 10
+  budget: 200
+  keepers_per_team: 2
+  retention_rule: "floor(0.75 * sleeper_auction_value)"
+  # RESOLVED (was TBD): prices are taken from Sleeper auction values on draft day.
+  value_snapshot_date: "2026-09-04"
+  # OPEN — needs a league ruling. floor(0.75 * $1) = $0, and a $0 pick breaks both
+  # money conservation and the `max_bid = budget - (open_slots - 1)` reserve, which
+  # assumes every filled slot cost >= $1. Default below clamps to $1.
+  # No keeper on this slate is anywhere near $1, so this is a correctness guard,
+  # not a live concern. See docs/DECISIONS_FOR_REVIEW.md.
+  minimum_retention_price: 1
+
+user_team: "Me"   # owner of Josh Allen + Drake London; set roster_id at Sprint 0
+
+teams:
+  - owner: "AJ"
+    keepers:
+      - {name: "Christian McCaffrey", pos: RB, player_id: null, price: null, price_source: null}
+      - {name: "Zay Flowers",         pos: WR, player_id: null, price: null, price_source: null}
+  - owner: "Jake"
+    keepers:
+      - {name: "Jalen Hurts",         pos: QB, player_id: null, price: null, price_source: null}
+      - {name: "Jahmyr Gibbs",        pos: RB, player_id: null, price: null, price_source: null}
+  - owner: "Me"
+    keepers:
+      # WARNING: collision — Sleeper has both a QB and a defensive Josh Allen.
+      # Matching on name alone attaches the user's own keeper to the wrong player.
+      - {name: "Josh Allen",          pos: QB, player_id: null, price: null, price_source: null}
+      - {name: "Drake London",        pos: WR, player_id: null, price: null, price_source: null}
+  - owner: "Mason"
+    keepers:
+      - {name: "Ja'Marr Chase",       pos: WR, player_id: null, price: null, price_source: null}
+      - {name: "Amon-Ra St. Brown",   pos: WR, player_id: null, price: null, price_source: null}
+  - owner: "Connor"
+    keepers:
+      - {name: "Lamar Jackson",       pos: QB, player_id: null, price: null, price_source: null}
+      - {name: "Jaxon Smith-Njigba",  pos: WR, player_id: null, price: null, price_source: null}
+  - owner: "Keenan"
+    keepers:
+      # WARNING: two Williams on the slate — Caleb (QB) and Kyren (RB).
+      - {name: "Caleb Williams",      pos: QB, player_id: null, price: null, price_source: null}
+      - {name: "Kyren Williams",      pos: RB, player_id: null, price: null, price_source: null}
+  - owner: "Steve"
+    keepers:
+      - {name: "Trevor Lawrence",     pos: QB, player_id: null, price: null, price_source: null}
+      - {name: "Bijan Robinson",      pos: RB, player_id: null, price: null, price_source: null}
+  - owner: "Willie"
+    keepers:
+      - {name: "Jayden Daniels",      pos: QB, player_id: null, price: null, price_source: null}
+      - {name: "Jonathan Taylor",     pos: RB, player_id: null, price: null, price_source: null}
+  - owner: "Burt"
+    keepers:
+      - {name: "Breece Hall",         pos: RB, player_id: null, price: null, price_source: null}
+      - {name: "George Pickens",      pos: WR, player_id: null, price: null, price_source: null}
+  - owner: "TD"
+    keepers:
+      - {name: "Bo Nix",              pos: QB, player_id: null, price: null, price_source: null}
+      - {name: "Puka Nacua",          pos: WR, player_id: null, price: null, price_source: null}
