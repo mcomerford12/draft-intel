@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+*.db
+*.sqlite3
+fixtures/players.json
+fixtures/projections.json
