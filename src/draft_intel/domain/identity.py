@@ -30,8 +30,14 @@ class Identity:
         return self.slot_to_owner.get(slot, f"slot {slot}")
 
     def is_complete(self, teams: int) -> bool:
-        """Whether every draft slot resolved to an owner."""
-        return len(self.slot_to_owner) >= teams
+        """Whether every draft slot 1..teams resolved to an owner.
+
+        Checks membership, not count. Counting let three owners sitting on slots 11-13 report
+        complete for a 3-team league while :meth:`unmapped_slots` said 1, 2 and 3 were
+        missing -- and this is DI-043's acceptance criterion, so the criterion could be met
+        with the mapping still wrong.
+        """
+        return not self.unmapped_slots(teams)
 
     def unmapped_slots(self, teams: int) -> list[int]:
         return [s for s in range(1, teams + 1) if s not in self.slot_to_owner]
@@ -90,7 +96,16 @@ def build_identity(
             if name:
                 slot_to_owner[slot] = name
 
-    by_name = {name: slot for slot, name in slot_to_owner.items()}
+    # Two managers sharing a Sleeper display name would collapse last-wins and silently put
+    # both their keepers on one team. Ambiguous names are dropped, and the resulting shortfall
+    # is caught by `manifest_keys(require=)`.
+    seen: dict[str, int] = {}
+    ambiguous: set[str] = set()
+    for slot, name in slot_to_owner.items():
+        if name in seen:
+            ambiguous.add(name)
+        seen[name] = slot
+    by_name = {name: slot for name, slot in seen.items() if name not in ambiguous}
     owner_to_slot = dict(by_name)
     for manifest_owner, draft_name in aliases.items():
         if draft_name in by_name:
@@ -111,6 +126,7 @@ def manifest_keys(
     identity: Identity,
     *,
     require: int | None = None,
+    teams: int | None = None,
 ) -> frozenset[tuple[int, str]]:
     """Convert resolved manifest entries into the ``(slot, player_id)`` keys the classifier uses.
 
@@ -125,7 +141,10 @@ def manifest_keys(
 
     Args:
         require: Expected number of keys, normally ``teams * keepers_per_team``. Raises
-            :class:`UnresolvedManifest` naming the unmapped owners if fewer resolve.
+            :class:`UnresolvedManifest` if fewer resolve, naming the unmapped owners.
+        teams: Expected number of distinct draft slots. Checked as well as ``require``,
+            because counting keys alone passes when several owners collapse onto one slot:
+            four keepers on one team satisfies a count of four while three teams hold none.
     """
     keys: set[tuple[int, str]] = set()
     unmapped: set[str] = set()
@@ -135,11 +154,21 @@ def manifest_keys(
             unmapped.add(owner)
         else:
             keys.add((slot, player_id))
+
+    consequence = (
+        "Every unmapped keeper would be classified as a competitive bid and would poison "
+        "skew, inflation and tendency statistics for the whole draft."
+    )
     if require is not None and len(keys) != require:
         raise UnresolvedManifest(
             f"resolved {len(keys)} of {require} keeper keys; "
-            f"owners with no draft slot: {sorted(unmapped)}. "
-            "Every unmapped keeper would be classified as a competitive bid and would poison "
-            "skew, inflation and tendency statistics for the whole draft."
+            f"owners with no draft slot: {sorted(unmapped)}. {consequence}"
+        )
+    distinct = {slot for slot, _ in keys}
+    if teams is not None and len(distinct) != teams:
+        raise UnresolvedManifest(
+            f"keeper keys resolved onto {len(distinct)} distinct slots, expected {teams} "
+            f"(slots {sorted(distinct)}). Owners have collapsed onto the same slot, so some "
+            f"teams hold no keepers and others hold too many. {consequence}"
         )
     return frozenset(keys)

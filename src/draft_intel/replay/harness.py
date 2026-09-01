@@ -50,6 +50,16 @@ def replay_all(payload: list[dict[str, Any]], *, seq_start: int = 1) -> list[Eve
     return [event for _, event in replay_events(payload, seq_start=seq_start)]
 
 
+def replay_rejects(payload: list[dict[str, Any]]) -> list[str]:
+    """Everything the parser could not read faithfully across the whole feed.
+
+    Pass this into :func:`~draft_intel.domain.ledger.fold` as ``rejects``. A dropped row takes
+    its dollars and its roster spot with it, so the loss has to reach somewhere a consumer
+    looks -- this channel previously existed and was fed by nothing.
+    """
+    return parse_picks(payload).rejects
+
+
 def to_case_a(payload: list[dict[str, Any]], keeper_pick_nos: set[int]) -> list[dict[str, Any]]:
     """Synthesise the Case A twin of a Case B fixture.
 

@@ -7,7 +7,10 @@ while a team's budget has been wrong since 7:40pm.
 
 from __future__ import annotations
 
-from hypothesis import given, settings
+import math
+from fractions import Fraction
+
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from draft_intel.domain.keepers import retention_price
@@ -168,6 +171,12 @@ def test_manual_keeper_counted_exactly_once(slot, player_id, manual_amt, pick_am
     assert len(team.keepers) == 1
 
 
+@example(
+    chosen=[
+        PickSnapshot(pick_no=i, player_id=str(i), slot=1, amount=1, is_keeper=True)
+        for i in range(1, 4)
+    ]
+)
 @given(st.lists(picks, max_size=20, unique_by=lambda p: p.pick_no))
 @settings(max_examples=200, deadline=None)
 def test_no_team_exceeds_two_keepers_without_an_alert(chosen):
@@ -223,11 +232,16 @@ def test_diff_emits_amendments_and_removals():
 
 @given(st.integers(1, 200))
 def test_retention_price_floors_and_clamps(value):
-    """floor(0.75 * v), never below the $1 minimum bid."""
+    """floor(0.75 * v), never below the $1 minimum bid.
+
+    Computed with `Fraction` so this is an independent derivation rather than a
+    character-for-character restatement of the implementation line, which is what it was
+    before and which could not catch a wrong formula.
+    """
     price = retention_price(value)
-    assert price == max(1, (value * 3) // 4)
-    assert price >= 1
-    assert price <= value
+    expected = max(1, math.floor(Fraction(3, 4) * value))
+    assert price == expected
+    assert 1 <= price <= value
 
 
 def test_retention_price_boundaries():

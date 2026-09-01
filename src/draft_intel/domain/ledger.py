@@ -29,6 +29,7 @@ from draft_intel.models import (
     BudgetAdjustment,
     DerivedState,
     Event,
+    FrozenDict,
     ManualKeeper,
     PickAmended,
     PickClass,
@@ -51,11 +52,17 @@ def _default_classifier(pick: PickSnapshot) -> PickClass:
 def _ordered(events: Iterable[Event], alerts: list[str]) -> list[Event]:
     """Materialise and order the log by sequence number.
 
-    Two defects are closed here. The input is consumed exactly once, so a generator folds the
-    same as a list -- previously a generator was iterated twice and silently produced empty
-    state. And ordering is by ``seq`` rather than list position, so an out-of-order splice
-    (a replayed batch, a retry, a merge) cannot resurrect a removed pick or resolve competing
-    overrides backwards.
+    Three defects are closed here. The input is consumed exactly once, so a generator folds
+    the same as a list -- previously it was iterated twice and silently produced empty state.
+    Ordering is by ``seq`` rather than list position, so an out-of-order splice (a replayed
+    batch, a retry, a merge) cannot resurrect a removed pick. And ``UNSTAMPED`` events sort
+    **last**, not first.
+
+    That last point is subtle and cost a defect. ``seq == 0`` means "not yet through the
+    store", which makes such an event *newer* than anything the store has numbered -- it was
+    appended to an already-stamped log. Sorting zero first, as a naive numeric sort does, made
+    an unstamped ``PickRemoved`` a silent no-op that then blamed a feed divergence which had
+    not happened. Among themselves, unstamped events keep their arrival order.
     """
     materialised = list(events)
     seen: set[int] = set()
@@ -65,9 +72,12 @@ def _ordered(events: Iterable[Event], alerts: list[str]) -> list[Event]:
         if event.seq in seen:
             alerts.append(f"duplicate event seq {event.seq} ({event.kind}) - log is corrupt")
         seen.add(event.seq)
-    # Stable sort on seq alone: unstamped events keep their arrival order relative to
-    # each other and sort ahead of stamped ones.
-    return sorted(materialised, key=lambda e: e.seq)
+
+    def order(pair: tuple[int, Event]) -> tuple[int, int]:
+        arrival, event = pair
+        return (1, arrival) if event.seq == UNSTAMPED else (0, event.seq)
+
+    return [event for _, event in sorted(enumerate(materialised), key=order)]
 
 
 def _resolve_reverts(events: list[Event], alerts: list[str]) -> set[int]:
@@ -80,16 +90,29 @@ def _resolve_reverts(events: list[Event], alerts: list[str]) -> set[int]:
     by_seq = {e.seq: e for e in events if e.seq != UNSTAMPED}
     reverts = sorted((e for e in events if isinstance(e, Revert)), key=lambda e: e.seq)
 
-    # A revert that is itself reverted has no effect.
-    cancelled = {
-        r.target_seq
-        for r in reverts
-        if isinstance(by_seq.get(r.target_seq), Revert) and r.seq != UNSTAMPED
-    }
+    # Cancellation must be resolved transitively, to a fixed point, not in one flat pass.
+    # A revert is active unless some *active* revert targets it. Because a revert can only
+    # target something that already exists, every canceller has a higher seq than its target,
+    # so walking from the highest seq down settles each one before it is needed.
+    #
+    # The previous single-pass version cancelled every revert that was targeted at all,
+    # regardless of whether the canceller itself survived. That was correct at chain depths
+    # 0-2 and silently wrong at every odd depth from 3 up: the override simply stayed applied.
+    active: dict[int, bool] = {r.seq: True for r in reverts}
+    for revert in sorted(reverts, key=lambda e: e.seq, reverse=True):
+        if any(
+            active[other.seq]
+            for other in reverts
+            if other.target_seq == revert.seq and other.seq > revert.seq
+        ):
+            active[revert.seq] = False
 
     reverted: set[int] = set()
     for revert in reverts:
-        if revert.seq in cancelled:
+        if not active[revert.seq]:
+            continue
+        if revert.target_seq == revert.seq:
+            alerts.append(f"revert at seq {revert.seq} targets itself - ignored")
             continue
         if revert.target_seq == UNSTAMPED:
             alerts.append(
@@ -101,7 +124,7 @@ def _resolve_reverts(events: list[Event], alerts: list[str]) -> set[int]:
             alerts.append(f"revert targets seq {revert.target_seq}, which is not in the log")
             continue
         if isinstance(target, Revert):
-            continue  # handled via `cancelled`
+            continue  # its cancellation is carried by the `active` map above
         if target.kind not in OVERRIDE_KINDS:
             alerts.append(
                 f"refused: revert of seq {revert.target_seq} ({target.kind}). Only "
@@ -121,6 +144,7 @@ def fold(
     classifier: Classifier | None = None,
     max_keepers: int = 2,
     expect_keepers: bool = False,
+    rejects: Iterable[str] | None = None,
 ) -> DerivedState:
     """Replay ``events`` into a :class:`DerivedState`.
 
@@ -137,6 +161,9 @@ def fold(
         expect_keepers: When true, alert on teams holding *fewer* than ``max_keepers``. Set
             once the keeper phase should be complete; an under-count is as corrupting as an
             over-count and was previously invisible.
+        rejects: Ingestion complaints from :func:`~draft_intel.sleeper.poller.parse_picks`,
+            carried through so a dropped row and its lost dollars surface where a consumer
+            looks. This channel existed and was fed by nothing.
     """
     classify = classifier or _default_classifier
     alerts: list[str] = []
@@ -182,7 +209,12 @@ def fold(
     # about the slot for the same player. Matching on the pair left both records alive: the
     # player on two rosters, the money charged twice, silently. Player identity is the thing
     # that is actually stable.
-    picks_by_player = {p.player_id: p for p in picks.values()}
+    # Lowest pick_no wins when a player somehow appears twice. Building the map in event
+    # order made the winner depend on arrival order, so the same facts in a different sequence
+    # produced a different supersession message.
+    picks_by_player: dict[str, PickSnapshot] = {}
+    for pick in sorted(picks.values(), key=lambda p: p.pick_no):
+        picks_by_player.setdefault(pick.player_id, pick)
     for key, entry in list(manual.items()):
         actual = picks_by_player.get(entry.player_id)
         if actual is None:
@@ -231,22 +263,33 @@ def fold(
         )
     }
 
-    # Any slot named by any event gets a team, so money is never lost -- but a slot outside
-    # the declared league is a data error and says so. Previously an unknown slot either
-    # minted a phantom $200 team or, for a bare budget adjustment, was counted in
-    # override_delta while being applied to nothing, breaking reconciliation in silence.
+    # A slot outside the declared league gets NO team and NO budget. Minting one made the
+    # conservation identity meaningless, because bad input controlled the team count and the
+    # pot grew $200 at a time; counting its adjustment in override_delta broke reconciliation
+    # the other way. Its money is reported in `orphans` and alerted, never silently absorbed.
     declared = set(slots)
     referenced = (
         {p.slot for p in picks.values()} | {e.slot for e in manual.values()} | set(adjustments)
     )
+    orphans: list[str] = []
     for slot in sorted(referenced - declared):
-        alerts.append(
-            f"slot {slot} is referenced by an event but is not one of the league's "
-            f"{len(declared)} slots - check for a mistyped slot"
+        money = sum(p.amount for p in picks.values() if p.slot == slot)
+        money += sum(e.amount for e in manual.values() if e.slot == slot)
+        detail = f"${money} of picks" if money else "no picks"
+        adjustment = adjustments.get(slot)
+        if adjustment:
+            detail += f" and a ${adjustment} budget adjustment"
+        orphans.append(
+            f"slot {slot} is not one of the league's {len(declared)} slots ({detail}) - "
+            "not applied to any team; check for a mistyped slot"
         )
+        alerts.append(orphans[-1])
+    applied_adjustments = {s: d for s, d in adjustments.items() if s in declared}
 
-    rosters: dict[int, list[RosterEntry]] = {slot: [] for slot in declared | referenced}
+    rosters: dict[int, list[RosterEntry]] = {slot: [] for slot in declared}
     for pick in ordered_picks:
+        if pick.slot not in declared:
+            continue
         rosters[pick.slot].append(
             RosterEntry(
                 player_id=pick.player_id,
@@ -256,6 +299,8 @@ def fold(
             )
         )
     for entry in manual.values():
+        if entry.slot not in declared:
+            continue
         rosters[entry.slot].append(
             RosterEntry(
                 player_id=entry.player_id,
@@ -265,16 +310,16 @@ def fold(
             )
         )
 
-    teams: dict[int, TeamState] = {}
+    teams_built: dict[int, TeamState] = {}
     for slot, roster in sorted(rosters.items()):
         state = TeamState(
             slot=slot,
-            budget=budget + adjustments.get(slot, 0),
+            budget=budget + applied_adjustments.get(slot, 0),
             spent=sum(r.amount for r in roster),
             roster=tuple(roster),
             total_slots=total_slots,
         )
-        teams[slot] = state
+        teams_built[slot] = state
         keepers = len(state.keepers)
         if keepers > max_keepers:
             alerts.append(f"slot {slot} holds {keepers} keepers, limit is {max_keepers}")
@@ -293,11 +338,13 @@ def fold(
             )
 
     return DerivedState(
-        teams=teams,
-        competitive_seq=competitive_seq,
+        teams=FrozenDict(teams_built),
+        competitive_seq=FrozenDict(competitive_seq),
         # Every adjustment now lands on a team, so this is exactly the amount by which the
         # ledger legitimately departs from the full pot.
-        override_delta=sum(adjustments.values()),
+        override_delta=sum(applied_adjustments.values()),
         superseded=tuple(superseded),
         alerts=tuple(alerts),
+        rejects=tuple(rejects or ()),
+        orphans=tuple(orphans),
     )

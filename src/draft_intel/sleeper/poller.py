@@ -8,12 +8,18 @@ complete array against the previous one.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import ValidationError
 
 from draft_intel.models import Event, PickAmended, PickObserved, PickRemoved, PickSnapshot
+
+# Deliberately strict: a bid is an integer number of dollars. Scientific notation, hex,
+# underscores and non-ASCII digits are all refused rather than coerced into a wrong number.
+_INTEGER = re.compile(r"[+-]?[0-9]{1,9}")
+_DECIMAL = re.compile(r"[+-]?[0-9]{1,9}\.[0-9]{1,9}")
 
 
 @dataclass
@@ -32,34 +38,45 @@ class ParseResult:
 def parse_amount(raw: Any) -> tuple[int, str | None]:
     """Parse ``metadata.amount`` into ``(dollars, complaint)``.
 
-    Sleeper sends the winning bid as a string. Never raises -- a malformed amount must not
-    take the poller down mid-draft -- but every value it could not read faithfully comes back
-    with a complaint so the caller can surface it.
+    Sleeper sends the winning bid as a string. **This function never raises**, because one
+    malformed row must not take the poll cycle down mid-draft, and every value it could not
+    read faithfully comes back with a complaint for the caller to surface.
 
-    ``"35.0"``, ``"$35"`` and ``"1e2"`` all previously parsed to ``$0`` in silence. They now
-    parse to their real value where that is unambiguous, and complain where it is not.
+    Only a plain integer is accepted, after stripping a leading ``$`` and any thousands
+    commas. Everything else is refused loudly rather than coerced. An earlier version routed
+    unparseable text through ``float()``, which both raised on ``"inf"`` / ``"nan"`` /
+    ``"1e400"`` and silently accepted ``"1e2"`` as 100 -- a plausible-looking wrong number,
+    which is the failure this module exists to prevent.
     """
     if raw is None:
         return 0, "amount is null"
     if isinstance(raw, bool):  # bool is an int subclass; a bool here is never a bid
         return 0, f"amount is a bool ({raw!r})"
     if isinstance(raw, int):
-        return raw, None
+        return raw, (None if raw >= 0 else f"amount is negative ({raw})")
+    if isinstance(raw, float):
+        if raw != raw or raw in (float("inf"), float("-inf")):
+            return 0, f"amount is not a finite number ({raw!r})"
+        if raw != int(raw):
+            return int(raw), f"amount {raw!r} is fractional; truncated to {int(raw)}"
+        return int(raw), None
+
     text = str(raw).strip()
     if not text:
         return 0, "amount is empty"
     cleaned = text.removeprefix("$").replace(",", "")
-    try:
-        return int(cleaned), None
-    except ValueError:
-        pass
-    try:
-        value = float(cleaned)
-    except ValueError:
-        return 0, f"amount {text!r} is unparseable"
-    if value != int(value):
-        return int(value), f"amount {text!r} is fractional; truncated to {int(value)}"
-    return int(value), None
+    if _INTEGER.fullmatch(cleaned):
+        value = int(cleaned)
+        # A negative winning bid is never real. It sailed through before and produced a
+        # max_bid of $686 in a $200 league with no alert.
+        return value, (None if value >= 0 else f"amount is negative ({value})")
+    if _DECIMAL.fullmatch(cleaned):
+        whole = cleaned.split(".", 1)[0] or "0"
+        value = int(whole)
+        if float(cleaned) == value:
+            return value, None
+        return value, f"amount {text!r} is fractional; truncated to {value}"
+    return 0, f"amount {text!r} is unparseable"
 
 
 def parse_pick(raw: dict[str, Any]) -> tuple[PickSnapshot | None, str | None]:

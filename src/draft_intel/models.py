@@ -11,9 +11,8 @@ Two rules govern everything here and are worth stating once:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, NoReturn
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -32,6 +31,39 @@ class PickClass(StrEnum):
     KEEPER = "KEEPER"
     COMPETITIVE = "COMPETITIVE"
     FLAGGED = "FLAGGED"
+
+
+class FrozenDict(dict[Any, Any]):
+    """A dict that refuses mutation at runtime.
+
+    ``pydantic``'s ``frozen=True`` only blocks attribute rebinding, so a ``dict`` field on a
+    frozen model stays fully mutable -- ``state.teams[1] = ...`` silently succeeded, which is
+    the standing "never mutate derived state" rule broken by the very type meant to enforce
+    it. Derived state is only ever changed by appending an event and refolding.
+    """
+
+    _MSG = "derived state is immutable; append an event and refold instead"
+
+    def __setitem__(self, *_: Any) -> NoReturn:
+        raise TypeError(self._MSG)
+
+    def __delitem__(self, *_: Any) -> NoReturn:
+        raise TypeError(self._MSG)
+
+    def clear(self) -> NoReturn:
+        raise TypeError(self._MSG)
+
+    def pop(self, *_: Any, **__: Any) -> NoReturn:
+        raise TypeError(self._MSG)
+
+    def popitem(self) -> NoReturn:
+        raise TypeError(self._MSG)
+
+    def update(self, *_: Any, **__: Any) -> NoReturn:
+        raise TypeError(self._MSG)
+
+    def setdefault(self, *_: Any, **__: Any) -> NoReturn:
+        raise TypeError(self._MSG)
 
 
 class Frozen(BaseModel):
@@ -199,13 +231,14 @@ class TeamState(Frozen):
 class DerivedState(Frozen):
     """The complete result of folding the event log. Always recomputed, never patched.
 
-    ``frozen=True`` stops attribute rebinding but does not deep-freeze the mapping, so
-    ``teams`` is exposed as a read-only view. Mutating derived state is always a bug: the
-    only supported way to change it is to append an event and refold.
+    ``teams`` and ``competitive_seq`` are :class:`FrozenDict`, which refuses mutation at
+    runtime rather than merely discouraging it in the type annotation.
     """
 
-    teams: Mapping[int, TeamState]
-    competitive_seq: Mapping[int, int]
+    model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
+
+    teams: FrozenDict
+    competitive_seq: FrozenDict
     """Dense 1..N index over COMPETITIVE picks, in pick order.
 
     **Recomputed on every fold and deliberately not stable across folds.** Reclassifying or
@@ -219,7 +252,22 @@ class DerivedState(Frozen):
     override_delta: int
     superseded: tuple[str, ...]
     alerts: tuple[str, ...]
+
     rejects: tuple[str, ...] = ()
+    """Rows the poller could not parse faithfully, carried through from ingestion.
+
+    Wired end to end: a dropped row takes its dollars with it, so the loss must be visible
+    somewhere a consumer actually looks. Previously this field existed and was assigned by
+    nothing.
+    """
+
+    orphans: tuple[str, ...] = ()
+    """Events naming a draft slot outside the league.
+
+    Their money is deliberately NOT applied to any team -- minting a phantom $200 team made
+    the conservation identity meaningless, since bad input controlled the team count. The
+    money is reported here and alerted instead of being silently absorbed.
+    """
 
     @property
     def total_spent(self) -> int:

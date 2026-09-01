@@ -19,6 +19,7 @@ from draft_intel.domain.ledger import fold
 from draft_intel.models import (
     BudgetAdjustment,
     ManualKeeper,
+    PickAmended,
     PickClass,
     PickObserved,
     PickRemoved,
@@ -138,9 +139,12 @@ def test_the_equivalence_gate_is_not_vacuous(payload, classifier):
     assert broken_a.keeper_spend() == 0
     assert len(broken_a.competitive_seq) == 160
 
-    # Case B with the manifest emptied -- likewise.
-    broken_b = state_for(payload, KeeperClassifier(manifest_keys=frozenset()))
+    # Case B with is_keeper set but the manifest emptied. Distinct from broken_a: that one
+    # strips is_keeper, this one keeps it and removes the manifest. Both arms were previously
+    # the identical expression, so this half of the test asserted nothing.
+    broken_b = state_for(case_a_payload, lambda _p: PickClass.COMPETITIVE)
     assert broken_b.model_dump() != good_a.model_dump()
+    assert broken_b.keeper_spend() == 0
 
     # A constant classifier must not satisfy the gate.
     const = state_for(case_a_payload, lambda _p: PickClass.COMPETITIVE)
@@ -211,13 +215,34 @@ def test_manual_keeper_amount_mismatch_raises_a_loud_alert(payload, classifier):
 
 
 def test_max_bid_never_strands_a_team(payload, classifier):
-    """Mid-draft, every team must still be able to fill every remaining slot."""
+    """Bidding max_bid must always leave $1 for every other open slot.
+
+    The old form asserted `max_bid + (open_slots - 1) <= remaining` unconditionally, which is
+    false for a team that cannot afford $1 a slot: a broke team asserts `14 <= 0`. It was
+    green only because no team in the fixture goes broke before pick 90 - fixture luck, not a
+    property. The invariant that is actually true is stated below, and the underfunded case is
+    a separate, alerted condition rather than an assertion failure.
+    """
     partial = [p for p in payload if p["pick_no"] <= 90]
     state = state_for(partial, classifier)
     for team in state.teams.values():
-        if team.open_slots > 0:
+        assert team.max_bid >= 0
+        if team.open_slots <= 0:
+            assert team.max_bid == 0
+        elif team.remaining >= team.open_slots:
             assert team.max_bid + (team.open_slots - 1) <= team.remaining
-            assert team.max_bid >= 0
+            assert team.max_bid >= 1
+        else:
+            assert team.max_bid == 0  # cannot fill the roster; alerted, not asserted
+
+
+def test_broke_team_reports_zero_max_bid_and_alerts():
+    """The case the old assertion would have failed on, pinned deliberately."""
+    state = fold([obs(1, 1, "A", 1, 200)], slots=SLOTS)
+    team = state.teams[1]
+    assert team.remaining == 0 and team.open_slots == 15
+    assert team.max_bid == 0
+    assert any("cannot fill its roster" in a for a in state.alerts)
 
 
 # --------------------------------------------------------------------------------------
@@ -318,18 +343,28 @@ def test_competitive_seq_stays_dense_after_reclassification(payload, classifier)
 
 
 def test_budget_adjustment_for_an_unknown_slot_reconciles_and_alerts():
-    """Eval B2a: override_delta counted it while no budget received it."""
+    """Eval B2a, and the `+ 200` the first fix pass wrote into its own expected value.
+
+    An out-of-league adjustment must not be applied to anything AND must not be counted in
+    override_delta. The earlier version minted a phantom $200 team and then asserted
+    `2000 + override_delta + 200`, encoding the defect as the requirement -- the same species
+    of mistake as the 17-slot roster the first review flagged.
+    """
     state = fold([obs(1, 1, "A", 1, 50), BudgetAdjustment(seq=2, slot=11, delta=-40)], slots=SLOTS)
-    assert state.total_spent + state.total_remaining == 200 * len(state.teams) - 40
-    assert state.total_spent + state.total_remaining == 2000 + state.override_delta + 200
-    assert any("slot 11 is referenced" in a for a in state.alerts)
+    assert len(state.teams) == 10  # no phantom team
+    assert state.override_delta == 0  # not applied anywhere, so not counted
+    assert state.total_spent + state.total_remaining == 2000
+    assert state.orphans and "slot 11" in state.orphans[0]
+    assert any("slot 11" in a for a in state.alerts)
 
 
 def test_pick_on_an_unknown_slot_alerts_rather_than_minting_a_silent_team():
     """Eval B2b: an unknown slot used to appear as a fresh $200 team with no warning."""
     state = fold([obs(1, 1, "A", 1, 50), obs(2, 2, "B", 11, 5)], slots=SLOTS)
-    assert any("slot 11 is referenced" in a for a in state.alerts)
-    assert state.teams[11].spent == 5
+    assert 11 not in state.teams
+    assert len(state.teams) == 10
+    assert state.total_spent + state.total_remaining == 2000
+    assert state.orphans and "$5 of picks" in state.orphans[0]
 
 
 def test_over_roster_and_underfunded_teams_alert():
@@ -366,3 +401,124 @@ def test_malformed_rows_do_not_stop_the_poll_and_are_surfaced():
     assert any("99" in r or "validation" in r for r in result.rejects)
     assert any("missing player_id" in r for r in result.rejects)
     assert any("unparseable" in r for r in result.rejects)
+
+
+# --------------------------------------------------------------------------------------
+# Round-two regressions. Each fails against cb9babd (the first fix pass).
+# --------------------------------------------------------------------------------------
+
+
+def test_revert_chains_resolve_transitively():
+    """N2/eval-B1: cancellation was one flat pass, so odd chain depths >= 3 were wrong.
+
+    The earlier test stopped at depth 2 -- exactly the depth where the defect is invisible.
+    """
+    for depth in range(7):
+        events: list = [BudgetAdjustment(seq=1, slot=1, delta=-25)]
+        for step in range(depth):
+            events.append(Revert(seq=2 + step, target_seq=1 + step))
+        expected = 175 if depth % 2 == 0 else 200
+        assert fold(events, slots=SLOTS).teams[1].budget == expected, f"depth {depth}"
+
+
+def test_self_targeting_revert_is_refused():
+    state = fold(
+        [BudgetAdjustment(seq=1, slot=1, delta=-25), Revert(seq=2, target_seq=2)], slots=SLOTS
+    )
+    assert state.teams[1].budget == 175
+    assert any("targets itself" in a for a in state.alerts)
+
+
+def test_unstamped_events_apply_after_stamped_ones():
+    """N3: UNSTAMPED sorted first, so an unstamped removal was a silent no-op."""
+    log = [obs(1, 1, "A", 1, 50), obs(2, 2, "B", 1, 30)]
+    removed = fold([*log, PickRemoved(seq=0, pick_no=1)], slots=SLOTS)
+    assert removed.teams[1].spent == 30
+    assert not [a for a in removed.alerts if "diverged" in a]
+
+    amended = fold(
+        [
+            *log,
+            PickAmended(
+                seq=0,
+                pick=PickSnapshot(pick_no=1, player_id="A", slot=1, amount=5, is_keeper=False),
+            ),
+        ],
+        slots=SLOTS,
+    )
+    assert amended.teams[1].spent == 35
+
+
+def test_parse_amount_never_raises_on_the_hostile_cases():
+    """N1/eval-B2: 'inf', 'nan' and 1e400 raised straight out of parse_picks."""
+    from draft_intel.sleeper.poller import parse_amount, parse_picks
+
+    for hostile in ["INF", "inf", "-inf", "nan", "1e400", "9" * 4400, float("inf"), float("nan")]:
+        value, complaint = parse_amount(hostile)
+        assert type(value) is int
+        assert complaint
+    result = parse_picks(
+        [{"pick_no": 1, "draft_slot": 1, "player_id": "A", "metadata": {"amount": "INF"}}]
+    )
+    assert result.rejects and result.picks[1].amount == 0
+
+
+def test_scientific_notation_is_refused_not_coerced():
+    """A plausible-looking wrong number is the failure this module exists to prevent."""
+    from draft_intel.sleeper.poller import parse_amount
+
+    for sneaky in ["1e2", "1E5", "1_000", "0x20", "٣٥"]:
+        value, complaint = parse_amount(sneaky)
+        assert value == 0 and "unparseable" in (complaint or "")
+
+
+def test_negative_amounts_are_flagged():
+    """eval-m2: -500 gave max_bid $686 in a $200 league with zero alerts."""
+    from draft_intel.sleeper.poller import parse_amount
+
+    assert parse_amount("-5") == (-5, "amount is negative (-5)")
+    assert parse_amount(-5) == (-5, "amount is negative (-5)")
+
+
+def test_rejects_reach_derived_state(payload, classifier):
+    """eval-B3: the rejects channel was assigned by nothing; a dropped row lost $32 silently."""
+    import copy
+
+    from draft_intel.replay.harness import replay_rejects
+
+    broken = copy.deepcopy(payload)
+    victim = next(p for p in broken if p["pick_no"] == 30)
+    victim.pop("player_id")
+    victim["metadata"].pop("player_id")
+
+    state = fold(
+        replay_all(broken),
+        slots=SLOTS,
+        classifier=classifier,
+        rejects=replay_rejects(broken),
+    )
+    assert state.total_spent == 1947  # the money really is gone
+    assert state.rejects, "the loss must be visible somewhere a consumer looks"
+    assert any("missing player_id" in r for r in state.rejects)
+
+
+def test_derived_state_refuses_mutation(payload, classifier):
+    """M4: `teams` was a live dict; the docstring claimed a read-only view."""
+    state = state_for(payload, classifier)
+    for attempt in (
+        lambda: state.teams.__setitem__(99, None),
+        lambda: state.teams.clear(),
+        lambda: state.competitive_seq.update({1: 1}),
+    ):
+        with pytest.raises(TypeError, match="immutable"):
+            attempt()
+
+
+def test_supersession_winner_is_the_lowest_pick_no():
+    """N7: the winner depended on event arrival order for identical facts."""
+    manual = ManualKeeper(seq=1, slot=3, player_id="P", amount=30)
+    low, high = obs(2, 5, "P", 4, 40), obs(3, 9, "P", 7, 55)
+    forward = fold([manual, low, high], slots=SLOTS)
+    backward = fold([manual, high, low], slots=SLOTS)
+    assert "pick at $40" in forward.superseded[0]
+    assert forward.superseded == backward.superseded
