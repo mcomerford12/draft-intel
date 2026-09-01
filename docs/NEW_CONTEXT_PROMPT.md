@@ -23,7 +23,7 @@ recorded verdicts.
 The data spine (Sprint 1) works: `make replay` reproduces every team's budget to the dollar
 ($1,979 spent / $21 left / $549 keeper spend), the golden file has been independently
 re-derived three times, crash recovery survives a real `SIGKILL`, and CI is deterministic at
-92 tests / 96% coverage.
+118 tests.
 
 It has also been **REJECTED three times** by independent code review and adversarial
 evaluation, and several silent-money defects remain open. **Sprint 2 — the priced board — has
@@ -31,10 +31,10 @@ never been started.**
 
 ## Your task, in this order
 
-1. **Fix the three money-safety defects in handoff §4.1** (~30 lines total):
-   negative amounts reaching the ledger through `ManualKeeper`, a duplicate `pick_no` silently
-   losing its money, and `FrozenDict` missing `__ior__`. Each has a runnable reproduction in
-   the handoff.
+1. **Finish the one open money-safety defect in handoff §4.1**: a duplicate `pick_no` still
+   loses its money, surfaced only as a reject line with no alert and a wrong total reported as
+   if it were right. The other two (negative amounts, `FrozenDict.__ior__`) are closed in
+   commit `0da8214`.
 2. **Then stop working on Sprint 1.** Record §4.2 and §4.3 as known-open. They are all
    live-ingestion robustness and none of them touch the priced board.
 3. **Build Sprint 2** — cards DI-026 → DI-039, groomed with dependencies in `docs/KANBAN.md`.

@@ -10,10 +10,10 @@ touching anything.**
 The data spine (Sprint 1) works and is **rejected**. Three independent review rounds and
 three adversarial evaluation rounds have all returned REJECT. The replay ledger is exact, the
 golden file has been independently re-derived three times, crash recovery survives a real
-`SIGKILL`, and CI is now deterministic at 92 tests / 96% coverage. But each fix pass has
+`SIGKILL`, and CI is deterministic at 118 tests. But each fix pass has
 closed the named defects and introduced a new silent-money defect, three rounds running, and
-several remain open — including one where a negative keeper price silently produces a $686
-max bid in a $200 league. **Sprint 2, the priced board, has never been started.** The draft is
+several remain open. The three money-safety items are now closed or partial (§4.1); the
+duplicate-`pick_no` case still loses money. **Sprint 2, the priced board, has never been started.** The draft is
 in four days. The previous session was told to stop and write this document rather than
 attempt a fourth fix pass.
 
@@ -28,9 +28,9 @@ Separately, **the tool cannot connect to the real draft at all right now** (DI-0
 managers have not joined the league). Perfecting live ingestion for a draft it cannot reach is
 the wrong use of the remaining days.
 
-If you are picking this up with the deadline still live, the highest-value path is: fix the
-three money-safety items in §4.1 (roughly 30 lines), then **stop reviewing Sprint 1 and build
-the priced board.** A printed tier sheet with walk-away prices is worth more on draft night
+If you are picking this up with the deadline still live, the highest-value path is: finish the
+one remaining money-safety item in §4.1, then **stop reviewing Sprint 1 and build the priced
+board.** A printed tier sheet with walk-away prices is worth more on draft night
 than a perfect ledger with nothing to price.
 
 ---
@@ -71,7 +71,7 @@ of it independently more than once.
   no project code. Exact match every time.
 - **Crash recovery is real.** Tested with an actual `SIGKILL` at pick 77 (exit 137): 80 events
   survived, all seven event kinds round-trip byte-exact, resume folds to correct state.
-- **CI is deterministic.** 12/12 and 8/8 cold runs green after the parse fix. It was
+- **CI is deterministic.** 12/12 and 8/8 cold runs green after the parse fix; 118 tests as of `0da8214`. It was
   previously failing roughly 1 run in 3, which invalidated earlier "CI green" claims.
 - **The Case A / Case B gate is no longer vacuous.** Verified by deleting each classifier
   branch in turn; both now fail the gate. Contamination audit: dropping one manifest key moves
@@ -86,51 +86,44 @@ of it independently more than once.
 
 ## 4. What is broken — open defects with reproductions
 
-### 4.1 Money safety — fix these first if you fix anything
+### 4.1 Money safety — D1 and D3 CLOSED, D2 partial (commit `0da8214`)
 
-**D1. Negative amounts reach the ledger on two paths.** Raised in all three rounds, never
-closed. `ManualKeeper` — which the code itself designates the *primary* path for real keeper
-prices — never touches the parser at all:
-
-```python
-fold([ManualKeeper(seq=1, slot=1, player_id="P", amount=-500)], slots=range(1, 11))
-# spent -500  remaining 700  max_bid 686  alerts ()  rejects ()
-```
-
-And the string parser's decimal arm misses the sign check its integer arm applies:
+**D1. Negative amounts — CLOSED.** `parse_amount` now applies the sign check once, at a single
+exit, to whatever its reading arms return, so a fifth arm cannot be added around it. And `fold`
+alerts on any negative roster entry, which is the one point every ingestion path crosses —
+`ManualKeeper` included, which never touched the parser at all.
 
 ```
-parse_amount("-500")   -> (-500, 'amount is negative (-500)')   # guarded
-parse_amount("-500.0") -> (-500, None)                          # silent
+parse_amount("-500.0")                        -> (-500, 'amount is negative (-500)')
+fold([ManualKeeper(..., amount=-500)], ...)   -> spent -500  max_bid 686  alerts 1
 ```
 
-*Fix:* `ge=0` on `PickSnapshot.amount` and `ManualKeeper.amount`, **or** an alert in `fold`
-on any negative roster entry. Cover `"-5.0"`, `-5.0` and `ManualKeeper` in the test — the
-existing `test_negative_amounts_are_flagged` pins only the branch that was fixed and its own
-docstring names the case that still reproduces.
+Note the deliberate design choice: the absurd figure is still *recorded as observed* rather
+than clamped or dropped. What changed is that it is no longer silent. If you prefer refusal to
+observation, add `ge=0` to `PickSnapshot.amount` and `ManualKeeper.amount` — but decide it
+consciously, because recording-and-alerting is defensible for a ledger whose job is to reflect
+what the feed said.
 
-**D2. A duplicate `pick_no` silently loses its money.**
+**D2. Duplicate `pick_no` — PARTIALLY closed. Money is still lost.**
 
 ```
 two rows claiming pick_no 30 -> total_spent 1947 (should be 1979)
-conservation "holds"; rejects () orphans () alerts 0
+rejects 1   alerts 0   conservation still "holds"
 ```
 
-$32 gone with nothing reported. The snapshot map is keyed on `pick_no`, so the second row
-overwrites the first.
+The row is now surfaced through the rejects channel, so it is no longer invisible. **But $32 is
+still gone and no alert fires.** The snapshot map is keyed on `pick_no`, so the second row
+overwrites the first. If you fix one thing in this section, fix this: a reject line in a scroll
+is much weaker than an alert, and the ledger still reports a wrong total as if it were right.
 
-**D3. `FrozenDict` does not block `|=`.**
+**D3. `FrozenDict.__ior__` — CLOSED.** `state.teams |= {...}` no longer mutates.
 
-```python
-state.teams |= {99: None}   # mutation persists even though the operation raises
-```
-
-`__ior__` is inherited unblocked; the guard covers 7 of 8 mutating methods and the shipped
-test exercises 3. It also broke `copy`, `deepcopy`, `pickle` and `model_validate` round-trips
-(all raise), and replaced `Mapping[int, TeamState]` with `dict[Any, Any]`, so `mypy --strict`
-no longer catches item assignment anywhere in the project. **This was a bad trade** — a real
-static guarantee swapped for a runtime guard with a hole. Consider reverting to the `Mapping`
-annotation and closing the gap differently.
+The wider concern from the third review stands and is **not** addressed: `FrozenDict` is
+`dict[Any, Any]`, so replacing `Mapping[int, TeamState]` lost the static typing that made item
+assignment a `mypy --strict` error project-wide, and `copy`/`deepcopy`/`pickle`/`model_validate`
+round-trips raise. Not reachable from today's entry points; trivially reachable from a Sprint 3
+cockpit process boundary. Consider restoring the `Mapping` annotation and closing the mutation
+gap another way.
 
 ### 4.2 Correctness, lower severity
 
@@ -338,8 +331,8 @@ environment's egress policy. A 403 at CONNECT means it lapsed —
 
 ## 12. If you have four days
 
-1. **Fix §4.1 D1–D3** (~30 lines). D1 especially: it is a silent money error on the operator's
-   primary entry path and has survived three rounds.
+1. **Finish §4.1 D2** — a duplicate `pick_no` still loses its money with only a reject line to
+   show for it. D1 and D3 are closed (commit `0da8214`).
 2. **Stop the Sprint 1 review loop.** Document §4.2 and §4.3 as known-open. They are all live-
    ingestion robustness and none of them touch the priced board.
 3. **Build Sprint 2**, DI-026 → DI-039, with a single review pass per card rather than two.
