@@ -89,9 +89,12 @@ def replay() -> int:
     # The function existed from Sprint 1 and was called by nothing outside tests.
     expected: dict[int, list[tuple[str, int | None]]] = {}
     for (owner, player_id), entry in resolve_manifest(manifest, players).items():
-        slot = identity.slot_for(owner)
-        if slot is not None:
-            expected.setdefault(slot, []).append((player_id, entry.price))
+        # Deliberately not named `slot`: that name is already bound as an `int` by the
+        # ledger loop above, and reusing it here for an `int | None` is the kind of shadowing
+        # that reads as correct right up until someone moves one of the two loops.
+        owner_slot = identity.slot_for(owner)
+        if owner_slot is not None:
+            expected.setdefault(owner_slot, []).append((player_id, entry.price))
 
     total_keepers = config.teams * config.keepers_per_team
     print(

@@ -11,10 +11,11 @@ Two rules govern everything here and are worth stating once:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Annotated, Any, Literal, NoReturn
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 Slot = Annotated[int, Field(ge=1, le=32)]
 PlayerId = str
@@ -33,37 +34,68 @@ class PickClass(StrEnum):
     FLAGGED = "FLAGGED"
 
 
-class FrozenDict(dict[Any, Any]):
-    """A dict that refuses mutation at runtime.
+class FrozenDict[K, V](dict[K, V]):
+    """A mapping that refuses mutation at runtime.
 
-    ``pydantic``'s ``frozen=True`` only blocks attribute rebinding, so a ``dict`` field on a
-    frozen model stays fully mutable -- ``state.teams[1] = ...`` silently succeeded, which is
-    the standing "never mutate derived state" rule broken by the very type meant to enforce
-    it. Derived state is only ever changed by appending an event and refolding.
+    ``pydantic``'s ``frozen=True`` only blocks attribute rebinding, so a plain ``dict`` field
+    on a frozen model stays fully mutable -- ``state.teams[1] = ...`` silently succeeded,
+    which is the standing "never mutate derived state" rule broken by the very type meant to
+    enforce it. Derived state only ever changes by appending an event and refolding.
+
+    Two guarantees, and both are load-bearing:
+
+    *Statically*, the fields that hold one of these are annotated ``Mapping``, which has no
+    ``__setitem__`` at all, so ``mypy --strict`` rejects item assignment at the call site
+    across the whole project. An earlier version annotated them ``FrozenDict`` over
+    ``dict[Any, Any]``, which silently gave that up -- ``dict`` *does* declare
+    ``__setitem__``, so the type checker stopped objecting anywhere.
+
+    *At runtime*, every mutating operation ``dict`` defines is refused. Enumerating them one
+    at a time is how the previous version shipped with a hole: ``__ior__`` was inherited
+    unblocked, so ``state.teams |= {...}`` mutated in place and returned self, and only the
+    subsequent attribute rebinding raised. The exception was real; the refusal was not.
+    ``test_frozendict_guards_exactly_the_mutating_surface_of_dict`` pins the list.
+
+    ``__reduce__`` keeps ``copy``, ``deepcopy`` and ``pickle`` working. Without it they all
+    raised, because dict reconstruction goes through ``__setitem__``.
     """
 
     _MSG = "derived state is immutable; append an event and refold instead"
 
-    def __setitem__(self, *_: Any) -> NoReturn:
+    def _refuse(self, *_: Any, **__: Any) -> NoReturn:
         raise TypeError(self._MSG)
 
-    def __delitem__(self, *_: Any) -> NoReturn:
-        raise TypeError(self._MSG)
+    # Assigned rather than written out one def at a time, so the guarded set is a single
+    # list to audit instead of eight bodies to compare.
+    __setitem__ = _refuse
+    __delitem__ = _refuse
+    __ior__ = _refuse
+    clear = _refuse
+    pop = _refuse
+    popitem = _refuse
+    update = _refuse
+    setdefault = _refuse
 
-    def clear(self) -> NoReturn:
-        raise TypeError(self._MSG)
+    def __or__(self, other: Any) -> dict[Any, Any]:
+        """Non-mutating union, which yields a plain dict rather than a frozen one."""
+        return dict(self) | dict(other)
 
-    def pop(self, *_: Any, **__: Any) -> NoReturn:
-        raise TypeError(self._MSG)
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (self.__class__, (dict(self),))
 
-    def popitem(self) -> NoReturn:
-        raise TypeError(self._MSG)
 
-    def update(self, *_: Any, **__: Any) -> NoReturn:
-        raise TypeError(self._MSG)
+def _freeze[K, V](mapping: Mapping[K, V]) -> FrozenDict[K, V]:
+    """Re-wrap after validation.
 
-    def setdefault(self, *_: Any, **__: Any) -> NoReturn:
-        raise TypeError(self._MSG)
+    ``pydantic`` coerces a ``Mapping`` annotation to a plain ``dict``, so without this a
+    model built by ``model_validate`` -- the store round-trip, and every cockpit payload in
+    Sprint 3 -- would hand back live, mutable derived state.
+    """
+    return FrozenDict(mapping)
+
+
+Teams = Annotated[Mapping[int, "TeamState"], AfterValidator(_freeze)]
+CompetitiveSeq = Annotated[Mapping[int, int], AfterValidator(_freeze)]
 
 
 class Frozen(BaseModel):
@@ -231,14 +263,16 @@ class TeamState(Frozen):
 class DerivedState(Frozen):
     """The complete result of folding the event log. Always recomputed, never patched.
 
-    ``teams`` and ``competitive_seq`` are :class:`FrozenDict`, which refuses mutation at
-    runtime rather than merely discouraging it in the type annotation.
+    ``teams`` and ``competitive_seq`` are annotated ``Mapping``, so ``mypy --strict`` refuses
+    item assignment statically, and hold a :class:`FrozenDict`, which refuses every mutating
+    operation at runtime. Neither guarantee is sufficient alone: the annotation cannot see
+    dynamic access, and the runtime guard is only ever as complete as its method list.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", arbitrary_types_allowed=True)
 
-    teams: FrozenDict
-    competitive_seq: FrozenDict
+    teams: Teams
+    competitive_seq: CompetitiveSeq
     """Dense 1..N index over COMPETITIVE picks, in pick order.
 
     **Recomputed on every fold and deliberately not stable across folds.** Reclassifying or

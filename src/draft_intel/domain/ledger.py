@@ -181,10 +181,26 @@ def fold(
             continue
         match event:
             case PickObserved() | PickAmended():
-                if isinstance(event, PickAmended) and event.pick.pick_no not in picks:
+                existing = picks.get(event.pick.pick_no)
+                if isinstance(event, PickAmended) and existing is None:
                     alerts.append(
                         f"amendment for pick {event.pick.pick_no}, which was never observed - "
                         "the feed and the log have diverged"
+                    )
+                # A second *observation* of a pick number that already holds different
+                # contents is not an amendment - nothing declared a correction. One of the
+                # two is spurious and the loser's money silently leaves the ledger. An
+                # identical re-observation is just an idempotent poll and stays quiet.
+                elif (
+                    isinstance(event, PickObserved)
+                    and existing is not None
+                    and existing != event.pick
+                ):
+                    alerts.append(
+                        f"pick {event.pick.pick_no} observed twice with different contents: "
+                        f"{existing.player_id} at ${existing.amount} then "
+                        f"{event.pick.player_id} at ${event.pick.amount} - the later "
+                        f"observation wins and ${existing.amount} leaves the ledger"
                     )
                 picks[event.pick.pick_no] = event.pick
             case PickRemoved():
@@ -320,6 +336,22 @@ def fold(
             total_slots=total_slots,
         )
         teams_built[slot] = state
+        # A negative amount is never a real price, on any path. The parser guards the feed,
+        # but `ManualKeeper` -- the *primary* route by which real keeper prices enter, since
+        # Sleeper publishes no auction value -- never touches the parser at all. A single
+        # -$500 entry yielded spent -500, remaining 700 and a max bid of $686 in a $200
+        # league, with no alert. The fold is the one point every path crosses, so the guard
+        # belongs here rather than on each ingestion route.
+        for held in roster:
+            if held.amount < 0:
+                # Prefixed like the other money alerts rather than "slot N holds ...", which
+                # is already the prefix of both the keeper-limit and over-roster alerts. A
+                # test in the suite matched on that shared prefix and would have started
+                # passing for a third unrelated reason.
+                alerts.append(
+                    f"NEGATIVE AMOUNT slot {slot} / {held.player_id}: ${held.amount} is a "
+                    "negative price, which is never real; every figure for this team is suspect"
+                )
         keepers = len(state.keepers)
         if keepers > max_keepers:
             alerts.append(f"slot {slot} holds {keepers} keepers, limit is {max_keepers}")

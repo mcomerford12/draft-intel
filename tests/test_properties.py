@@ -183,7 +183,12 @@ def test_no_team_exceeds_two_keepers_without_an_alert(chosen):
     state = fold(_seq([PickObserved(pick=p) for p in chosen]), slots=SLOTS)
     for slot, team in state.teams.items():
         if len(team.keepers) > 2:
-            assert any(f"slot {slot} holds" in a for a in state.alerts)
+            # Match the keeper alert specifically. `f"slot {slot} holds"` is also the prefix
+            # of the over-roster alert, so this assertion passed on a completely different
+            # alert whenever a generated team exceeded 16 players -- which, drawing up to 20
+            # picks onto few slots, is most of the time.
+            wanted = f"slot {slot} holds {len(team.keepers)} keepers, limit is"
+            assert any(wanted in a for a in state.alerts)
 
 
 def apply_diff(previous, events):

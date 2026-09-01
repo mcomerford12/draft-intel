@@ -47,13 +47,28 @@ def parse_amount(raw: Any) -> tuple[int, str | None]:
     unparseable text through ``float()``, which both raised on ``"inf"`` / ``"nan"`` /
     ``"1e400"`` and silently accepted ``"1e2"`` as 100 -- a plausible-looking wrong number,
     which is the failure this module exists to prevent.
+
+    The negative guard is applied here, once, to whatever the arms below return. It was
+    previously written into the integer arm only, so ``"-500"`` was caught while
+    ``"-500.0"``, ``"-5.0"`` and the float ``-5.0`` all passed silently -- and a negative
+    keeper price produces a $686 max bid in a $200 league. A single exit is the only version
+    of this check that a fifth parsing arm cannot be added around.
     """
+    value, complaint = _read_amount(raw)
+    if value < 0:
+        negative = f"amount is negative ({value})"
+        return value, negative if complaint is None else f"{complaint}; {negative}"
+    return value, complaint
+
+
+def _read_amount(raw: Any) -> tuple[int, str | None]:
+    """Read a value without judging its sign; see :func:`parse_amount`."""
     if raw is None:
         return 0, "amount is null"
     if isinstance(raw, bool):  # bool is an int subclass; a bool here is never a bid
         return 0, f"amount is a bool ({raw!r})"
     if isinstance(raw, int):
-        return raw, (None if raw >= 0 else f"amount is negative ({raw})")
+        return raw, None
     if isinstance(raw, float):
         if raw != raw or raw in (float("inf"), float("-inf")):
             return 0, f"amount is not a finite number ({raw!r})"
@@ -66,15 +81,16 @@ def parse_amount(raw: Any) -> tuple[int, str | None]:
         return 0, "amount is empty"
     cleaned = text.removeprefix("$").replace(",", "")
     if _INTEGER.fullmatch(cleaned):
-        value = int(cleaned)
-        # A negative winning bid is never real. It sailed through before and produced a
-        # max_bid of $686 in a $200 league with no alert.
-        return value, (None if value >= 0 else f"amount is negative ({value})")
+        return int(cleaned), None
     if _DECIMAL.fullmatch(cleaned):
-        whole = cleaned.split(".", 1)[0] or "0"
-        value = int(whole)
-        if float(cleaned) == value:
+        whole, _, frac = cleaned.partition(".")
+        value = int(whole or "0")
+        if int(frac or "0") == 0:
             return value, None
+        # Truncate toward zero, so "-0.5" stays negative rather than reading as a clean $0
+        # and losing the sign the guard above is looking for.
+        if cleaned.startswith("-") and value == 0:
+            return 0, f"amount {text!r} is negative and fractional; truncated to 0"
         return value, f"amount {text!r} is fractional; truncated to {value}"
     return 0, f"amount {text!r} is unparseable"
 
@@ -121,14 +137,30 @@ def parse_pick(raw: dict[str, Any]) -> tuple[PickSnapshot | None, str | None]:
 
 
 def parse_picks(payload: list[dict[str, Any]]) -> ParseResult:
-    """Parse a whole payload, recording rather than swallowing every malformed entry."""
+    """Parse a whole payload, recording rather than swallowing every malformed entry.
+
+    The map is keyed on ``pick_no``, so two rows claiming one pick number collapse to the
+    later of them. That collision is inherent to the key and is not itself the defect -- the
+    defect was that it happened in silence, taking a real bid's dollars out of the ledger
+    while conservation still appeared to hold. Two rows at ``pick_no`` 30 moved the fixture's
+    total from $1,979 to $1,947 with zero rejects, zero orphans and zero alerts.
+    """
     result = ParseResult()
     for raw in payload:
         pick, complaint = parse_pick(raw)
         if complaint:
             result.rejects.append(complaint)
-        if pick is not None:
-            result.picks[pick.pick_no] = pick
+        if pick is None:
+            continue
+        existing = result.picks.get(pick.pick_no)
+        if existing is not None and existing != pick:
+            result.rejects.append(
+                f"pick {pick.pick_no} appears twice in one payload: "
+                f"{existing.player_id} at ${existing.amount} (slot {existing.slot}), then "
+                f"{pick.player_id} at ${pick.amount} (slot {pick.slot}) - the later row wins "
+                f"and ${existing.amount} leaves the ledger"
+            )
+        result.picks[pick.pick_no] = pick
     return result
 
 
