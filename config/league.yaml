@@ -1,0 +1,26 @@
+# Expected league shape. A TRIPWIRE, not a source of truth.
+#
+# Everything is derived from the API at boot and compared against this file. A commissioner
+# changing a setting the night before the draft is a realistic and catastrophic failure mode,
+# so a disagreement here is loud by design.
+#
+# Severity is graded (ADR-0002):
+#   BLOCKING - league.roster_positions or draft budget disagreeing with this file. Refuse to start.
+#   WARNING  - draft.settings disagreeing with league.roster_positions. Boot, banner loudly.
+#
+# The real league is ALREADY internally inconsistent: roster_positions says 2 QB / 0 DEF /
+# 6 BN / 16 slots, draft.settings says 1 QB / 1 DEF / 5 BN / 15 rounds, and max_keepers is 1
+# rather than 2. See docs/api-findings.md Finding 1 and KANBAN DI-004. roster_positions wins,
+# corroborated by draft.metadata.scoring_type == "2qb" and by the user's own mock draft.
+teams: 10
+budget: 200
+total_slots: 16
+keepers_per_team: 2
+bench: 6
+starters:
+  QB: 2
+  RB: 2
+  WR: 2
+  TE: 1
+  FLEX: 2
+  K: 1

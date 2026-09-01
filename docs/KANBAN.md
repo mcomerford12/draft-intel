@@ -19,7 +19,7 @@ conventional commits, squash-merge only after both verdicts, tag a release at ev
 | Sprint | State | Gate |
 |---|---|---|
 | Sprint 0 — Discovery & scaffolding | ⬜ In Review (PR #1) | Fixtures + findings ✅, league validated ⚠️ (fails, see DI-004) |
-| Sprint 1 — Data spine | ⬛ **REJECTED — review and eval** (PR #2) | Replay exact ✅, CI green ✅, Case A/B bit-identical ❌ (holds only on the mock fixture) — see DI-EVAL-1 |
+| Sprint 1 — Data spine | 🟨 **Fixes applied, awaiting re-review** (PR #2, #4) | Replay exact ✅, CI green ✅, Case A/B bit-identical ❌ (holds only on the mock fixture) — see DI-EVAL-1 |
 | Sprint 2 — Intelligence core | ⬜ Ready | `make prep` priced board, reviewed by a human |
 | Sprint 3 — Cockpit | ⬜ Backlog | Playwright 160-pick replay, p99 ≤ 2s |
 | Sprint 4 — Hardening | ⬜ Backlog | 60-minute rehearsal ×2 |
@@ -27,6 +27,19 @@ conventional commits, squash-merge only after both verdicts, tag a release at ev
 ---
 
 ## Blocked
+
+### [DI-043] Six managers have not joined the league — manifest cannot fully resolve
+- **Sprint:** 1 · **Owner:** user/commissioner · **Size:** S · **Surfaced by:** DI-EVAL-1 B1
+- Only 4 of 10 managers have joined, so slot-to-owner resolves 8 of 20 keeper keys against
+  the real league. `manifest_keys(require=20)` now raises loudly rather than silently
+  classifying the other 12 keepers as competitive bids, but the tool cannot run against the
+  real draft until the remaining six join: **Jake, Connor, Keenan, Willie, Burt, TD.**
+- Their Sleeper display names are also unknown until then, so `config/owners.yaml` cannot be
+  completed. The four known are `mattchupiccu`, `ajthebeard`, `MasonWAlpert`, `steeveegee300`.
+- **Acceptance criteria:**
+  - [ ] All 10 managers joined; `build_identity(...).is_complete(10)` is true
+  - [ ] `config/owners.yaml` maps all 10 manifest owners to display names
+  - [ ] `manifest_keys(require=20)` resolves without raising
 
 ### [DI-004] League settings contradict themselves — commissioner action required
 - **Sprint:** 0 · **Owner:** user/commissioner · **Size:** S
@@ -141,6 +154,37 @@ is unsafe as a diff key under renumbering · M10 four production dependencies wi
 importing none of the project code; no `roster_id` keying; no runtime name matching; no keeper
 branch in the money ledger; no websocket/GraphQL; breaker counts one logical call as one
 failure; ruff, mypy --strict, 55 tests, 97% coverage all as claimed.
+
+### [DI-042] Fix all blocking findings from DI-040 and DI-EVAL-1
+- **Sprint:** 1 · **Owner:** data-engineer · **Size:** L · **Branch:** `di-042-review-fixes`
+- **Status:** fixes applied, CI green (82 tests, 97%). Awaiting re-review and re-evaluation.
+- 13 of the new regression tests were run against commit `fa4f177` in a worktree and **fail
+  there**, confirming they encode the defects rather than restating the fix.
+- **Blocking findings closed:**
+  - [x] B1 `fold` consumes `events` once; generators fold identically to lists
+  - [x] B2 `Revert` refuses any non-override target and alerts; `OVERRIDE_KINDS` now wired
+  - [x] B3 a `Revert` may itself be reverted, reinstating the override
+  - [x] B4 `UNSTAMPED` named; `Revert(target_seq=0)` refused; duplicate seq alerts
+  - [x] B5 fold orders by `seq`, not list position
+  - [x] B6 supersession keys on `player_id` alone; slot mismatch alerts, counted once
+  - [x] B7 `competitive_seq` documented as recompute-only, never to be cached; coherence tested
+  - [x] B8 malformed rows never raise out of `parse_picks`
+  - [x] B9 `parse_amount` reads `"35.0"`, `"$35"`, `"1,200"`; everything unreadable is surfaced
+        through a new `ParseResult.rejects` channel
+  - [x] B10 money properties compare `spent` against an independent replay of the log
+  - [x] B11 Case A gets an empty manifest and Case B the full one, so each case relies on the
+        mechanism it would really have; a companion test proves the gate is not vacuous
+  - [x] B12 diff round-trip now runs between arbitrary snapshots; amend/remove branches covered
+  - [x] eval-B1 roster/user fallback for slot-to-owner; `manifest_keys(require=)` raises
+  - [x] eval-B2 unknown slots alert; every adjustment lands on a team so reconciliation holds
+  - [x] eval-B3 covered by B6
+- **Major also closed:** M1 rate floor holds across retries and under concurrency ·
+  M2 4xx no longer retried, 404 no longer clears the breaker · M3 over-roster and
+  underfunded-team alerts · M4 `teams` exposed as a `Mapping` · M6 `config/league.yaml`
+  now exists and is loaded · keeper under-count alerts via `expect_keepers`
+- **Deferred with reason:** M5 (some league constants still inline in `cli.py`, a Sprint-1
+  hand harness) · M9 partially — the diff now emits remove+observe on a `pick_no` that
+  changes player, but `Reclassify` still keys on `pick_no` · M10 dependency ADR not written
 
 ### [DI-041] Independence enforcement is weaker than claimed
 - **Sprint:** 0 · **Owner:** orchestrator · **Size:** S

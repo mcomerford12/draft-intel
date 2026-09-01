@@ -70,13 +70,28 @@ class SleeperClient:
     max_retries: int = 3
     backoff_base: float = 0.5
     breaker: Breaker = field(default_factory=Breaker)
-    _last_request: float = 0.0
+    _last_request: float | None = None
+    _gate: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def _throttle(self) -> None:
-        elapsed = time.monotonic() - self._last_request
-        if elapsed < MIN_POLL_INTERVAL and self._last_request:
-            await asyncio.sleep(MIN_POLL_INTERVAL - elapsed)
-        self._last_request = time.monotonic()
+        """Hold every caller to one request per second, globally.
+
+        Two defects are closed here. The lock makes the floor hold under concurrency -- four
+        concurrent calls previously fired three of them simultaneously, degrading the floor to
+        one-second-per-burst. And callers now throttle before *each* attempt rather than once
+        per logical call, so a retry storm cannot exceed the floor: retries were sleeping
+        0.5s and 1.0s of backoff and issuing requests 502ms apart, which is exactly when an
+        IP block is most likely and most unrecoverable.
+
+        ``None`` rather than ``0.0`` marks "no request yet", so the first call is not gated by
+        a truthiness test on a monotonic timestamp.
+        """
+        async with self._gate:
+            if self._last_request is not None:
+                elapsed = time.monotonic() - self._last_request
+                if elapsed < MIN_POLL_INTERVAL:
+                    await asyncio.sleep(MIN_POLL_INTERVAL - elapsed)
+            self._last_request = time.monotonic()
 
     async def get_json(self, url: str, *, throttle: bool = True) -> Any:
         """GET with retries, exponential backoff and breaker accounting.
@@ -87,15 +102,17 @@ class SleeperClient:
         """
         if self.breaker.is_open():
             raise CircuitOpen(f"circuit open, not calling {url}")
-        if throttle:
-            await self._throttle()
 
         last: Exception | None = None
         for attempt in range(self.max_retries):
+            if throttle:
+                await self._throttle()
             try:
                 response = await self.client.get(url, timeout=self.timeout)
                 if response.status_code == 404:
-                    self.breaker.record_success()
+                    # An answer, not a failure: the undocumented endpoints are allowed not to
+                    # exist. Deliberately does NOT clear the breaker - a 404 from
+                    # api.sleeper.com must not reset the failure count for the v1 endpoints.
                     return None
                 if response.status_code == 429 or response.status_code >= 500:
                     raise httpx.HTTPStatusError(
@@ -103,15 +120,23 @@ class SleeperClient:
                         request=response.request,
                         response=response,
                     )
-                response.raise_for_status()
+                # A 4xx other than 404 is a request we got wrong. Retrying cannot fix it and
+                # only spends rate budget, so it fails immediately without breaker credit.
+                if response.status_code >= 400:
+                    response.raise_for_status()
                 self.breaker.record_success()
                 return response.json()
-            except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code < 500 and exc.response.status_code != 429:
+                    raise
                 last = exc
-                if attempt < self.max_retries - 1:
-                    await asyncio.sleep(self.backoff_base * (2**attempt))
+            except httpx.TransportError as exc:
+                last = exc
+            if attempt < self.max_retries - 1:
+                await asyncio.sleep(self.backoff_base * (2**attempt))
         self.breaker.record_failure()
-        assert last is not None
+        if last is None:  # pragma: no cover - defensive; the loop always sets it
+            raise RuntimeError(f"retries exhausted for {url} with no recorded error")
         raise last
 
     # -- endpoints -----------------------------------------------------------

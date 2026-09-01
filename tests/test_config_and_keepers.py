@@ -6,16 +6,18 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from draft_intel.config import (
     ConfigMismatch,
     LeagueConfig,
     Severity,
     assert_startable,
+    load_league_config,
     positions_from_roster,
     validate,
 )
-from draft_intel.domain.identity import build_identity, manifest_keys
+from draft_intel.domain.identity import UnresolvedManifest, build_identity, manifest_keys
 from draft_intel.domain.keepers import (
     AmbiguousPlayer,
     load_manifest,
@@ -175,3 +177,62 @@ def test_unmapped_owners_are_dropped_not_guessed(players):
     keys = manifest_keys(resolved, partial)
     assert len(keys) == 2
     assert all(slot == 1 for slot, _ in keys)
+
+
+# --------------------------------------------------------------------------------------
+# Regressions for the identity findings (DI-EVAL-1 B1) and the missing config file (M6).
+# --------------------------------------------------------------------------------------
+
+
+def test_real_draft_has_no_slot_names_at_all(real_draft):
+    """The premise of the draft-night defect, pinned so it cannot regress silently."""
+    metadata = real_draft.get("metadata") or {}
+    assert not [k for k in metadata if k.startswith("slot_name_")]
+
+
+def test_roster_user_fallback_resolves_owners_the_draft_object_cannot(real_draft):
+    """B1: metadata alone resolved ZERO owners against the real league."""
+    rosters = json.loads((FIXTURES / "rosters.json").read_text())
+    users = json.loads((FIXTURES / "users.json").read_text())
+
+    assert build_identity(real_draft).slot_to_owner == {}
+
+    identity = build_identity(real_draft, rosters=rosters, users=users)
+    assert identity.slot_for("mattchupiccu") == 3  # the user's own roster_id
+    assert len(identity.slot_to_owner) == 4  # only 4 of 10 managers have joined
+    assert not identity.is_complete(10)
+    assert identity.unmapped_slots(10) == [5, 6, 7, 8, 9, 10]
+
+
+def test_partial_manifest_raises_instead_of_silently_miscounting(players, real_draft):
+    """B1: dropping unmapped owners silently turned every keeper into a competitive bid."""
+    rosters = json.loads((FIXTURES / "rosters.json").read_text())
+    users = json.loads((FIXTURES / "users.json").read_text())
+    manifest = load_manifest(ROOT / "config" / "keepers.yaml")
+    resolved = resolve_manifest(manifest, players)
+    aliases = yaml.safe_load((ROOT / "config" / "owners.yaml").read_text())["aliases"]
+    identity = build_identity(real_draft, rosters=rosters, users=users, aliases=aliases)
+
+    # Without `require` the old silent behaviour is still reachable, and is wrong.
+    assert len(manifest_keys(resolved, identity)) < 20
+
+    with pytest.raises(UnresolvedManifest, match="competitive bid"):
+        manifest_keys(resolved, identity, require=20)
+
+
+def test_mock_draft_manifest_resolves_completely(players):
+    """The fixture path must still resolve all 20, or the replay gate means nothing."""
+    draft = json.loads((FIXTURES / "draft.json").read_text())
+    manifest = load_manifest(ROOT / "config" / "keepers.yaml")
+    identity = build_identity(draft, aliases={"Me": "Matt"})
+    assert len(manifest_keys(resolve_manifest(manifest, players), identity, require=20)) == 20
+
+
+def test_league_config_file_exists_and_matches_the_live_league(real_league):
+    """M6: the error message and ADR-0002 both named a file that did not exist."""
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    assert config.starters == positions_from_roster(real_league["roster_positions"])
+    assert config.total_slots == len(real_league["roster_positions"])
+    assert assert_startable(
+        validate(config, real_league, json.loads((FIXTURES / "real_draft.json").read_text()))
+    )  # warnings, but startable

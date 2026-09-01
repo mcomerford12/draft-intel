@@ -16,7 +16,7 @@ import yaml
 
 from draft_intel.config import LeagueConfig, Severity, assert_startable, validate
 from draft_intel.domain.classify import KeeperClassifier, keepers_seen
-from draft_intel.domain.identity import build_identity, manifest_keys
+from draft_intel.domain.identity import Identity, build_identity, manifest_keys
 from draft_intel.domain.keepers import load_manifest, resolve_manifest
 from draft_intel.domain.ledger import fold
 from draft_intel.replay.harness import load_picks, replay_all
@@ -31,17 +31,19 @@ LEAGUE_ID = "1391959336820953088"
 REAL_DRAFT_ID = "1391959337445920768"
 
 
-def _aliases() -> dict[str, str]:
+def _aliases(key: str = "aliases") -> dict[str, str]:
     data = yaml.safe_load((CONFIG / "owners.yaml").read_text()) or {}
-    return dict(data.get("aliases") or {})
+    merged = dict(data.get("aliases") or {})
+    merged.update(data.get(key) or {} if key != "aliases" else {})
+    return merged
 
 
-def _classifier(draft: dict[str, Any], players: dict[str, Any]) -> KeeperClassifier:
+def _classifier(
+    draft: dict[str, Any], players: dict[str, Any], identity: Identity, *, require: int | None
+) -> KeeperClassifier:
     manifest = load_manifest(CONFIG / "keepers.yaml")
-    identity = build_identity(draft, aliases=_aliases())
-    return KeeperClassifier(
-        manifest_keys=manifest_keys(resolve_manifest(manifest, players), identity)
-    )
+    resolved = resolve_manifest(manifest, players)
+    return KeeperClassifier(manifest_keys=manifest_keys(resolved, identity, require=require))
 
 
 def replay() -> int:
@@ -49,8 +51,13 @@ def replay() -> int:
     payload = load_picks(FIXTURES / "picks.json")
     draft = json.loads((FIXTURES / "draft.json").read_text())
     players = json.loads((FIXTURES / "players_slim.json").read_text())
-    identity = build_identity(draft, aliases=_aliases())
-    state = fold(replay_all(payload), slots=range(1, 11), classifier=_classifier(draft, players))
+    identity = build_identity(draft, aliases=_aliases("mock_aliases"))
+    state = fold(
+        replay_all(payload),
+        slots=range(1, 11),
+        classifier=_classifier(draft, players, identity, require=20),
+        expect_keepers=True,
+    )
 
     print(
         f"{'slot':>4}  {'owner':<8} {'picks':>5} {'keep':>4} {'spent':>6} {'left':>5} {'maxbid':>7}"

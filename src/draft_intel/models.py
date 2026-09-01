@@ -11,6 +11,7 @@ Two rules govern everything here and are worth stating once:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Annotated, Literal
 
@@ -58,8 +59,17 @@ class PickSnapshot(Frozen):
 # ---------------------------------------------------------------------------
 
 
+UNSTAMPED = 0
+"""Sequence number of an event that has not yet been through the store.
+
+Zero is deliberately not a usable target: a ``Revert`` aimed at it would neutralise every
+event that had not yet been stamped. :func:`draft_intel.domain.ledger.fold` rejects such a
+revert with an alert rather than honouring it.
+"""
+
+
 class _Event(Frozen):
-    seq: int = 0
+    seq: int = UNSTAMPED
     ts: float = 0.0
 
 
@@ -119,7 +129,14 @@ class Reclassify(_Event):
 
 
 class Revert(_Event):
-    """Neutralise an earlier override event by sequence number."""
+    """Neutralise an earlier override event by sequence number.
+
+    Only the kinds in :data:`OVERRIDE_KINDS` may be reverted. A revert aimed at a pick event
+    is refused with an alert: the picks feed is the authority for money, and letting an
+    override event delete a settled pick would silently destroy a team's spend.
+
+    A ``Revert`` may itself be reverted, which reinstates the override it had neutralised.
+    """
 
     kind: Literal["revert"] = "revert"
     target_seq: int
@@ -180,13 +197,29 @@ class TeamState(Frozen):
 
 
 class DerivedState(Frozen):
-    """The complete result of folding the event log. Always recomputed, never patched."""
+    """The complete result of folding the event log. Always recomputed, never patched.
 
-    teams: dict[int, TeamState]
-    competitive_seq: dict[int, int]
+    ``frozen=True`` stops attribute rebinding but does not deep-freeze the mapping, so
+    ``teams`` is exposed as a read-only view. Mutating derived state is always a bug: the
+    only supported way to change it is to append an event and refold.
+    """
+
+    teams: Mapping[int, TeamState]
+    competitive_seq: Mapping[int, int]
+    """Dense 1..N index over COMPETITIVE picks, in pick order.
+
+    **Recomputed on every fold and deliberately not stable across folds.** Reclassifying or
+    reversing a pick renumbers every competitive pick after it, which is semantically correct
+    -- a pick that is no longer competitive should not occupy a position in the competitive
+    sequence. The constraint this places on consumers is absolute: **never persist, cache or
+    key long-lived state on a ``competitive_seq`` value.** Recompute time series wholesale
+    from the current fold. See ADR-0001.
+    """
+
     override_delta: int
     superseded: tuple[str, ...]
     alerts: tuple[str, ...]
+    rejects: tuple[str, ...] = ()
 
     @property
     def total_spent(self) -> int:

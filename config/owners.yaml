@@ -1,10 +1,21 @@
 # Manifest owner name -> the name Sleeper carries for that draft slot.
 #
-# Only needed where the two differ. The user's manifest calls their own team "Me";
-# Sleeper's draft metadata calls slot 3 "Matt".
+# Slots are resolved live, from draft.metadata.slot_name_{n} where it exists and otherwise
+# by joining slot_to_roster_id through /league/{id}/rosters and /league/{id}/users. The real
+# league draft object carries NO slot_name_* keys, so the roster/user join is the only path
+# that works in production (docs/api-findings.md Finding 9, and DI-EVAL-1 B1).
 #
-# Deliberately NOT a slot number mapping. Slots are resolved live from
-# draft.metadata.slot_name_{n}, because only 4 of 10 managers have joined the real league
-# and the mapping will keep changing until draft day (docs/api-findings.md, Finding 9).
+# Sleeper display names, for the four managers who have joined so far. The remaining six
+# cannot be mapped until they join the league; manifest_keys(require=20) raises loudly rather
+# than silently classifying their keepers as competitive bids.
 aliases:
+  Me: mattchupiccu
+  AJ: ajthebeard
+  Mason: MasonWAlpert
+  Steve: steeveegee300
+  # Unjoined, display names unknown: Jake, Connor, Keenan, Willie, Burt, TD.
+  # The mock draft used short names, which the join above also covers via slot_name_*.
+
+# Fallback aliases for the mock draft fixture, which carries short slot names.
+mock_aliases:
   Me: Matt

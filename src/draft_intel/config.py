@@ -21,7 +21,10 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 
 @dataclass(frozen=True)
@@ -47,7 +50,12 @@ class ConfigIssue:
 
 @dataclass(frozen=True)
 class LeagueConfig:
-    """Expected league shape. Compared against the live API, never trusted over it."""
+    """Expected league shape. Compared against the live API, never trusted over it.
+
+    Load from ``config/league.yaml`` with :func:`load_league_config` rather than editing the
+    defaults here. The error message points a commissioner at that file, and it previously
+    did not exist.
+    """
 
     teams: int = 10
     budget: int = 200
@@ -65,6 +73,19 @@ class LeagueConfig:
 
 class ConfigMismatch(Exception):
     """Raised at boot when the live league contradicts the expected configuration."""
+
+
+def load_league_config(path: str | Path = "config/league.yaml") -> LeagueConfig:
+    """Load the tripwire values from ``config/league.yaml``."""
+    data = yaml.safe_load(Path(path).read_text()) or {}
+    return LeagueConfig(
+        teams=int(data["teams"]),
+        budget=int(data["budget"]),
+        total_slots=int(data["total_slots"]),
+        keepers_per_team=int(data["keepers_per_team"]),
+        bench=int(data["bench"]),
+        starters={str(k): int(v) for k, v in (data.get("starters") or {}).items()},
+    )
 
 
 def positions_from_roster(roster_positions: list[str]) -> dict[str, int]:

@@ -55,11 +55,45 @@ def event_logs(draw):
     return _seq(events)
 
 
+def expected_spend(events):
+    """Independently replay the log to per-slot spend, without using any ledger code.
+
+    This is the whole point of the rewrite: `remaining` is *defined* as `budget - spent`, so
+    asserting `spent + remaining == 2000` is an algebraic identity that holds for any value
+    of `spent`, including a badly wrong one. The old property could not fail. This one
+    compares the ledger's arithmetic against a second, independent implementation.
+    """
+    live = {}
+    for e in sorted(events, key=lambda e: e.seq):
+        if isinstance(e, PickObserved | PickAmended):
+            live[e.pick.pick_no] = (e.pick.slot, e.pick.amount)
+        elif isinstance(e, PickRemoved):
+            live.pop(e.pick_no, None)
+    spend = dict.fromkeys(SLOTS, 0)
+    for slot, amount in live.values():
+        spend[slot] = spend.get(slot, 0) + amount
+    return spend, len(live)
+
+
+@given(event_logs())
+@settings(max_examples=200, deadline=None)
+def test_spend_matches_an_independent_replay(events):
+    """The ledger's per-team spend must equal a separately computed replay of the same log."""
+    state = fold(events, slots=SLOTS)
+    spend, total_picks = expected_spend(events)
+    assert {s: t.spent for s, t in state.teams.items()} == spend
+    assert sum(t.filled_slots for t in state.teams.values()) == total_picks
+    assert state.total_spent == sum(spend.values())
+    assert state.override_delta == 0
+
+
 @given(event_logs())
 @settings(max_examples=200, deadline=None)
 def test_money_conservation_without_overrides(events):
-    """Spent plus remaining is always the full pot, after any add/remove/edit sequence."""
+    """Spent plus remaining is the full pot -- and spent is independently correct."""
     state = fold(events, slots=SLOTS)
+    spend, _ = expected_spend(events)
+    assert state.total_spent == sum(spend.values())  # guards the identity below
     assert state.total_spent + state.total_remaining == 10 * 200
     assert state.override_delta == 0
 
@@ -73,8 +107,11 @@ def test_ledger_reconciles_exactly_with_overrides(events, corrections):
     What must hold is that the discrepancy is exactly accountable.
     """
     extra = [BudgetAdjustment(slot=s, delta=d) for s, d in corrections]
-    state = fold(_seq([*events, *extra]), slots=SLOTS)
+    log = _seq([*events, *extra])
+    state = fold(log, slots=SLOTS)
+    spend, _ = expected_spend(log)
     total = sum(d for _, d in corrections)
+    assert state.total_spent == sum(spend.values())  # spend is right, not just self-consistent
     assert state.override_delta == total
     assert state.total_spent + state.total_remaining == 10 * 200 + total
 
@@ -140,20 +177,48 @@ def test_no_team_exceeds_two_keepers_without_an_alert(chosen):
             assert any(f"slot {slot} holds" in a for a in state.alerts)
 
 
-@given(st.lists(picks, max_size=20, unique_by=lambda p: p.pick_no))
-@settings(max_examples=200, deadline=None)
-def test_snapshot_diff_round_trips(chosen):
-    """Applying the diff to the old snapshot must produce the new one, whatever changed."""
-    current = {p.pick_no: p for p in chosen}
-    events = diff_snapshots({}, current)
-    rebuilt: dict[int, PickSnapshot] = {}
+def apply_diff(previous, events):
+    rebuilt = dict(previous)
     for event in events:
         if isinstance(event, PickObserved | PickAmended):
             rebuilt[event.pick.pick_no] = event.pick
         elif isinstance(event, PickRemoved):
             rebuilt.pop(event.pick_no, None)
-    assert rebuilt == current
+    return rebuilt
+
+
+@given(
+    st.lists(picks, max_size=12, unique_by=lambda p: p.pick_no),
+    st.lists(picks, max_size=12, unique_by=lambda p: p.pick_no),
+)
+@settings(max_examples=300, deadline=None)
+def test_snapshot_diff_round_trips_between_arbitrary_states(before, after):
+    """The diff must carry ANY snapshot to ANY other.
+
+    The previous version only ever diffed from an empty snapshot, so it emitted nothing but
+    observations -- the amendment and removal branches, which are the entire reason this
+    module exists, were never executed at all.
+    """
+    previous = {p.pick_no: p for p in before}
+    current = {p.pick_no: p for p in after}
+    assert apply_diff(previous, diff_snapshots(previous, current)) == current
     assert diff_snapshots(current, current) == []
+
+
+def test_diff_emits_amendments_and_removals():
+    """Named, deterministic coverage of the two branches that matter."""
+    a = PickSnapshot(pick_no=1, player_id="A", slot=1, amount=10, is_keeper=False)
+    b = PickSnapshot(pick_no=2, player_id="B", slot=2, amount=20, is_keeper=False)
+    a_repriced = a.model_copy(update={"amount": 15})
+
+    assert diff_snapshots({1: a}, {1: a_repriced}) == [PickAmended(pick=a_repriced)]
+    assert diff_snapshots({1: a, 2: b}, {1: a}) == [PickRemoved(pick_no=2)]
+
+    # A pick_no that comes to name a different player is a renumbering, not an amendment:
+    # emitting PickAmended would silently re-point the pick's identity, so any earlier
+    # reclassification of pick_no 1 would land on the wrong player.
+    renumbered = diff_snapshots({1: a}, {1: b.model_copy(update={"pick_no": 1})})
+    assert [e.kind for e in renumbered] == ["pick_removed", "pick_observed"]
 
 
 @given(st.integers(1, 200))
@@ -174,6 +239,19 @@ def test_retention_price_boundaries():
     assert retention_price(47) == 35  # floor(35.25)
 
 
-@given(st.one_of(st.none(), st.text(max_size=6), st.integers(-5, 99)))
+@given(st.one_of(st.none(), st.text(max_size=6), st.integers(-5, 99), st.booleans()))
 def test_amount_parsing_never_raises(raw):
-    assert isinstance(parse_amount(raw), int)
+    value, complaint = parse_amount(raw)
+    assert type(value) is int  # not `isinstance`: bool is an int subclass and must not pass
+    assert complaint is None or isinstance(complaint, str)
+
+
+def test_amount_parsing_surfaces_what_it_could_not_read():
+    """Formats that previously booked a real bid as $0 in silence."""
+    assert parse_amount("35") == (35, None)
+    assert parse_amount("35.0") == (35, None)
+    assert parse_amount("$35") == (35, None)
+    assert parse_amount("1,200") == (1200, None)
+    for bad in (None, "", "abc", True):
+        value, complaint = parse_amount(bad)
+        assert value == 0 and complaint

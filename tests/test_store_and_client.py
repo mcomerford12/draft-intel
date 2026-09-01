@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 from pathlib import Path
 
@@ -58,6 +59,7 @@ def test_crash_restart_recovers_identical_state_including_overrides(tmp_path, cl
     assert reopened.count() == len(events) + len(overrides)
     assert after.override_delta == -12
     assert after.teams[7].filled_slots == 17  # the manual keeper survived the restart
+    assert any("roster spots exist" in a for a in after.alerts)  # and is flagged as over-roster
 
 
 def test_sequence_numbers_are_monotonic(tmp_path):
@@ -111,3 +113,65 @@ def test_breaker_recovers_after_cooldown():
     b.record_failure(now=100.0)
     assert b.is_open(now=105.0)
     assert not b.is_open(now=111.0)
+
+
+# --------------------------------------------------------------------------------------
+# Regressions for the client findings (DI-040 M1, M2).
+# --------------------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_rate_floor_holds_across_retries():
+    """M1: retries bypassed the floor entirely, firing requests 502ms apart."""
+    import time as _time
+
+    stamps: list[float] = []
+
+    def record(request):
+        stamps.append(_time.monotonic())
+        return httpx.Response(500)
+
+    respx.get(f"{API_V1}/draft/3/picks").mock(side_effect=record)
+    async with httpx.AsyncClient() as http:
+        client = SleeperClient(client=http, backoff_base=0.0, max_retries=3)
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.picks("3")
+    gaps = [b - a for a, b in itertools.pairwise(stamps)]
+    assert len(stamps) == 3
+    assert all(g >= 0.99 for g in gaps), gaps
+
+
+@respx.mock
+async def test_rate_floor_holds_under_concurrency():
+    """M1: four concurrent calls previously fired three of them simultaneously."""
+    import asyncio as _asyncio
+    import time as _time
+
+    respx.get(f"{API_V1}/draft/4/picks").mock(return_value=httpx.Response(200, json=[]))
+    async with httpx.AsyncClient() as http:
+        client = SleeperClient(client=http)
+        start = _time.monotonic()
+        await _asyncio.gather(*(client.picks("4") for _ in range(4)))
+    assert _time.monotonic() - start >= 3.0
+
+
+@respx.mock
+async def test_client_errors_are_not_retried():
+    """M2: 400/401/403 were retried three times, contrary to the documented behaviour."""
+    route = respx.get(f"{API_V1}/draft/5/picks").mock(return_value=httpx.Response(403))
+    async with httpx.AsyncClient() as http:
+        client = SleeperClient(client=http, backoff_base=0.0)
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.get_json(f"{API_V1}/draft/5/picks", throttle=False)
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_404_does_not_reset_the_breaker():
+    """M2: a 404 from the undocumented endpoint cleared failures for the v1 endpoints."""
+    respx.get(f"{API_V1}/draft/6/picks").mock(return_value=httpx.Response(404))
+    async with httpx.AsyncClient() as http:
+        client = SleeperClient(client=http, backoff_base=0.0)
+        client.breaker.failures = 3
+        assert await client.get_json(f"{API_V1}/draft/6/picks", throttle=False) is None
+        assert client.breaker.failures == 3
