@@ -155,6 +155,23 @@ def value_board(
     if not players:
         raise InvariantViolation("no projections supplied; cannot price an empty board")
 
+    # The charter's three sum invariants are all self-consistent under nonsense input: a
+    # keeper spend larger than the budget gives negative live money, a negative dollars-per-
+    # VORP, negative prices, and sums that still reconcile exactly. Arithmetic consistency is
+    # not the same as sanity, so the inputs are checked before the sums are.
+    if keeper_spend < 0:
+        raise InvariantViolation(f"keeper spend ${keeper_spend} is negative")
+    if keeper_spend > total_budget:
+        raise InvariantViolation(
+            f"keeper spend ${keeper_spend} exceeds the ${total_budget} total budget; "
+            "there is no money left to price the board with"
+        )
+    if roster_spots_live > total_budget - keeper_spend:
+        raise InvariantViolation(
+            f"${total_budget - keeper_spend} of live money cannot fill {roster_spots_live} "
+            "roster spots at the $1 minimum bid"
+        )
+
     full_vorp = {p.player_id: baselines.full_last_drafted.vorp(p) for p in players}
     live_vorp = {
         p.player_id: (0.0 if p.player_id in keeper_ids else baselines.live_last_drafted.vorp(p))
