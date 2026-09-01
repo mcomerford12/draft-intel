@@ -11,6 +11,7 @@ Pre-implementation. This repo currently holds the charter and the refined build 
 
 | Document | What it is |
 |---|---|
+| **`docs/HANDOFF.md`** | **Start here.** Complete context for picking this build up cold. |
 | `docs/CHARTER.md` | The original charter as supplied. Source of truth for **scope**. |
 | `docs/PLAN.md` | Refined context and build plan. Source of truth for **how**. Resolves four contradictions in the charter and corrects three technical impossibilities. |
 | `docs/DECISIONS_FOR_REVIEW.md` | Open rulings and decisions taken, per charter §11. |
