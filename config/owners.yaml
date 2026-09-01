@@ -1,0 +1,10 @@
+# Manifest owner name -> the name Sleeper carries for that draft slot.
+#
+# Only needed where the two differ. The user's manifest calls their own team "Me";
+# Sleeper's draft metadata calls slot 3 "Matt".
+#
+# Deliberately NOT a slot number mapping. Slots are resolved live from
+# draft.metadata.slot_name_{n}, because only 4 of 10 managers have joined the real league
+# and the mapping will keep changing until draft day (docs/api-findings.md, Finding 9).
+aliases:
+  Me: Matt
