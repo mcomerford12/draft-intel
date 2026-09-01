@@ -24,6 +24,10 @@ from draft_intel.domain.identity import (
 )
 from draft_intel.domain.keepers import load_manifest, resolve_manifest
 from draft_intel.domain.ledger import fold
+from draft_intel.quant.replacement import compute_baselines
+from draft_intel.quant.scoring import build_projections
+from draft_intel.quant.slots import seat_keepers
+from draft_intel.quant.valuation import value_board
 from draft_intel.replay.harness import load_picks, replay_all, replay_rejects
 from draft_intel.sleeper.client import SleeperClient
 
@@ -157,6 +161,158 @@ async def _smoke() -> int:
     return 0
 
 
+def value() -> int:
+    """DI-030: price the board both ways and print it. No report layer yet, by design."""
+    config = load_league_config(CONFIG / "league.yaml")
+    league = json.loads((FIXTURES / "league.json").read_text())
+    players_map = json.loads((FIXTURES / "players_slim.json").read_text())
+    projections_raw = json.loads((FIXTURES / "projections_slim.json").read_text())
+    draft = json.loads((FIXTURES / "draft.json").read_text())
+    picks = load_picks(FIXTURES / "picks.json")
+
+    projections, unreliable = build_projections(projections_raw, league["scoring_settings"])
+
+    manifest = load_manifest(CONFIG / "keepers.yaml")
+    identity = build_identity(draft, aliases=_aliases("mock_aliases"))
+    resolved = resolve_manifest(manifest, players_map)
+    keeper_ids = frozenset(pid for _owner, pid in resolved)
+
+    # Keeper prices come from the picks feed. Sleeper publishes no auction-value field, so
+    # these are the user's estimates until read off the draft room on the morning.
+    keeper_spend = sum(int(p["metadata"]["amount"]) for p in picks if p["player_id"] in keeper_ids)
+    positions_by_slot: dict[int, list[str]] = {}
+    for (owner, _pid), entry in resolved.items():
+        slot = identity.slot_for(owner)
+        if slot is not None:
+            positions_by_slot.setdefault(slot, []).append(entry.pos)
+
+    demand = seat_keepers(positions_by_slot, starters=config.starters, teams=config.teams)
+    roster_full = config.teams * config.total_slots
+    roster_live = roster_full - len(keeper_ids)
+
+    baselines = compute_baselines(
+        projections,
+        keeper_ids=keeper_ids,
+        demand=demand,
+        roster_spots_full=roster_full,
+        roster_spots_live=roster_live,
+        kicker_slots=config.starters.get("K", 0) * config.teams,
+    )
+    board = value_board(
+        projections,
+        baselines=baselines,
+        keeper_ids=keeper_ids,
+        keeper_spend=keeper_spend,
+        total_budget=config.teams * config.budget,
+        roster_spots_full=roster_full,
+        roster_spots_live=roster_live,
+    )
+
+    print("=" * 78)
+    print("DI-026  PROJECTIONS")
+    print("=" * 78)
+    print(f"  scored {len(projections)} players under this league's scoring_settings")
+    for position, median in sorted(unreliable.items()):
+        print(
+            f"  !! {position}: raw-stat scoring diverges from Sleeper's pts_ppr by a median "
+            f"{median:.1f}% -> fell back to pts_ppr for this position"
+        )
+    diverged = [p for p in projections if p.diverged and p.position not in unreliable]
+    print(f"  individual >5% divergences outside those positions: {len(diverged)}")
+
+    print()
+    print("=" * 78)
+    print("DI-028  SLOT DEMAND  (supply AND demand adjusted - charter 4.2)")
+    print("=" * 78)
+    print(f"  {'pos':6} {'base':>6} {'kept':>6} {'remain':>7}")
+    for position in sorted(demand.base):
+        print(
+            f"  {position:6} {demand.base[position]:>6} {demand.keeper_base.get(position, 0):>6} "
+            f"{demand.remaining_base[position]:>7}"
+        )
+    print(f"  {'FLEX':6} {demand.flex:>6} {demand.keeper_flex:>6} {demand.remaining_flex:>7}")
+    print(
+        f"\n  remaining STARTING slots {demand.remaining_starting}   "
+        f"remaining ROSTER spots {roster_live}   (different numbers; both asserted)"
+    )
+
+    print()
+    print("=" * 78)
+    print("DI-029  REPLACEMENT BASELINES  (points of the last player rostered)")
+    print("=" * 78)
+    print(
+        f"  {'pos':6} {'fullStrt':>9} {'fullLast':>9} {'liveStrt':>9} {'liveLast':>9} {'rost':>6}"
+    )
+    for position in ["QB", "RB", "WR", "TE", "K"]:
+        b = baselines
+        print(
+            f"  {position:6} {b.full_starter.points.get(position, 0):>9.1f} "
+            f"{b.full_last_drafted.points.get(position, 0):>9.1f} "
+            f"{b.live_starter.points.get(position, 0):>9.1f} "
+            f"{b.live_last_drafted.points.get(position, 0):>9.1f} "
+            f"{b.live_last_drafted.rostered.get(position, 0):>6}"
+        )
+
+    print()
+    print("=" * 78)
+    print("DI-030  VALUATION")
+    print("=" * 78)
+    print(f"  total budget          ${board.total_budget}")
+    print(f"  keeper spend          ${board.keeper_spend}   (20 keepers, estimated prices)")
+    print(f"  total live money      ${board.total_live_money}")
+    print(f"  discretionary (full)  ${board.discretionary}      $/VORP {board.dollars_per_vorp}")
+    print(
+        f"  discretionary (live)  ${board.discretionary_live}"
+        f"      $/VORP {board.dollars_per_vorp_live}"
+    )
+    print(
+        f"  keeper book value     ${board.keeper_book_value:.0f}"
+        f"   (what the 20 would cost at open auction)"
+    )
+    print(f"  KEEPER SURPLUS        ${board.keeper_surplus:+.0f}")
+    print(
+        f"  KEEPER INFLATION      {board.keeper_inflation}x"
+        f"   (live money / book still on the board)"
+    )
+    print()
+    print("  INVARIANTS (charter 4.3 - the app refuses to price if any fails)")
+    print(
+        f"    sum market_value  over {board.pool_full_size} = ${board.sum_market_value}"
+        f"  (want ${board.total_budget})"
+    )
+    print(
+        f"    sum baseline_value over {board.pool_live_size} = ${board.sum_baseline_value}"
+        f"  (want ${board.total_live_money})"
+    )
+    print(
+        f"    keeper + live == total: ${board.keeper_spend} + ${board.total_live_money}"
+        f" == ${board.total_budget}"
+    )
+
+    print()
+    print("  TOP 25 AVAILABLE  (baseline_value is the number to bid against)")
+    print(
+        f"  {'#':>3} {'player':22} {'pos':4} {'pts':>7} {'VORPlv':>7}"
+        f" {'LIVE $':>7} {'book $':>7} {'delta':>7}"
+    )
+    for i, p in enumerate(board.available()[:25], 1):
+        print(
+            f"  {i:>3} {p.name[:24]:24} {p.position:4} {p.points:>7.1f} {p.vorp_live:>7.1f} "
+            f"{p.baseline_value:>7.2f} {p.market_value:>7.2f} {p.keeper_premium:>+7.2f}"
+        )
+
+    print()
+    print("  QB MARKET  (charter A.4: the most distorted market in this draft)")
+    qbs = [p for p in board.by_position("QB") if not p.is_keeper][:12]
+    print(f"  {'#':>3} {'player':24} {'pts':>7} {'VORPlv':>7} {'LIVE $':>7} {'book $':>7}")
+    for i, p in enumerate(qbs, 1):
+        print(
+            f"  {i:>3} {p.name[:24]:24} {p.points:>7.1f} {p.vorp_live:>7.1f} "
+            f"{p.baseline_value:>7.2f} {p.market_value:>7.2f}"
+        )
+    return 0
+
+
 def smoke() -> int:
     """Hit the live API, validate the real league, and poll the real draft once."""
     return asyncio.run(_smoke())
@@ -169,7 +325,9 @@ def main(argv: list[str] | None = None) -> int:
         return replay()
     if command == "smoke":
         return smoke()
-    print(f"unknown command {command!r}; expected 'replay' or 'smoke'", file=sys.stderr)
+    if command == "value":
+        return value()
+    print(f"unknown command {command!r}; expected 'replay', 'smoke' or 'value'", file=sys.stderr)
     return 2
 
 
