@@ -1,29 +1,41 @@
 # Handoff — Draft Intelligence Platform
 
-**Written 2026-08-31. Read this before touching anything.**
-
-You are picking up a build with a hard, immovable deadline. This document is the shortest path
-to being useful. Read it fully, then `docs/KANBAN.md` for live state, then `docs/CHARTER.md`
-only for the parts you need.
+**Written 2026-09-01. Supersedes the earlier version of this file. Read it fully before
+touching anything.**
 
 ---
 
-## 1. What this is, in one paragraph
+## 1. Status in one paragraph
 
-A single-user tool for one live Sleeper auction draft. 10 teams, $200 each, full PPR, **2QB**,
-16 draftable roster spots. Every team enters with **2 keepers** retained at
-`floor(0.75 × sleeper auction value)`, so 20 mostly-elite players are off the board before
-bidding starts. That reshapes the pool, the budgets, the replacement levels, and creates
-structural league-wide inflation. The tool ingests Sleeper's settled-picks feed, keeps a
-correct money ledger, prices the remaining pool, and tells the user what to bid.
+The data spine (Sprint 1) works and is **rejected**. Three independent review rounds and
+three adversarial evaluation rounds have all returned REJECT. The replay ledger is exact, the
+golden file has been independently re-derived three times, crash recovery survives a real
+`SIGKILL`, and CI is now deterministic at 92 tests / 96% coverage. But each fix pass has
+closed the named defects and introduced a new silent-money defect, three rounds running, and
+several remain open — including one where a negative keeper price silently produces a $686
+max bid in a $200 league. **Sprint 2, the priced board, has never been started.** The draft is
+in four days. The previous session was told to stop and write this document rather than
+attempt a fourth fix pass.
 
-**The prime directive from the charter, which drives every trade-off:** this is used *once*,
-live, under time pressure, with real money. A tool that is 80% featured and 100% reliable beats
-one that is 100% featured and flaky. **When you must cut, cut features, never tests.**
+### The recommendation you are inheriting
+
+The open defects are, without exception, in **live-ingestion robustness** — negative amounts,
+duplicate pick numbers, revert-chain edge cases, mutation guards. **None of them affect
+`make prep`,** which needs projections, replacement levels and valuation math, and which runs
+off the keeper manifest and a static fixture, both of which are verified sound.
+
+Separately, **the tool cannot connect to the real draft at all right now** (DI-043: six of ten
+managers have not joined the league). Perfecting live ingestion for a draft it cannot reach is
+the wrong use of the remaining days.
+
+If you are picking this up with the deadline still live, the highest-value path is: fix the
+three money-safety items in §4.1 (roughly 30 lines), then **stop reviewing Sprint 1 and build
+the priced board.** A printed tier sheet with walk-away prices is worth more on draft night
+than a perfect ledger with nothing to price.
 
 ---
 
-## 2. Hard facts — do not re-derive these
+## 2. Hard facts — do not re-derive
 
 | Fact | Value |
 |---|---|
@@ -31,252 +43,319 @@ one that is 100% featured and flaky. **When you must cut, cut features, never te
 | League | `1391959336820953088` — "GJFL 2026 Auction Draft" |
 | Real draft | `1391959337445920768` (status `pre_draft`, 0 picks) |
 | **User's `roster_id`** | **3** |
-| Mock draft (replay fixture) | `1400259554721165312` — complete, 160 picks |
-| Draft time | **Sleeper says Sat Sept 5 2026, 01:00 UTC = Fri Sept 4, 9:00 PM ET.** The user said 9/4. Sleeper's `start_time` is the authority. |
-| Prior season | None. `previous_league_id` is null — there is **no history to backtest against**. |
+| Mock draft (the only replay fixture) | `1400259554721165312` — complete, 160 picks |
+| **Draft time** | **Sat 2026-09-05, 21:00 ET** (Sleeper `start_time` = 2026-09-06 01:00 UTC). The user has said 9/4; Sleeper is the authority. |
+| Prior season | None. `previous_league_id` is null — **nothing to backtest against.** |
 
-**Verified keeper slate** (Appendix A re-derived independently, it checks out): 7 QB / 6 RB /
-7 WR / 0 TE / 0 K. Remaining base starting demand QB 13 / RB 14 / WR 13 / TE 10 / K 10 = 60,
-plus 20 FLEX = **80 remaining starting slots** against **140 remaining roster spots**. Those two
-numbers are different and are easy to transpose; assert both.
+Keeper slate, re-derived independently and confirmed: **7 QB / 6 RB / 7 WR / 0 TE / 0 K**.
+Remaining base starting demand QB 13 / RB 14 / WR 13 / TE 10 / K 10 = 60, plus 20 FLEX =
+**80 remaining starting slots** against **140 remaining roster spots**. Different numbers,
+easy to transpose, assert both.
 
-**AJ, Mason and Burt are the three teams holding no QB**, so each needs two. The user holds
-Josh Allen and needs one. That asymmetry is the single most exploitable fact in the draft.
-
----
-
-## 3. The nine discovery findings that shaped everything
-
-Full detail in `docs/api-findings.md`. The ones that change how you write code:
-
-1. **No auction-value field exists for 2026.** All twelve ADP variants are present with full
-   coverage across 3,271 projection records; `auction`, `auction_value`, `dollar` and `price`
-   are absent entirely. **The league's keeper rule references a number Sleeper does not publish
-   over REST.** Retention prices must be *read* from the draft room, never derived.
-   `floor(0.75 × …)` is a reconciliation *check*, not a price source. `adp_2qb` is the correct
-   curve input for the fallback.
-
-2. **Mock draft picks carry `roster_id: null` and `picked_by: ""`.** Team identity keys on
-   **`draft_slot`**, never `roster_id`. The charter's example payload shows both populated;
-   following it produces a ledger that yields nothing on the only replay fixture that exists.
-
-3. **The 20 ceremonial keeper picks carry `is_keeper: false`.** The mock is a clean **Case B**
-   fixture (keepers ceremonially drafted as picks 1–20 at retention prices). The charter's
-   `is_keeper` detection catches **none** of them. Manifest match is the only classifier that
-   fires on real data.
-
-4. **The league's own settings contradict each other.** `league.roster_positions` says 2 QB /
-   0 DEF / 6 BN / 16 slots; `draft.settings` says 1 QB / 1 DEF / 5 BN / 15 rounds, and
-   `max_keepers` is 1 rather than 2. `roster_positions` wins — corroborated by
-   `draft.metadata.scoring_type == "2qb"` and by the mock draft's own settings. See ADR-0002.
-
-5. **The real draft object has no `slot_name_*` keys at all.** Only the mock does. Owner
-   identity in production comes from joining `slot_to_roster_id` through `/rosters` and
-   `/users`. This was a draft-night defect; see §6.
-
-6. Name collisions in Sleeper's 12,225-player map: **Josh Allen** (guard `2212` vs QB `4984`)
-   and **Lamar Jackson** (CB `6994` vs QB `4881`). The charter warned about the first, not the
-   second. Position confirmation is mandatory. `fixtures/players_slim.json` deliberately retains
-   off-position name collisions — an earlier trim deleted them and would have let broken
-   resolution look correct.
-
-7. Full PPR confirmed (`rec: 1.0`), **no TE premium**, raw stat components present so league
-   scoring can be applied to projections per charter §4.1.
-
-8. Real draft timers: 30s nomination / 60s pick. The fast-auction cockpit premise holds.
-
-9. **Only 4 of 10 managers have joined.** Owner→slot mapping is incomplete and must be
-   late-bound. See DI-043.
+**AJ, Mason and Burt hold no QB and each need two.** The user holds Josh Allen and needs one.
+That asymmetry is the most exploitable fact in the draft and the thing the priced board most
+needs to surface.
 
 ---
 
-## 4. Where the work stands
+## 3. What is genuinely trustworthy
 
-Branches are stacked; merge bottom-up and GitHub retargets each base.
+Everything here was confirmed by an agent running the artifact, not by reading it, and most
+of it independently more than once.
 
-| PR | Branch | Base | State |
-|---|---|---|---|
-| #1 | `sprint-0-discovery` | `main` | Draft. Discovery, findings, fixtures. |
-| #2 | `sprint-1-data-spine` | `sprint-0-discovery` | Draft. **Rejected by both review and eval**; fixes are in #4. |
-| #3 | `di-000-process-scaffold` | `sprint-1-data-spine` | Draft. Kanban, ADRs, agent definitions. |
-| #4 | `di-042-review-fixes` | `di-000-process-scaffold` | Draft. **Current tip.** Closes all 15 blocking findings. |
-
-`main` exists at the charter/refined-plan commit — pure documentation, so no code reached it
-unreviewed. The repo was completely empty when this started.
-
-**Current CI:** ruff clean, `mypy --strict` clean on 22 files, **82 tests, 97% coverage**.
-`make replay` reproduces every team's budget to the dollar ($1,979 spent / $21 left, keeper
-spend $549, 140 competitive picks). `make smoke` boots against the live league with the four
-expected DI-004 warnings.
-
-### Sprint 1 was rejected twice, then fixed
-
-Both an independent `code-reviewer` and an adversarial `evaluator` ran against Sprint 1. Both
-returned **REJECT** — 12 blocking findings from the reviewer, 3 from the evaluator. Full verdicts
-are in `docs/KANBAN.md` under DI-040 and DI-EVAL-1, with reproductions.
-
-The headline lessons, because they will recur:
-
-- **Two headline property tests were tautologies.** `remaining` is *defined* as
-  `budget - spent`, so `Σ spent + Σ remaining ≡ Σ budget` held for any value of `spent`,
-  including a badly wrong one. They now compare per-team spend against an independent replay.
-- **The Case A/B bit-identity gate was vacuous.** It passed with the classifier replaced by a
-  constant function, because the two payloads differed only in `is_keeper`, which never reaches
-  derived state. Each case now gets only the mechanism it would really have.
-- **The golden file was checked and is NOT circular.** The evaluator re-derived
-  `tests/test_replay_gate.py::EXPECTED` from `fixtures/picks.json` with a script importing none
-  of the project code. Exact match. Criterion 1 is genuinely earned.
-- **Crash-restart was verified with a real SIGKILL**, not by dropping an object, and all seven
-  event kinds round-trip byte-exact.
-
-DI-042 closed all 15 blocking findings. **13 of the new regression tests were run against commit
-`fa4f177` in a git worktree and fail there** — they encode the defects rather than restate the
-fixes. Do this for any future fix; it is the only way to know a test can fail.
-
-**#4 has not been re-reviewed or re-evaluated.** That was the next step when this handoff was
-requested. Charter §7: two consecutive rejections escalate to the orchestrator for scope
-renegotiation rather than a third attempt at the same approach. This would be attempt two.
+- **The replay ledger is exact.** `make replay` reproduces every team's final budget to the
+  dollar: slots 1–10 at `(16,199) (16,200) (16,195) (16,200) (16,200) (16,200) (16,200)
+  (16,200) (16,185) (16,200)`, total spent **$1,979**, remaining **$21**, keeper spend
+  **$549**, 140 competitive picks, 20/20 keepers, 10/10 teams complete, zero alerts.
+- **The golden file is not circular.** Re-derived three separate times by scripts importing
+  no project code. Exact match every time.
+- **Crash recovery is real.** Tested with an actual `SIGKILL` at pick 77 (exit 137): 80 events
+  survived, all seven event kinds round-trip byte-exact, resume folds to correct state.
+- **CI is deterministic.** 12/12 and 8/8 cold runs green after the parse fix. It was
+  previously failing roughly 1 run in 3, which invalidated earlier "CI green" claims.
+- **The Case A / Case B gate is no longer vacuous.** Verified by deleting each classifier
+  branch in turn; both now fail the gate. Contamination audit: dropping one manifest key moves
+  competitive QB spend 157 → 186 (+18%) while `total_spent` stays 1979.
+- **Retention price**: zero divergences from `max(1, floor(Fraction(3,4)·v))` over 1..20,000.
+- **No keeper branch in the money ledger**, no `roster_id` keying, no runtime name matching,
+  no websocket/GraphQL, no hard dependency on the undocumented endpoint.
+- **The identity fallback works against the live API.** `make smoke` resolves 4/10 slots via
+  `rosters` → `users` and prints both blockers.
 
 ---
 
-## 5. Blocked on the user — nothing you can do in code
+## 4. What is broken — open defects with reproductions
 
-**DI-004 — the commissioner must re-save the draft settings.** The QB 2-vs-1 disagreement and
-`max_keepers: 1`. Development is unblocked (the tool boots on `roster_positions` and warns), but
-the *league* is not correct until this is fixed.
+### 4.1 Money safety — fix these first if you fix anything
 
-**DI-043 — six managers have not joined.** Jake, Connor, Keenan, Willie, Burt, TD. Their Sleeper
-display names are unknowable until they join, so `config/owners.yaml` cannot be completed and
-`manifest_keys(require=20)` resolves only 8 of 20 against the real league. **The tool cannot run
-against the real draft until they join.** It now raises loudly rather than failing silently.
+**D1. Negative amounts reach the ledger on two paths.** Raised in all three rounds, never
+closed. `ManualKeeper` — which the code itself designates the *primary* path for real keeper
+prices — never touches the parser at all:
 
-Known display names: `mattchupiccu` (slot 3), `ajthebeard`, `MasonWAlpert`, `steeveegee300`.
+```python
+fold([ManualKeeper(seq=1, slot=1, player_id="P", amount=-500)], slots=range(1, 11))
+# spent -500  remaining 700  max_bid 686  alerts ()  rejects ()
+```
 
----
+And the string parser's decimal arm misses the sign check its integer arm applies:
 
-## 6. Known-open defects — verified still open at handoff time
+```
+parse_amount("-500")   -> (-500, 'amount is negative (-500)')   # guarded
+parse_amount("-500.0") -> (-500, None)                          # silent
+```
 
-These were raised by the evaluator and are **not** fixed. Confirmed by inspection just now, not
-from memory.
+*Fix:* `ge=0` on `PickSnapshot.amount` and `ManualKeeper.amount`, **or** an alert in `fold`
+on any negative roster entry. Cover `"-5.0"`, `-5.0` and `ManualKeeper` in the test — the
+existing `test_negative_amounts_are_flagged` pins only the branch that was fixed and its own
+docstring names the case that still reproduces.
 
-| # | Defect | Where |
+**D2. A duplicate `pick_no` silently loses its money.**
+
+```
+two rows claiming pick_no 30 -> total_spent 1947 (should be 1979)
+conservation "holds"; rejects () orphans () alerts 0
+```
+
+$32 gone with nothing reported. The snapshot map is keyed on `pick_no`, so the second row
+overwrites the first.
+
+**D3. `FrozenDict` does not block `|=`.**
+
+```python
+state.teams |= {99: None}   # mutation persists even though the operation raises
+```
+
+`__ior__` is inherited unblocked; the guard covers 7 of 8 mutating methods and the shipped
+test exercises 3. It also broke `copy`, `deepcopy`, `pickle` and `model_validate` round-trips
+(all raise), and replaced `Mapping[int, TeamState]` with `dict[Any, Any]`, so `mypy --strict`
+no longer catches item assignment anywhere in the project. **This was a bad trade** — a real
+static guarantee swapped for a runtime guard with a hole. Consider reverting to the `Mapping`
+annotation and closing the gap differently.
+
+### 4.2 Correctness, lower severity
+
+| # | Defect | Detail |
 |---|---|---|
-| 1 | **`KeeperClassifier.armed` is never set `True` in any product code path.** The Case B arming switch the charter requires exists as a dataclass field and nothing sets it. | `domain/classify.py` |
-| 2 | **`reconcile()` is called by nothing outside tests.** It is the only function that detects a keeper *under*-count, and no product path invokes it. | `domain/classify.py:56` |
-| 3 | **Negative amounts are accepted silently.** `PickSnapshot.amount` has no `ge=0`. A `-500` pick gives `spent=-500, remaining=700, alerts=()`. Conservation holds arithmetically so no test notices. | `models.py:51` |
-| 4 | **`test_max_bid_never_strands_a_team` asserts an invariant that is false**, and is green only because no team in the fixture goes broke before pick 90. On a broke team the assertion is `14 <= 0`. The property-test twin guards correctly; the gate version does not. | `tests/test_replay_gate.py` |
-| 5 | `Reclassify` still keys on `pick_no`, unsafe if Sleeper renumbers after a reversal. The diff now emits remove+observe on a renumber, but the event does not follow. | `models.py`, `domain/ledger.py` |
-| 6 | Some league constants remain inline in `cli.py` (a Sprint-1 hand harness, not production). | `cli.py` |
-| 7 | No ADR for the four production dependencies (httpx, pydantic, sqlalchemy, pyyaml). Charter requires one per dependency. SQLAlchemy is heavyweight for one four-column append-only table. | `docs/adr/` |
+| D4 | `rejects` lost across an `EventStore` round-trip | It is a `fold` parameter, not a derivation. `orphans` survives; `rejects` does not, so criterion 2's "identical state" fails on that field. Only `cli.replay` supplies it. |
+| D5 | `Revert(target_seq=0)` can cancel an unstamped revert | The `active` map is computed before the `UNSTAMPED` guard, so a revert the code *says* it ignored is the one that changed the answer. Two unstamped reverts also collide on key `0`. |
+| D6 | Revert chain assumes canceller seq > target seq | Never enforced, never alerted. A revert targeting a higher seq silently neutralises a later override. |
+| D7 | `manifest_keys(teams=)` not wired into the replay path | The collapse guard exists and is reachable only from `cli._smoke`; `cli._classifier` passes `require=` only. Uncovered by tests. |
+| D8 | Ambiguous display-name drop discards an authoritative mapping | Applied per-name and unconditionally, overriding the per-slot "draft metadata wins" rule. Can leave `is_complete` true with zero resolvable owners. |
+| D9 | `KeeperClassifier.armed` reachable from no production path | The Case B arming switch the charter requires. Asked for three rounds. Either wire it or move it to Sprint 3 on the board. |
+| D10 | `Reclassify` keys on `pick_no` | Unsafe if Sleeper renumbers after a reversal. The diff handles renumbering; the event does not. |
+| D11 | `_gate` binds to the first contended event loop | Harmless today (`cli` builds a client inside `asyncio.run`); will bite the Sprint 3 cockpit, which holds a client across the app lifetime. |
+| D12 | No dependency ADR | httpx, pydantic, sqlalchemy, pyyaml. Charter requires one. SQLAlchemy is heavyweight for one four-column append-only table. |
 
-Also noted by the evaluator and worth carrying forward: nothing in the suite exercises the
-**renumbered Case A twin** (competitive picks 1..140, keepers 141..160), which is the scenario
-`competitive_seq` exists to handle. The design does hold up under it when tested by hand.
+### 4.3 Tests that are still unsound
+
+- **The Case A/B companion test has a dead arm.** `test_replay_gate.py:145` and `:150` are the
+  identical expression, and the comment above `:145` describes a fix that was not made. A
+  previous commit message claims this was repaired; **it was not.** Verify before trusting.
+- `test_no_team_exceeds_two_keepers_without_an_alert` matches `f"slot {slot} holds"`, which
+  also matches the over-roster alert. Should match `"keepers, limit is"`.
+- `test_manual_keeper_counted_exactly_once` still passes one drawn slot to both the pick and
+  the manual entry, so the mismatch case is unexercised. Asked for three rounds.
+- `test_ledger_reconciles_exactly_with_overrides` draws `st.integers(1, 10)` only, so the new
+  orphan semantics rest on a single hand-written example.
+- `identity.py:106`, `:169` and `ledger.py:303` are uncovered; mutating two identity behaviours
+  away leaves the suite green.
+- **`cli.py` is excluded from coverage** (`pyproject.toml`), and every newly wired fix lives
+  there. The 96% headline does not measure the connections.
 
 ---
 
-## 7. Architecture — the parts you must not break
+## 5. The pattern — read this before starting a fix pass
 
-**One equation.** `derived_state = f(api_events + override_events)`. Append-only log, full refold
-on every change, never patched incrementally. Refolding 160 picks costs microseconds, and paying
-that makes pick reversal, restart recovery, retroactive reclassification and override
-commutativity correct *by construction*. ADR-0001.
+Three rounds, same shape, in both reviewers' words: **each pass closes the named defects and
+introduces one new silent-money defect plus one test that certifies a partial fix as
+complete.**
 
-**Money is uniform.** Every team starts at $200 and is decremented by every pick's amount, keeper
-or competitive. **There is deliberately no keeper branch in `domain/ledger.py`.** Keep it that way.
+Concretely, across the rounds the author: shipped two headline property tests that were
+tautologies (`remaining` is *defined* as `budget − spent`); shipped a Case A/B gate that
+passed with the classifier replaced by a constant; fixed "amounts parse to $0 silently" by
+introducing "parser raises and takes the poll cycle down"; wrote a revert-chain test that
+stopped at depth 2, exactly where the bug is invisible; wrote a test asserting a phantom team
+as its expected value; and claimed in a commit message to have fixed a dead test arm that is
+still dead.
+
+**Practical implications for you:**
+
+1. **Write the test against the old code first.** Every regression here was validated by
+   checking out the prior commit and confirming it fails. Do the same, and force
+   `PYTHONPATH` to the old `src` — the editable install silently resolves to the new source
+   and a naive worktree run passes spuriously.
+2. **Ask what the assertion would look like if the code were wrong.** If you cannot construct
+   that, the test is probably an identity.
+3. **Wire the fix, then prove the wire.** Three separate fixes shipped connected to nothing.
+   A test that captures `cli.replay()` stdout and asserts the expected line is three lines.
+4. **Assume the newest code is the least reviewed and the most likely to be wrong.**
+
+---
+
+## 6. Blocked on the user — no code can fix these
+
+**DI-043 — six managers have not joined the league.** Jake, Connor, Keenan, Willie, Burt, TD.
+Their Sleeper display names are unknowable until they join, so `config/owners.yaml` cannot be
+completed and only 8 of 20 keeper keys resolve. **The tool cannot run against the real draft
+until they join.** `make smoke` reports this as a blocker rather than proceeding quietly.
+Known names: `mattchupiccu` (slot 3), `ajthebeard`, `MasonWAlpert`, `steeveegee300`.
+
+**DI-004 — the league's settings contradict themselves.** `league.roster_positions` says 2 QB
+/ 0 DEF / 6 BN / 16 slots; `draft.settings` says 1 QB / 1 DEF / 5 BN / 15 rounds; and
+`max_keepers` is 1, not 2. The commissioner must re-save. The tool boots on `roster_positions`
+(ADR-0002, corroborated by `draft.metadata.scoring_type == "2qb"` and by the mock draft) and
+warns, so development is unblocked — but the league is not correct.
+
+---
+
+## 7. Discovery findings that shaped the design
+
+Full detail in `docs/api-findings.md`. The load-bearing ones:
+
+1. **No auction-value field exists for 2026.** All twelve ADP variants present with full
+   coverage across 3,271 records; `auction`, `auction_value`, `dollar`, `price` absent
+   entirely. **The league's keeper rule references a number Sleeper does not publish.**
+   Retention prices must be *read* from the draft room. `floor(0.75 × …)` is a reconciliation
+   check, not a source. `adp_2qb` is the right fallback curve.
+2. **Mock picks carry `roster_id: null` and `picked_by: ""`.** Identity keys on `draft_slot`.
+3. **The 20 ceremonial keeper picks carry `is_keeper: false`.** The manifest is the only
+   classifier that fires on real data.
+4. **The real draft object has no `slot_name_*` keys.** Only the mock does. Production owner
+   identity comes from joining `slot_to_roster_id` through `/rosters` and `/users`.
+5. Name collisions: **Josh Allen** (guard `2212` vs QB `4984`) and **Lamar Jackson** (CB
+   `6994` vs QB `4881`). The charter warned about the first only. `players_slim.json`
+   deliberately retains off-position collisions — an earlier trim deleted them and would have
+   let broken resolution look correct.
+6. Full PPR (`rec: 1.0`), **no TE premium**, raw stat components present for §4.1 scoring.
+7. Real draft timers 30s nomination / 60s pick.
+
+---
+
+## 8. Architecture invariants — do not break
+
+**One equation.** `derived_state = f(api_events + override_events)`. Append-only log, full
+refold on every change. Refolding 160 picks costs microseconds, and paying it makes pick
+reversal, restart recovery, retroactive reclassification and override commutativity correct by
+construction. ADR-0001.
+
+**Money is uniform.** Every team starts at $200, decremented by every pick, keeper or
+competitive. There is deliberately **no keeper branch** in `domain/ledger.py`.
 
 **`draft_slot` is the canonical team key.** Never `roster_id`.
 
-**`competitive_seq`** is a dense 1..N index over `COMPETITIVE` picks, **recomputed every fold and
-deliberately not stable across folds.** All time-series analytics key on it, never `pick_no`.
-**Never persist or cache a `competitive_seq` value.**
+**`competitive_seq`** is a dense index over `COMPETITIVE` picks, recomputed every fold,
+deliberately *not* stable across folds. All time-series analytics key on it; **never persist
+or cache a value.**
 
-**Two different inflations, never merged:** `keeper_inflation` (structural, `live ÷ full_market`,
-fixed, >1) and `market_inflation` (live, exactly 1.00 at pick 0 by construction, drifts).
+**Two inflations, never merged:** `keeper_inflation` (structural, `live ÷ full_market`, fixed,
+>1) and `market_inflation` (live, exactly 1.00 at pick 0).
 
-**Four replacement baselines**, mapped explicitly in ADR-0001 because charter §4.2 and §4.3 never
-paired them. Pricing uses the **last-drafted** baselines.
+**Four replacement baselines**, mapped in ADR-0001 because charter §4.2 and §4.3 never paired
+them. Pricing uses the **last-drafted** baselines.
 
-**The optimizer is a DP, not an ILP** (ADR-0003). The charter demands both PuLP and a 200ms
+**The optimizer is a DP, not an ILP** (ADR-0003). The charter demands PuLP *and* a 200ms
 walk-away budget; CBC's subprocess overhead makes those mutually exclusive at 40–80 solves per
-curve. CBC is retained as an offline test oracle. Walk-away prices are precomputed per player
-after each settled pick, so the live path is a lookup.
+curve. CBC is retained as an offline test oracle. Walk-away prices are precomputed per player.
 
-**ILP objective includes a bench term** (ADR-0004): `starting points + λ × Σ bench VORP`, λ
-default 0.2, exposed as a live slider. λ=0 recovers the charter's literal objective.
+**ILP objective includes a bench term** (ADR-0004): `starting points + λ × Σ bench VORP`,
+λ default 0.2, live slider. λ=0 recovers the charter's literal objective.
 
 ```
 src/draft_intel/
-  config.py     LeagueConfig + graded boot tripwire        models.py   types, events
-  sleeper/      client (rate floor, breaker), poller (snapshot diffing)
-  domain/       identity, keepers, classify, ledger        store/      append-only SQLite
-  replay/       harness, Case A synthesis
+  config.py     LeagueConfig + graded boot tripwire      models.py   types, events, FrozenDict
+  sleeper/      client (rate floor, breaker), poller (snapshot diffing, ParseResult)
+  domain/       identity, keepers, classify, ledger      store/      append-only SQLite
+  replay/       harness, Case A synthesis                cli.py      replay + smoke
 ```
 
 ---
 
-## 8. Process rules in force
+## 9. Repo state
 
-- **Branch per card** (`di-NNN-slug`), no direct commits to `main`, squash-merge only after both
-  verdicts. The user explicitly chose per-card over per-sprint. Sprints 0 and 1 were not
-  retroactively split; per-card runs forward from DI-042.
-- **Author → review → eval, three distinct identities.** Charter §6: an agent may never review or
-  evaluate its own work. `code-reviewer` and `evaluator` are declared in `.claude/agents/` with
-  **no write tools**, so they structurally cannot fix what they find.
-- The evaluator gets **only** acceptance criteria and the artifact — never the implementation
-  plan or the author's reasoning — and is told to *run* it, not read it.
-- **"LGTM" is a rejected verdict.** Verdicts are written into the card in `docs/KANBAN.md`.
-- Sprints 0 and 1 were originally built with **no independent review at all** — authored and
-  self-checked. That was a process violation, caught by the user, and is why both were rejected
-  when finally reviewed. Do not repeat it.
+| Branch | PR | Contents |
+|---|---|---|
+| `main` | — | Charter + refined plan. Documentation only; no unreviewed code. |
+| `sprint-0-discovery` | #1 | Discovery, 9 findings, fixtures |
+| `sprint-1-data-spine` | #2 | Ingestion, ledger, replay, persistence |
+| `di-000-process-scaffold` | #3 | Kanban, ADRs, agent definitions |
+| `di-042-review-fixes` | #4 | Round-one fixes |
+| `di-044-round2-fixes` | — | **Current tip.** Round-two fixes. No PR opened. |
 
-**Honest caveat on the agent review loop:** these agents are the same model reading code written
-under the same assumptions, so they are most likely to miss precisely the errors the author was
-already blind to. Treat verdicts as a strong filter for mechanical defects and a weak one for
-conceptual ones. Genuine independence means a human reading `domain/ledger.py`.
+Stacked; merge bottom-up. The repo was completely empty at project start, which is why `main`
+begins at a documentation commit.
+
+`docs/KANBAN.md` is the board and carries all six verdicts in full, with reproductions:
+DI-040 (review 1), DI-EVAL-1, DI-EVAL-2, DI-EVAL-3, plus cards DI-042 and DI-043. **There is
+no card for the round-two fix pass** (`di-044-round2-fixes`) — that gap should be closed.
+
+**Sprint 2 is groomed to card level**: DI-026 → DI-039 with dependencies, in `docs/KANBAN.md`.
+Starts with projections ingestion and applying the league's own `scoring_settings` to raw
+stats. **None of it has been started.**
 
 ---
 
-## 9. Running it
+## 10. Process rules, and an honest caveat
+
+- Branch per card (`di-NNN-slug`), no direct commits to `main`, squash-merge after both
+  verdicts. The user chose per-card explicitly.
+- **Author → review → eval, three distinct identities.** Charter §6. `code-reviewer` and
+  `evaluator` are defined in `.claude/agents/`.
+- **Correction to an earlier claim in this file's predecessor:** those agents were described
+  as structurally unable to write, enforced by their tool allowlist. That is **false** — they
+  have `Bash`, and the evaluator has used it to write verdicts into `docs/KANBAN.md`. The
+  independence is a convention, not an enforcement.
+- Two consecutive rejections escalate to the orchestrator for scope renegotiation. **We are at
+  three.** The rule fired twice and was overridden by explicit user instruction to keep
+  iterating; the user then stopped the loop.
+- **The deeper caveat:** these agents are the same model reading code written under the same
+  assumptions. They have been strikingly effective at mechanical defects — every finding in
+  this document came from them — but they are structurally likely to share the author's
+  conceptual blind spots. A human reading `domain/ledger.py` would be worth more than a fourth
+  agent round.
+
+---
+
+## 11. Running it
 
 ```bash
-uv sync                              # Python 3.12 via uv
-make ci                              # ruff, mypy --strict, pytest + coverage
-uv run python -m draft_intel.cli replay   # fold the mock draft, print the ledger
-uv run python -m draft_intel.cli smoke    # hit the live API, validate the real league
+uv sync                                    # Python 3.12 via uv
+make ci                                    # ruff, mypy --strict, pytest + coverage
+uv run python -m draft_intel.cli replay    # fold the mock draft, print the ledger
+uv run python -m draft_intel.cli smoke     # live API, validate the real league
 ```
 
-Expected replay output: every team 16 picks / 2 keepers, `total spent $1979 remaining $21
-keeper spend $549`, `keepers seen: 20/20`, `competitive picks: 140`.
+Expected `replay`: `total spent $1979  remaining $21  keeper spend $549`, `keepers seen:
+20/20`, `competitive picks: 140`, no alerts.
 
-**Network:** `api.sleeper.app` and `api.sleeper.com` were originally blocked by this
-environment's egress policy; the user widened it. If they 403 again at CONNECT, that is the
-cause — `curl -sS "$HTTPS_PROXY/__agentproxy/status"` confirms.
+Expected `smoke`: four DI-004 warnings, `identity: 4/10 slots resolved`, and two BLOCKER lines
+for DI-043. Both blockers are correct output, not failures.
+
+**Network:** `api.sleeper.app` and `api.sleeper.com` are reachable; the user widened the
+environment's egress policy. A 403 at CONNECT means it lapsed —
+`curl -sS "$HTTPS_PROXY/__agentproxy/status"` confirms.
 
 ---
 
-## 10. What to do next
+## 12. If you have four days
 
-In order:
+1. **Fix §4.1 D1–D3** (~30 lines). D1 especially: it is a silent money error on the operator's
+   primary entry path and has survived three rounds.
+2. **Stop the Sprint 1 review loop.** Document §4.2 and §4.3 as known-open. They are all live-
+   ingestion robustness and none of them touch the priced board.
+3. **Build Sprint 2**, DI-026 → DI-039, with a single review pass per card rather than two.
+4. **The Sprint 2 gate is the deliverable that matters:** `make prep` produces the estimated
+   priced board and *a human reads it*. That is the user's only chance to argue with the model
+   while there is still time to fix it. A printable tier sheet with per-player walk-away
+   prices, the keeper surplus board, and the QB endgame plan is worth more on the night than
+   anything else in this repo.
+5. **Chase DI-043.** Until those six managers join, the live cockpit cannot run at all, which
+   is itself a strong argument for prioritising the offline board.
 
-1. **Re-review and re-evaluate PR #4** with fresh `code-reviewer` and `evaluator` agents. This is
-   attempt two of two; a second rejection escalates for scope renegotiation.
-2. Close the seven known-open defects in §6, or consciously defer them with a written reason.
-3. **Sprint 2, cards DI-026 → DI-039** — groomed with dependencies in `docs/KANBAN.md`. Starts
-   with projections ingestion and applying the league's own `scoring_settings` to raw stats.
-4. **Sprint 2 gate is the thing that matters most to the user personally:** `make prep` produces
-   the estimated priced board and *a human reads it*. It is their only window to argue with the
-   model while there is still time to fix it. Prioritise reaching it.
+**Never cut:** money-conservation property tests, Case A/B equivalence, the keeper
+double-count audit, the 2QB replacement-level check (which cannot be audited until DI-030
+exists), and `make prep`.
 
-**Scope reality, stated once.** The user chose the full charter — five sprints, ten agent roles,
-90% coverage, ILP optimiser, React cockpit, Playwright, 500-run Monte Carlo, two 60-minute
-rehearsals — and reaffirmed it when the concern was raised. That does not fit the time remaining.
-`docs/KANBAN.md` carries a cut-order; the first item is the 500-run Monte Carlo and the p<0.01
-bot gate, which measures the model against bots we wrote ourselves and therefore carries little
-information. **Never cut:** money-conservation property tests, Case A/B equivalence, the keeper
-double-count audit, the 2QB replacement-level check, `make prep`.
-
-**The standing instruction from the charter, which has already paid for itself several times: if
-you find two passages that contradict each other, stop and flag it rather than picking one.** A
-silently-resolved contradiction in the valuation or ledger rules is exactly the kind of defect
-that survives to draft night.
+**The charter's standing instruction, which has repeatedly paid for itself: if you find two
+passages that contradict each other, stop and flag it rather than picking one.** A
+silently-resolved contradiction in the valuation or ledger rules is exactly the defect that
+survives to draft night.

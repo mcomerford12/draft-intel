@@ -201,6 +201,274 @@ failure; ruff, mypy --strict, 55 tests, 97% coverage all as claimed.
 
 ## In Eval
 
+### [DI-EVAL-3] Sprint 1 gate — adversarial re-evaluation of `di-044-round2-fixes`
+
+- **Verdict: REJECTED.** 1 blocking, 4 major, 4 minor. **This is the third eval rejection**, and
+  the escalation rule the board states after DI-EVAL-2 (orchestrator scope renegotiation, not a
+  further pass at the same approach) is now overdue. Say plainly what is true: this round is a
+  large improvement. **All three DI-EVAL-2 blockers and all three DI-EVAL-1 blockers are closed
+  in the production path and survive mutation testing.** What blocks is one defect raised for the
+  third consecutive time and left open, one new defect in this round's own code, and a minimum
+  bar delivered 3.5 of 6.
+- Every finding below was produced by running the artifact. Nothing is inferred from reading.
+  `docs/PLAN.md`, `docs/HANDOFF.md` and commit messages were not read.
+
+#### The suite is now deterministic — DI-EVAL-2 B2 closed
+
+**12 of 12 clean runs green**, each from a freshly deleted `.hypothesis`: 8 x `uv run pytest -q`
+and 4 x full `make ci` (`ruff check`, `ruff format --check`, `mypy --strict`, `pytest`).
+**92 passed, 96% coverage.** DI-EVAL-2 measured 4 of 6. `parse_amount` is now total: zero raises
+across 200,000 random hostile strings plus a hand-built adversarial list
+(`inf/INF/-inf/infinity/nan/1e400/1e-400/0x20/1_000/٣٥/１２３/"9"*4400/½/∞/`, floats, bools,
+bytes, complex, `list`, `dict`, bare `object()`). `parse_pick` never raised on any of 14 hostile
+row shapes. Criterion 16's parser contract is genuinely met.
+
+#### Independently re-derived and PASSING
+
+Golden numbers re-derived from `fixtures/picks.json` by a script importing none of the project
+code: per-slot `(picks, spent)` = `{1:(16,199), 2:(16,200), 3:(16,195), 4:(16,200), 5:(16,200),
+6:(16,200), 7:(16,200), 8:(16,200), 9:(16,185), 10:(16,200)}`, total 1979, keeper spend
+(`pick_no<=20`) 549, `is_keeper` true on 0 of 160 rows, 160 distinct `pick_no`. `uv run python -m
+draft_intel.cli replay` reproduces all of it to the dollar.
+
+| # | Criterion | Result |
+|---|---|---|
+| 1 | Replay reproduces every roster and budget to the dollar | **PASS** — matches the independent derivation exactly |
+| 2 | Kill mid-replay, resume, identical state incl. overrides | **PARTIAL** — real `SIGKILL` at pick 77 (exit 137), 80 events survived, byte-exact reload, resume to 240 events folds to 1979 with `override_delta -15` and the reverted `ManualKeeper` absent. But `DerivedState.rejects` does not survive the store round-trip — see MAJOR-3 |
+| 3 | Correction decrements from the corrected baseline | **PASS** — budget 185 / spent 195 / remaining -10; order-independent; a second correction stacks from the corrected baseline (185 -> 175) |
+| 4 | Removing a pick restores budget and slot | **PASS** |
+| 5 | Amending an amount updates derived state | **PASS** — spend 50 -> 61, `filled_slots` unchanged |
+| 6 | Case A / Case B bit-identical | **PASS** on the fixture and its twin; **PARTIAL** on the renumbered twin — see MAJOR-4 |
+| 7 | Keeper counted exactly once under any interleaving | **PASS** — see the double-count audit below |
+| 8 | Money conservation / exact reconciliation | **PARTIAL** — the identity is now structurally exact; one unreported money-loss channel remains, see MAJOR-2 |
+| 9 | `max_bid` never strands a team | **PASS** — 0 violations across all 160 prefixes of the fixture |
+| 10 | Retention price is `floor(0.75*v)` | **PASS** — 0 divergences from `max(1, floor(Fraction(3,4)*v))` for v in 1..20,000 |
+| 11 | Manifest hard alert + roster/user fallback, both production-reachable | **PASS** — see below |
+| 12 | Out-of-league slots alerted, excluded from `override_delta`, no phantom team | **PASS** |
+| 13 | Supersession and alerting on `player_id` across teams | **PASS** |
+| 14 | Alerts on keeper under-count, roster overflow, `remaining < open_slots` | **PASS** |
+| 15 | The max-bid test states the invariant it actually means | **PASS** — see below |
+| 16 | Ingestion never raises; unreadable rows surface where a consumer looks | **PARTIAL** — parser contract met; see MAJOR-2 and MAJOR-3 |
+
+**Criterion 11 is closed in production, verified against the LIVE API.** `uv run python -m
+draft_intel.cli smoke` reaches Sleeper and prints:
+`identity : 4/10 slots resolved [(1,'MasonWAlpert'), (2,'ajthebeard'), (3,'mattchupiccu'),
+(4,'steeveegee300')]` — resolved through `slot_to_roster_id -> rosters.json -> users.json`, the
+fallback DI-EVAL-2 M5 reported as reachable from no entry point — followed by
+`BLOCKER unmapped draft slots: [5,6,7,8,9,10]` and `BLOCKER resolved 8 of 20 keeper keys; owners
+with no draft slot: ['Burt','Connor','Jake','Keenan','TD','Willie']`. `cli.replay` passes
+`require=teams*keepers_per_team`. `reconcile()` is now called from `cli.replay` (DI-EVAL-2
+minimum bar item 4, first half).
+
+**Criterion 15 is closed.** `test_max_bid_never_strands_a_team` now guards on
+`remaining >= open_slots` and pins the broke case separately. Re-run of the exact DI-EVAL-2
+falsifier — fixture pick 21 changed from $37 to $180 — the test now **passes**, and the state it
+produces (`slot 5 spent=334 remaining=-134 open=9 max_bid=0`) raises
+`slot 5 has $-134 for 9 open spots - cannot fill its roster at $1 each` rather than an assertion
+failure.
+
+**Revert chains are correct.** Depths 0..8 all match hand-derivation
+(`-40, 0, -40, 0, -40, 0, -40, 0, -40`); DI-EVAL-2's parity table is fully repaired. Branching
+chains, dangling targets, self-targets, `target_seq=0`, unstamped reverts and duplicate-seq
+reverts all behave or alert.
+
+**The regression tests are load-bearing.** Six mutations injected into an isolated copy of the
+tree with its own venv — **all six caught**: (1) flat single-pass revert cancellation -> 2 failures;
+(2) `float()` fallback in `parse_amount` -> 2; (3) `fold` drops `rejects` -> 1; (4) `UNSTAMPED`
+sorts first -> 1; (5) orphan picks mint teams and orphan adjustments counted -> 2; (6) supersession
+back to `(slot, player_id)` -> 2. Restored tree: 92 passed.
+
+**Contamination audit — the filter is load-bearing.** Case B (`fixtures/picks.json`) vs its Case A
+twin under the split-mechanism gate (empty manifest for A, full manifest for B): `model_dump()`
+identical, keeper spend 549, competitive 140 both sides. Non-vacuity confirmed by breaking each
+mechanism in turn — A-payload with empty manifest, A-payload with a constant `COMPETITIVE`
+classifier, and with a constant `KEEPER` classifier — **all three diverge**. Deliberately dropping
+one manifest key (pick 9, Lamar Jackson QB $29, slot 5) is detectable everywhere: competitive
+140 -> 141, keeper spend 549 -> 520, competitive QB count 13 -> 14, **competitive QB spend
+157 -> 186 (+18%, the position that matters most in 2QB)**, all 140 `competitive_seq` indices
+shift, Case A/B equality breaks. `total_spent` unchanged at 1979 — there is genuinely no keeper
+branch in the ledger.
+
+**Keeper double-count audit — passes.** `ManualKeeper(slot=3, P, $30)` + pick `P` on slot 4:
+slot 3 $0, slot 4 $30, `total_spent` 30, one `superseded` entry, one `SLOT MISMATCH` alert, and
+identical output under both event orderings. Removing the pick reinstates the manual entry at
+slot 3 for $30 — counted once, never twice, never zero. The triple-signal fixture (manual entry
++ `is_keeper` pick + `Reclassify`, all for the same keeper) yields `filled_slots 1, spent 30,
+keepers 1, open_slots 15` — removed from supply and from demand exactly once each.
+
+**Standing audit — 2QB: NOT AUDITABLE HERE, unchanged from DI-EVAL-1 and DI-EVAL-2.** There is
+still no value model. Inputs re-derived independently: `league.roster_positions` gives 2 QB x 10 =
+**20 starting QB slots**; the keeper slate is `{QB:7, WR:7, RB:6}`, so **13 QB slots remain to be
+bought**; the fixture's 140 competitive picks contain 13 QBs for $157. `config/league.yaml` and
+`LeagueConfig.starters` both say `QB: 2` and the `draft.settings` mismatch is still WARNING-graded
+and still live (`smoke` prints `draft.slots_qb: expected 2, draft says 1`). **Re-run at DI-030.**
+
+---
+
+#### BLOCKING
+
+**B1 — Negative amounts are still not refused end to end, on either entry path, with zero alerts.
+Raised as DI-EVAL-1 m2, DI-EVAL-2 M3, and written into DI-EVAL-2's minimum bar as item 6. Not
+delivered.**
+
+```
+fold([obs(pick_no=1, player_id='A', slot=1, amount=-500)], slots=range(1,11))
+#   slot 1: spent -500   remaining 700   max_bid 686   alerts ()
+fold([ManualKeeper(seq=1, slot=1, player_id='A', amount=-500)], slots=range(1,11))
+#   slot 1: spent -500   remaining 700   max_bid 686   alerts ()   rejects ()
+ManualKeeper.amount has ge=0?  False
+PickSnapshot.amount has ge=0?  False
+```
+
+The minimum bar read "`ge=0` on `PickSnapshot.amount` and `ManualKeeper.amount`, **or** an alert on
+any negative roster entry." Neither was done. What was done is a complaint string from
+`parse_amount` — which reaches `DerivedState.rejects` only on the feed path, and `ManualKeeper`
+does not go through the parser at all. `models.py:141-152` calls `ManualKeeper` "the primary path
+by which real keeper prices enter the system, not a fallback"; a human typing `-30` into it today
+passes **every** guard in the system:
+
+- `fold` alerts on overdrawn, over-roster, underfunded, keeper over/under-count — none fire on a
+  negative, because a negative makes a team look *richer*.
+- the sign-flipped twin does alert: `obs(..., amount=3000)` gives two alerts. `-500` gives zero.
+- `reconcile()` — now wired into `cli.replay` — cannot catch it either: **every `price` in
+  `config/keepers.yaml` is `null`** (verified: 20 of 20), which the manifest's own header says is
+  the expected state until draft day, and `reconcile` skips the amount comparison when `price is
+  None`. Confirmed: `reconcile({1:[('100',-30),('101',20)]}, {1:[('100',None),('101',None)]}) == []`.
+
+The consequence is not a wrong total, it is wrong advice: the cockpit would recommend bidding $686
+in a $200 league, and `max_bid` is the number this whole sprint exists to compute. This is the
+charter's named failure mode — a plausible-looking number that has been wrong since 7:40pm — and
+it is one keystroke away on the path the model docstring designates as primary.
+
+#### MAJOR
+
+**M1 — NEW DEFECT, this round's code: `FrozenDict` does not block `|=`. Derived state can be
+mutated in place, and the class exists for no other reason.**
+
+`models.py:36-66` overrides `__setitem__`, `__delitem__`, `clear`, `pop`, `popitem`, `update`,
+`setdefault` — 7 of the 8 mutating `dict` methods. `__ior__` is inherited unblocked:
+
+```python
+s = fold([obs(1, 1, 'A', 1, 50)], slots=range(1, 11))
+s.teams.__ior__({99: None})          # no exception at all
+len(s.teams)  # 11   -- derived state silently corrupted
+
+s2 = fold([obs(1, 1, 'A', 1, 50)], slots=range(1, 11))
+s2.total_spent + s2.total_remaining          # 2000
+try: s2.teams |= {11: TeamState(slot=11, budget=200, spent=0, roster=(), total_slots=16)}
+except ValidationError: pass                 # pydantic refuses the REBINDING, after the fact
+sorted(s2.teams)                             # [1..10, 11]
+s2.total_spent + s2.total_remaining          # 2200  -- conservation broken in place
+```
+
+The `|=` form raises *after* the in-place mutation has already happened, so the model is left
+corrupted either way; the direct `__ior__` call is entirely silent. The docstring says "A dict that
+refuses mutation at runtime" and "Derived state is only ever changed by appending an event and
+refolding." Coverage shows why it was missed: `models.py:51,57,60,66` (`__delitem__`, `pop`,
+`popitem`, `setdefault`) are **uncovered**, and `test_derived_state_refuses_mutation` exercises only
+`__setitem__`, `clear` and `update` — 3 of 8. This is the same species of finding as DI-041:
+a guarantee described in prose that the code does not enforce.
+
+**M2 — Criterion 8 / 16: a duplicate `pick_no` row loses its money on the production CLI path with
+no reject, no orphan and no alert. Reproduced end to end.**
+
+The orphan rule closed the phantom-team channel cleanly (verified below), but `parse_picks` keys its
+result dict on `pick_no`, so a repeated `pick_no` silently drops one row and its dollars. Injected
+into `fixtures/picks.json` in an isolated copy and run through `uv run python -m draft_intel.cli
+replay`:
+
+```
+baseline : slot 9 Burt 16 picks $185 spent · total spent $1979 · 140 competitive · no REJECT/ORPHAN/ALERT
+injected : slot 9 Burt 16 picks $166 spent · total spent $1960 · 140 competitive · no REJECT/ORPHAN/ALERT
+```
+
+$19 gone. Roster count still 16, `keepers seen 20/20`, `teams complete 10/10`, `spent + remaining ==
+2000` — the loss is inferable **only** from a total that looks slightly wrong, which is verbatim
+the failure DI-EVAL-2 minimum bar item 3 was written to close. The rejects channel is otherwise
+excellent: the same harness with pick 30's `player_id` removed and pick 31 moved to slot 11 prints
+`REJECT pick 30 is missing player_id` and `ORPHAN slot 11 is not one of the league's 10 slots ($34
+of picks)` plus the matching ALERT. That path is genuinely wired. This one row shape bypasses it.
+
+**M3 — Criterion 2: `rejects` is lost across a store round-trip. `orphans` survives.**
+
+```
+LIVE    : total_spent 1947  rejects ('pick 30 is missing player_id',)  orphans ('slot 11 ... $1 of picks',)
+RESUMED : total_spent 1947  rejects ()                                 orphans ('slot 11 ... $1 of picks',)
+model_dump() identical? False   (differs on: rejects)
+```
+
+`orphans` is re-derived from the event log so it survives; `rejects` is derived from the raw payload
+and the store persists only events, so a crash-restart erases the record that a row took its dollars
+with it. Criterion 2 says "identical state". `EventStore` is also called by nothing in `src/` — the
+resume path exists only as a test — so nothing regenerates it either.
+
+**M4 — Criterion 6 bit-identity still does not survive a pick-number shift. Third eval, unchanged.**
+
+The renumbered Case A twin (competitive picks 1..140, keepers 141..160 — the arrangement
+`ledger.py:242-250` names as the *reason* `competitive_seq` exists) gives `model_dump()` inequality,
+because `competitive_seq` and `RosterEntry.pick_no` are keyed on `pick_no`. The semantics do hold:
+per-team `(picks, spent)` identical, `keeper_spend` 549 both, `total_spent` 1979 both,
+`player_id -> competitive index` map identical, no alerts either side. So the design is sound and
+the literal criterion is not met. Reported by DI-EVAL-1 and DI-EVAL-2; still nothing in the suite
+demonstrates it either way.
+
+#### MINOR
+
+- **m1 — Minimum bar item 4 is half delivered, and the board was not updated instead.** `reconcile()`
+  is now wired into `cli.replay` (good, and its output is printed). **`armed` is still set `True` by
+  no product code path** — `grep -rn armed src/` finds only the dataclass field, its docstring and
+  its own `if`. The bar's alternative was "move them to Sprint 3 in the board and stop describing
+  them in DI-042 as closed backstops." `git diff di-042-review-fixes..di-044-round2-fixes -- docs/`
+  is **empty**: `docs/KANBAN.md` is byte-identical. There is no DI-044 card for the artifact under
+  evaluation; the Status summary still reads "REJECTED again ... 3 blocking"; DI-042 still claims
+  "CI green (82 tests, 97%)" against an actual 92 tests / 96%. Charter §7 makes this file the single
+  source of truth for work state, updated at every state transition.
+- **m2 — Minimum bar item 5 delivered 1 of 3, for the second consecutive round.** The gate max-bid
+  test is fixed (criterion 15, PASS). `test_manual_keeper_counted_exactly_once`
+  (`test_properties.py:161`) still passes **one** drawn `slot` to both the pick and the manual entry,
+  so the mismatch case — DI-EVAL-1's B3, the defect that motivated the request — is still unexercised
+  there. `test_ledger_reconciles_exactly_with_overrides` (`test_properties.py:104`) still draws
+  `st.integers(1, 10)`, still exactly the in-league range, so it still cannot reach the orphan rule
+  it would now be testing. The diff for this file this round adds only an `@example` and the
+  `Fraction` rewrite — both good, neither requested.
+- **m3 — The stale-manifest divergence is unchanged (DI-EVAL-2 M1).** A keeper whose `player_id`
+  changed in the feed after the manifest was written: `manifest_keys(require=20)` is fully satisfied,
+  and Case A gives `keeper_spend 549 / competitive 140 / alerts ()` while Case B gives
+  `520 / 141 / ('slot 5 holds only 1 of 2 keepers',)`. Not bit-identical. Case B's single alert
+  exists only because `expect_keepers=True`, which only `cli.replay` passes; **Case A raises no alert
+  at all even with `expect_keepers=True`**, because `is_keeper` still marks all 20. The designed
+  backstop for exactly this is `armed`, which is inert (m1).
+- **m4 — Assorted.** Two `ManualKeeper`s for the same player on different slots with no pick still
+  charge $60 for one $30 keeper (it alerts `player P is held by slots [3, 5]`, which is the right
+  call, but the money is still double-counted). `cli.replay` passes `require=` but not `teams=` to
+  `manifest_keys`, so the owners-collapsed-onto-one-slot guard is exercised only by `smoke`.
+  `cli.smoke` prints `BLOCKER` for an unresolvable manifest and an incomplete identity but still
+  returns exit 0. The orphan message labels `ManualKeeper` money as "of picks". `draft_slot: 1.5`
+  is silently truncated to slot 1 by `int()`. `ledger.py:124-125,185,192,303` (four alert branches,
+  including the manual-entry-on-an-orphan-slot path) are uncovered.
+
+#### Minimum bar to re-submit
+
+1. `ge=0` on `PickSnapshot.amount` and `ManualKeeper.amount`, **or** an alert in `fold` on any
+   negative roster entry, plus a test that `max_bid` cannot exceed `budget`. (B1, third request)
+2. Override `__ior__` on `FrozenDict` and test all eight mutating `dict` methods, not three. (M1)
+3. Either persist `rejects` alongside the log, or state in the criterion-2 test that it is an
+   ingestion artifact and not part of recovered state. (M3)
+4. Deliver the two outstanding property-test changes from DI-EVAL-2 item 5 as written: two
+   independent slots in `test_manual_keeper_counted_exactly_once`, and an out-of-league range in
+   `test_ledger_reconciles_exactly_with_overrides`. (m2, second request)
+5. Wire `armed`, or reclassify it on the board. Either way, write a card for this branch and correct
+   the DI-042 numbers and the Status summary. (m1)
+6. Detect a repeated `pick_no` in `parse_picks` and route it to `rejects`. (M2)
+
+Criteria 1, 3, 4, 5, 7, 9, 10, 11, 12, 13, 14 and 15 are solid and independently confirmed; 2, 6, 8
+and 16 pass on their main line and fail only on the edge named above. The suite is deterministic and
+its regressions survive mutation. The gap is now narrow and almost entirely about finishing the
+previous bar rather than about the design, which is why the escalation this board already called for
+after DI-EVAL-2 should happen before a fourth pass.
+
+---
+
 ### [DI-EVAL-2] Sprint 1 gate — adversarial re-evaluation of `di-042-review-fixes` @ `21a7617`
 
 - **Verdict: REJECTED.** 3 blocking, 5 major, 6 minor. Every finding below was produced by
