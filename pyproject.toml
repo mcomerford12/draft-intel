@@ -8,6 +8,7 @@ dependencies = [
     "pydantic>=2.7",
     "sqlalchemy>=2.0",
     "pyyaml>=6.0",
+    "numpy>=2.5.2",
 ]
 
 [dependency-groups]
@@ -20,6 +21,7 @@ dev = [
     "mypy>=1.10",
     "types-pyyaml>=6.0",
     "pytest-cov>=7.1.0",
+    "pulp>=3.3.2",
 ]
 
 [build-system]
@@ -56,10 +58,25 @@ disallow_untyped_calls = false
 disallow_any_generics = false
 warn_return_any = false
 
+[[tool.mypy.overrides]]
+# PuLP ships no type stubs. It is a test-only dependency (ADR-0003's CBC oracle) and is not
+# imported anywhere in `src`, so this narrows to the one module rather than relaxing the
+# --strict settings that everything else is held to.
+module = ["pulp.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # PuLP 3.x warns that `LpVariable(...)` is deprecated ahead of its 4.0 API. The CBC oracle
+    # (ADR-0003) is deliberately written against the documented 3.x interface; migrating it on
+    # PuLP's release schedule is not this project's problem, and it is a test-only dependency.
+    # Scoped to the one message so every other DeprecationWarning stays an error.
+    "ignore:Constructing LpVariable:DeprecationWarning",
+    "ignore:PULP_CBC_CMD is deprecated:DeprecationWarning",
+]
 
 [tool.coverage.run]
 source = ["src/draft_intel"]
