@@ -64,12 +64,16 @@ def test_manual_keeper_negative_amount_is_alerted():
     # facts and are still exact above.
     #
     # It does not hold for `max_bid`, because `max_bid` is not a fact, it is a *recommendation*
-    # -- and it is consumed by the optimizer and the affordability ladder, neither of which reads
-    # `state.alerts`. So the alert was necessary and not sufficient: the headline defect this
-    # test is named for, a $686 bid in a $200 league, was still reachable by every code path that
-    # actually acts on the number.
+    # -- and its consumers read the numbers, not `state.alerts`. Those consumers are
+    # `quant.affordability` and `cli.replay`; an earlier version of this note also named the
+    # optimizer, which was wrong -- `best_roster` takes a plain `budget: int` and never sees a
+    # `TeamState`. The alert was necessary and not sufficient all the same: the headline defect
+    # this test is named for was still reachable by every path that acts on the number.
     assert team.max_bid <= team.budget, "an impossible bid must not reach a recommendation"
     assert team.max_bid == 186, "$200 capped, less $1 held back for each of 14 other open slots"
+    # And the bound is not the whole answer -- see
+    # `test_the_clamp_is_a_bound_on_the_damage_and_says_so_rather_than_pretending_to_be_a_fix`.
+    assert team.figures_suspect, "the figure must travel labelled, not merely bounded"
     assert any("NEGATIVE AMOUNT" in alert for alert in state.alerts), (
         f"a -$500 keeper must be alerted, got alerts={state.alerts}"
     )
@@ -389,8 +393,116 @@ def test_a_negative_amount_cannot_produce_a_bid_larger_than_the_league_budget():
     assert team.max_bid <= team.budget, f"advised a ${team.max_bid} bid in a ${team.budget} league"
 
 
-def test_the_clamp_does_not_touch_an_honest_ledger():
-    """It must bind only on impossible input, or it is silently capping real bids."""
-    state = fold([], slots=range(1, 11), budget=200, total_slots=16)
+@pytest.mark.parametrize("budget", [200, 100, 350])
+def test_the_clamp_does_not_touch_an_honest_ledger(budget):
+    """It must bind only on impossible input, or it is silently capping real bids.
+
+    **Parametrised over the budget because hardcoding the league's own $200 inside the clamp
+    survived the entire 517-test suite.** Every test in the repo folded at the default, so
+    `min(self.remaining, 200)` was indistinguishable from `min(self.remaining, self.budget)` --
+    the §1 no-hardcoded-league-values rule, undetectable. $350 also covers the direction a
+    `BudgetAdjustment` moves the ceiling: corrections fold into `budget`, so a +$150 commissioner
+    correction must raise the cap with it rather than being clipped back to $200.
+    """
+    state = fold([], slots=range(1, 11), budget=budget, total_slots=16)
     team = state.teams[1]
-    assert team.max_bid == 200 - 15, "$200 less $1 held back for each of 15 other open slots"
+    assert team.max_bid == budget - 15, "budget less $1 held back for each of 15 other open slots"
+    assert not team.figures_suspect
+
+
+def test_a_budget_correction_raises_the_ceiling_it_is_clamped_against():
+    """The clamp reads `self.budget`, and `BudgetAdjustment` folds into `budget` — so the two
+    track. Correct by reading and, until now, entirely untested."""
+    from draft_intel.models import BudgetAdjustment
+
+    base = fold([], slots=range(1, 11), budget=200, total_slots=16).teams[1]
+    raised = fold(
+        [BudgetAdjustment(seq=1, slot=1, delta=150)], slots=range(1, 11), budget=200, total_slots=16
+    ).teams[1]
+    assert raised.max_bid == base.max_bid + 150, "the ceiling moved with the correction"
+
+
+def test_the_clamp_is_a_bound_on_the_damage_and_says_so_rather_than_pretending_to_be_a_fix():
+    """The clamp only binds when the negative amount dominates the whole roster sum. Add real
+    spend and it goes inert while the figure stays wrong — $127 against a true $47 — because the
+    information was destroyed at ingestion and no clamp can recover it.
+
+    That is why `figures_suspect` exists. A bounded-but-wrong number is *more* dangerous than an
+    absurd one: $686 in a $200 league announces itself, $127 does not. What makes the figure safe
+    to publish is not the bound, it is the label.
+    """
+    state = fold(
+        [
+            PickObserved(
+                seq=1,
+                pick=PickSnapshot(pick_no=1, player_id="A", slot=1, amount=100, is_keeper=False),
+            ),
+            ManualKeeper(seq=2, slot=1, player_id="B", amount=-40),
+        ],
+        slots=range(1, 11),
+    )
+    team = state.teams[1]
+
+    assert team.spent == 60, "the ledger reports what it folded; the truth is 140"
+    assert team.max_bid > 100, "the clamp is inert here — this is the honest, uncomfortable part"
+    assert team.figures_suspect, "so the figure must arrive labelled"
+    assert any("NEGATIVE AMOUNT" in alert for alert in state.alerts)
+
+
+def test_a_payload_conflict_alerts_even_when_the_caller_forgets_the_rejects_channel():
+    """M3. The conflict used to go only to `ParseResult.rejects`, which reaches the fold only if
+    the caller passes `rejects=` — and `fold`'s parameter defaults to None, so the obvious
+    Sprint 3 poll loop (`parse_picks → diff_snapshots → fold`) drops it silently.
+
+    Mid-draft that is the charter's named failure mode exactly: one corrupted `draft_slot` moves
+    real money to the wrong team, wrecks two max bids, leaves conservation at $2,000 and raises
+    nothing. The conflict now rides on the pick itself, so no ingestion path can forget it.
+    """
+    rows = [r for r in copy.deepcopy(load_picks(FIXTURES / "picks.json")) if r["pick_no"] <= 60]
+    moved = next(r for r in rows if r["pick_no"] == 55)
+    truth = moved["metadata"]["slot"]
+    moved["draft_slot"] = 1
+    assert str(truth) != "1"
+
+    result = parse_picks(rows)
+    log = [
+        PickObserved(seq=i + 1, pick=pick)
+        for i, pick in enumerate(sorted(result.picks.values(), key=lambda p: p.pick_no))
+    ]
+    state = fold(log, slots=SLOTS)  # deliberately NOT passing rejects=
+
+    assert state.total_spent + state.total_remaining == 2000, (
+        "conservation still holds; that is the trap"
+    )
+    conflict_alerts = [a for a in state.alerts if "PAYLOAD CONFLICT" in a]
+    assert conflict_alerts, "the wrong-team debit must be announced without a side channel"
+    assert "55" in conflict_alerts[0] and str(truth) in conflict_alerts[0]
+
+
+def test_a_clean_payload_raises_no_conflict_alert():
+    """All 160 real picks, both duplicated fields populated on every one."""
+    result = parse_picks(copy.deepcopy(load_picks(FIXTURES / "picks.json")))
+    log = [
+        PickObserved(seq=i + 1, pick=pick)
+        for i, pick in enumerate(sorted(result.picks.values(), key=lambda p: p.pick_no))
+    ]
+    state = fold(log, slots=SLOTS)
+    assert not [a for a in state.alerts if "PAYLOAD CONFLICT" in a]
+
+
+@pytest.mark.parametrize("field,falsy", [("player_id", ""), ("draft_slot", 0)])
+def test_a_falsy_primary_field_falls_back_without_claiming_the_primary_won(field, falsy):
+    """m2. The fallback uses `or`, so any falsy primary takes the metadata value — but the
+    conflict test used `is not None`, so `player_id: ""` reported a conflict saying "the primary
+    field wins" while the *duplicate* was in effect. Sleeper does send `""` for `player_id` on
+    some rows, so that was a spurious complaint every poll carrying a message that misstated
+    which number was live."""
+    from draft_intel.sleeper.poller import parse_pick
+
+    row = next(r for r in copy.deepcopy(load_picks(FIXTURES / "picks.json")) if r["pick_no"] == 50)
+    row[field] = falsy
+    pick, complaint = parse_pick(row)
+
+    assert pick is not None
+    assert complaint is None, "a falsy primary is a fallback, not a disagreement"
+    assert pick.conflicts == ()

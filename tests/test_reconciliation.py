@@ -122,16 +122,19 @@ def _manifest_keys() -> frozenset[tuple[int, str]]:
     return manifest_keys(resolved, _identity())
 
 
-def test_the_product_classifier_is_armed():
-    """`KeeperClassifier.armed` is the charter's classification mechanism #4 — an unmatched pick
-    inside the ceremonial window is FLAGGED for confirmation rather than silently treated as a
-    competitive bid. It was set True by nothing outside `tests/`, so the backstop existed and
-    never ran.
+def test_the_product_classifier_is_not_armed_until_flagged_can_be_resolved():
+    """DI-053 armed this by default; DI-055 reverses it, and the reversal is the point of the
+    test rather than an incidental default.
 
-    What it guards is not hypothetical: the manifest is a file typed in August, the ceremonial
-    keeper picks land in the first twenty picks on the night, and a keeper swapped afterwards
-    matches nothing. Unarmed, it becomes a COMPETITIVE bid against a player we still show as
-    available.
+    `arming_window` is a hardcoded 20, not a fact read from the feed. DI-053's claim that arming
+    "changes nothing on a fully-resolving manifest" held only for `fixtures/picks.json`, where
+    the ceremonial round happens to occupy exactly picks 1-20 — see the test below, which strips
+    keeper status and loses 20 genuine competitive picks.
+
+    And FLAGGED is currently terminal: `Reclassify` is consumed by the ledger and produced by no
+    product path, and charter §2's prominent pre-draft toggle is Sprint 3 and unbuilt. Arming a
+    backstop before its confirmation loop exists converts a recoverable mistake into a one-way
+    trap. It ships off until both exist.
     """
     from draft_intel.cli import _classifier
 
@@ -141,7 +144,48 @@ def test_the_product_classifier_is_armed():
         _identity(),
         require=20,
     )
-    assert built.armed is True
+    assert built.armed is False
+
+
+def test_arming_costs_real_competitive_picks_when_the_ceremony_is_not_at_picks_1_to_20():
+    """Why the default above is off. The window is a pick-number constant, so it assumes a
+    layout the feed does not guarantee: strip keeper status — a room that holds no ceremonial
+    round, or enters keepers late — and arming silently removes the twenty most expensive picks
+    of the night from `competitive_seq`, and so from skew, inflation, run detection and every
+    tendency profile. That is the poisoning `pick_class` exists to prevent, arriving from the
+    mechanism meant to prevent it."""
+    import copy
+
+    from draft_intel.domain.classify import KeeperClassifier
+    from draft_intel.domain.ledger import fold
+    from draft_intel.replay.harness import load_picks, replay_all
+
+    plain = copy.deepcopy(load_picks(FIXTURES / "picks.json"))
+    for row in plain:
+        row["is_keeper"] = False
+
+    def competitive(armed: bool) -> int:
+        state = fold(
+            replay_all(plain),
+            slots=range(1, 11),
+            classifier=KeeperClassifier(manifest_keys=frozenset(), armed=armed),
+        )
+        return len(state.competitive_seq)
+
+    assert competitive(armed=False) == 160
+    assert competitive(armed=True) == 140, "20 genuine bids lost — this is the blocking case"
+
+
+def test_the_arming_window_includes_its_own_boundary():
+    """`<=` against `<` on a hardcoded constant is the single most consequential character in
+    this classifier, and no test touched pick 20 — the existing pair asserts 7 and 21."""
+    from draft_intel.domain.classify import KeeperClassifier
+
+    classifier = KeeperClassifier(manifest_keys=frozenset(), armed=True, arming_window=20)
+    at_edge = PickSnapshot(pick_no=20, player_id="X", slot=1, amount=5, is_keeper=False)
+    past_edge = PickSnapshot(pick_no=21, player_id="Y", slot=1, amount=5, is_keeper=False)
+    assert classifier(at_edge) is PickClass.FLAGGED
+    assert classifier(past_edge) is PickClass.COMPETITIVE
 
 
 def test_a_keeper_the_manifest_does_not_know_is_flagged_not_counted_as_competitive():

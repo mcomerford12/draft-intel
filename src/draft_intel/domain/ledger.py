@@ -264,6 +264,21 @@ def fold(
             )
 
     ordered_picks = sorted(picks.values(), key=lambda p: p.pick_no)
+
+    # A payload conflict is a money-safety anomaly, so it belongs in `alerts` beside every other
+    # one -- not only in `rejects`, which is documented as "this row was dropped and took its
+    # dollars with it" and reaches the fold only if the caller remembers `rejects=`. A corrupted
+    # `draft_slot` sixty picks into a draft moves real money to the wrong team, wrecks two max
+    # bids, leaves conservation at exactly $2,000 and previously raised nothing at all. Reading
+    # it off the pick means no ingestion path can forget to pass it along.
+    for pick in ordered_picks:
+        for conflict in pick.conflicts:
+            alerts.append(
+                f"PAYLOAD CONFLICT pick {pick.pick_no} (slot {pick.slot} / {pick.player_id}): "
+                f"{conflict}; the pick was kept and the primary field used, so one of this "
+                "team's figures may belong to another"
+            )
+
     # A manual reclassification always wins. Tested with `is not None` rather than `or`
     # because relying on every PickClass member being truthy is a trap waiting for the day
     # someone adds a falsy one.

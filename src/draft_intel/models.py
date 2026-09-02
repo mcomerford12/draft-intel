@@ -117,6 +117,21 @@ class PickSnapshot(Frozen):
     position: str = ""
     name: str = ""
 
+    conflicts: tuple[str, ...] = ()
+    """Payload disagreements found while parsing this pick, carried **on the pick itself**.
+
+    ``draft_slot`` vs ``metadata.slot``, ``player_id`` vs ``metadata.player_id``. The pick was
+    kept and the primary field won, so this is not a rejection -- it is "this row is in the
+    ledger and one of its numbers may be the wrong one".
+
+    It rides on the snapshot rather than in a side channel because of how it has to be read. A
+    wrong slot debits the wrong team while conservation still reconciles to $2,000 and nothing
+    else looks unusual, so the warning has to be impossible to drop: an earlier version put it
+    in ``ParseResult.rejects``, which reaches the fold only if the caller remembers to pass
+    ``rejects=`` -- and the obvious Sprint 3 poll loop, ``parse_picks -> diff_snapshots ->
+    fold``, does not. Travelling on the pick means it survives the event log, crash-restart and
+    replay, and :func:`~draft_intel.domain.ledger.fold` raises it as an alert automatically."""
+
 
 # ---------------------------------------------------------------------------
 # Events
@@ -246,22 +261,43 @@ class TeamState(Frozen):
         return self.total_slots - self.filled_slots
 
     @property
+    def figures_suspect(self) -> bool:
+        """True when a negative amount is in this team's roster, so its money cannot be trusted.
+
+        A negative price is never real. Once one is in the ledger, ``spent`` is too small,
+        ``remaining`` too large, and :attr:`max_bid` is derived from both -- the whole team's
+        arithmetic is downstream of a number that cannot happen.
+
+        This exists because clamping alone was not enough. The fold alerts on the negative
+        amount, but the consumers that act on the figures read the numbers and not
+        ``state.alerts``. Those consumers are :mod:`draft_intel.quant.affordability` and
+        ``cli.replay`` -- **not** the optimizer, which an earlier version of this note claimed
+        and which takes a plain ``budget: int`` and never sees a ``TeamState`` at all.
+        A bounded-but-wrong figure is *more* dangerous than an absurd one: ``$686`` in a $200
+        league announces itself, ``$186`` does not. So the suspicion travels with the figures.
+        """
+        return any(held.amount < 0 for held in self.roster)
+
+    @property
     def max_bid(self) -> int:
         """Most this team can bid while still reserving $1 for every other open slot.
 
         Zero when the roster is full; never negative; **never more than the team's whole
         budget**, whatever the ledger says was spent.
 
-        That last clause is a guard against corrupt input rather than arithmetic. A negative
-        amount -- a sign-flipped correction, a hand-typed ``-500`` -- makes ``spent`` negative,
-        which makes ``remaining`` *larger* than the budget, and this returned **$686 in a $200
-        league**. The fold does alert on it, but ``max_bid`` is read by the optimizer and the
-        affordability ladder, and neither of those reads alerts. Clamping keeps an impossible
-        number from reaching a bid recommendation while the alert still says why.
+        That last clause bounds corrupt input rather than describing arithmetic. A negative
+        amount -- a sign-flipped correction, a hand-typed ``-500`` -- makes ``spent`` negative
+        and ``remaining`` larger than the budget, and this returned **$686 in a $200 league**.
 
-        The clamp is deliberately the only correction made here: ``spent`` and ``remaining``
-        keep reporting exactly what the ledger folded, because hiding the corruption is how it
-        survives to draft night.
+        **The bound is a floor on the damage, not a repair, and it is deliberately paired with
+        :attr:`figures_suspect`.** It only binds when the negative amount dominates the whole
+        roster sum; with $100 of real spend and a -$40 entry the ledger reports $60 spent and
+        this returns $127 against a true $47, and no clamp can recover that -- the information
+        was destroyed at ingestion. Reading the bound as a fix is the mistake; what makes the
+        figure safe to publish is that it arrives labelled.
+
+        ``spent`` and ``remaining`` still report exactly what the ledger folded. Hiding the
+        corruption is how it survives to draft night.
         """
         if self.open_slots <= 0:
             return 0

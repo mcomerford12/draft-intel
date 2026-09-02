@@ -2097,6 +2097,95 @@ append to. Written to schema here, retroactively for the cards already built.
     put a player on two rosters and charged the money twice)
   - orphan slots stop being reported → **CAUGHT**
   - `override_delta` counts adjustments for teams that do not exist → **CAUGHT**
+- **Reviewer verdict:** **APPROVED with findings (round 1)** — 0 blocking, 0 major. All three
+  claimed mutations independently re-run and confirmed, each caught by the strengthened test
+  itself rather than by a neighbour. Item 1's "already closed" claim verified as accurate.
+  Findings, all minor and all still closed by the wider suite: the same-named property twin at
+  `test_properties.py:138` has no lower bound (`max_bid → 0` survives that file, caught only by
+  the gate twin); `test_manual_keeper_counted_exactly_once` hardcodes `is_keeper=True`, the one
+  value api-findings Finding 5 says never appears on a real ceremonial keeper; and
+  `test_ledger_reconciles_exactly_with_overrides` asserts only aggregates, so crediting every
+  correction to the wrong team survives it. **Carried to DI-056**, not folded in silently.
+- **Evaluator verdict:** pending (DI-EVAL-6 in flight).
+
+### [DI-055] Close code review round 1 on DI-053 — arming reversed
+
+- **Sprint:** 1 · **Owner:** orchestrator · **Size:** M · **Branch:** `di-055-eval-round3-fixes`
+- **The blocking finding reversed a decision I made one card earlier, and it was right to.**
+  DI-053 armed `KeeperClassifier` on the product path and asserted "arming changes nothing on a
+  fully-resolving manifest", pinned by comparing whole folded states. The comparison was real;
+  the generalisation was not. `arming_window` is a hardcoded 20, so the claim held only for
+  `fixtures/picks.json`, where the ceremonial round happens to occupy exactly picks 1-20.
+  Reproduced: strip keeper status from the same 160 picks and arming removes **20 of 160
+  competitive picks** — the most expensive of the night — from `competitive_seq`, and so from
+  skew, inflation, run detection and every tendency profile. That is precisely the poisoning
+  `pick_class` exists to prevent, arriving from the mechanism meant to prevent it.
+- **And FLAGGED is terminal today.** `Reclassify` is consumed by the ledger and produced by no
+  product path; charter §2's prominent pre-draft toggle is Sprint 3 and unbuilt. Arming a
+  backstop before its confirmation loop exists converts a recoverable mistake into a one-way
+  trap, three days out. **Deferred to Sprint 3 as DI-057**, to land with the toggle and the
+  `Reclassify` producer — and keyed on manifest incompleteness rather than a pick-number count.
+- **Acceptance criteria:**
+  - [x] **B1** the product classifier ships disarmed; the reversal, and the evidence for it, are
+        written where the next reader will look rather than in a commit message
+  - [x] **M1** `TeamState.figures_suspect` and `Opponent.figures_suspect`. The clamp only binds
+        when the negative amount dominates the whole roster sum — with $100 of real spend and a
+        -$40 entry it is inert and the figure is $127 against a true $47, because the information
+        was destroyed at ingestion. The bound is a floor on the damage, not a repair; what makes
+        the figure safe to publish is that it arrives labelled, and the affordability ladder now
+        prints `⚠ FIGURES SUSPECT` *before* the dollar figure it undermines.
+  - [x] **M2** the clamp is parametrised over the budget, and a `BudgetAdjustment` is shown to
+        raise the ceiling it clamps against. `min(self.remaining, 200)` had survived all 517.
+  - [x] **M3** payload conflicts ride on `PickSnapshot.conflicts` and the fold raises them as
+        `PAYLOAD CONFLICT` alerts automatically. They were in `rejects` — documented as "this row
+        was dropped and took its dollars with it" — reaching the fold only when a caller
+        remembered `rejects=`, which defaults to None. Travelling on the pick also means they
+        survive the event log, crash-restart and replay.
+  - [x] **M4** the arming window's own boundary (pick 20) is pinned; the existing pair asserted
+        7 and 21 and never touched the edge
+  - [x] **m1** the reversal was argued on a consumer that does not exist — `best_roster` takes a
+        plain `budget: int` and never sees a `TeamState`. Corrected in both places it was stated.
+  - [x] **m2** the conflict test uses the same truthiness rule as the fallback. `player_id: ""`
+        falls through to metadata, so calling it a conflict *and* reporting "the primary field
+        wins" was both spurious and backwards — and Sleeper does send `""` on some rows.
+  - [x] **m3** `affordability.py`'s module docstring no longer states an identity the clamp broke
+- **Mutation-verified 5/5** against the exact escapes the reviewer demonstrated: budget hardcoded
+  to 200, arming window off by one, falsy primary reporting a conflict, payload conflicts no
+  longer alerting, `figures_suspect` always False. All five **CAUGHT**; all five escaped before.
+- **§6 process note (m7), accepted.** DI-053 was owned by `data-engineer` and rewrote an
+  assertion in `tests/test_money_safety.py` authored by an earlier round, which §6 forbids
+  without routing through `test-engineer`. The reversal was documented and directionally right,
+  and it was still self-adjudicated inside the implementing card. Recorded rather than argued.
+- **Reviewer verdict:** pending (round 2 not commissioned). · **Evaluator verdict:** pending.
+
+### [DI-056] The next layer of DI-054's finding
+
+- **Sprint:** 1 · **Owner:** test-engineer · **Size:** S · **Dep:** DI-054
+- Three minors from DI-054's review, each an escape the *file* allows and the wider suite still
+  closes — so none is a hole, and all three are the same shape as the finding DI-054 fixed:
+  - [ ] `test_properties.py::test_max_bid_never_strands_a_team` has no lower bound; `max_bid → 0`
+        survives that file, caught only by the gate twin's `assert team.max_bid >= 1`
+  - [ ] `test_manual_keeper_counted_exactly_once` hardcodes `is_keeper=True` — the one value
+        api-findings Finding 5 says never appears on a real ceremonial keeper. A mutation
+        superseding only `is_keeper` picks survives the file and reproduces the §2 double-count.
+  - [ ] `test_ledger_reconciles_exactly_with_overrides` asserts only aggregates, so crediting
+        every correction to the wrong team survives it — the same wrong-team-but-reconciling
+        class DI-053's cross-check exists to catch
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+### [DI-057] Arm the keeper classifier, with its toggle and confirmation loop
+
+- **Sprint:** 3 · **Owner:** data-engineer · **Size:** M · **Dep:** DI-055
+- Deferred from DI-053/DI-055. The backstop is genuinely wanted — an unmatched pick inside the
+  ceremonial window should be FLAGGED for confirmation, not silently counted as a competitive
+  bid — but it cannot ship before the things that make FLAGGED recoverable.
+- **Acceptance criteria:**
+  - [ ] a product path constructs `Reclassify`, so a flagged pick can be confirmed or denied
+  - [ ] charter §2's prominent pre-draft arming toggle exists and is reachable from the CLI
+  - [ ] the window keys on **manifest incompleteness** — a slot that still owes keepers — rather
+        than a hardcoded `pick_no <= 20`, so a room that holds no ceremonial round is unaffected
+  - [ ] FLAGGED picks are surfaced everywhere they matter, not only in `cli.replay`
+  - [ ] pinned on a payload where the ceremonial round is *not* at picks 1-20
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
 ---

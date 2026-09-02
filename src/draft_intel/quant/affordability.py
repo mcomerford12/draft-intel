@@ -10,10 +10,17 @@ Charter §4.7c calls this "the single most actionable auction display in existen
 
 Three quantities, and the whole value is in keeping them apart.
 
-**1. Max bid** — ``budget_remaining - (open_slots - 1)``, §1.1. Hard arithmetic: a team must
-reserve $1 for every roster spot it still has to fill, so this is the most it can legally bid.
-The ledger already computes it per team (``TeamState.max_bid``); this module never recomputes it,
-because two implementations of the same rule drift and one of them will be the one on screen.
+**1. Max bid** — ``budget_remaining - (open_slots - 1)``, §1.1, bounded at the team's budget.
+Hard arithmetic: a team must reserve $1 for every roster spot it still has to fill, so this is
+the most it can legally bid. The ledger already computes it per team (``TeamState.max_bid``);
+this module never recomputes it, because two implementations of the same rule drift and one of
+them will be the one on screen.
+
+The bound is why the identity above is "usually" rather than "always": a negative amount in a
+ledger makes ``budget_remaining`` exceed the budget, and an unbounded figure would advise a $686
+bid in a $200 league. Where the two disagree the team is carrying corrupt input, and
+``Opponent.figures_suspect`` says so on the row rather than leaving it to ``state.alerts``,
+which nothing on this path reads.
 
 **2. Positional need** — does this team have a *starting* slot open at this position? A team with
 both QB slots filled can still bid on a quarterback, and occasionally will, but it is not a
@@ -58,7 +65,22 @@ class Opponent(BaseModel):
     budget_remaining: int
     open_slots: int
     max_bid: int
-    """``budget_remaining - (open_slots - 1)``. Read from the ledger, never recomputed here."""
+    """The most this team can bid. Read from the ledger, never recomputed here.
+
+    Usually ``budget_remaining - (open_slots - 1)``, but **not always**: the ledger bounds it at
+    the team's budget so a negative amount cannot produce a bid larger than the whole league.
+    When the two disagree, :attr:`figures_suspect` is set and the identity above is the thing
+    that has stopped being true.
+    """
+
+    figures_suspect: bool = False
+    """True when this team's ledger contains a negative amount, so none of its money is reliable.
+
+    Carried onto the opponent rather than left in ``state.alerts``, because this class is what
+    the bidding decision is made from. A bounded-but-wrong ``max_bid`` is more dangerous than an
+    absurd one -- $686 in a $200 league announces itself, $186 does not -- so the flag rides with
+    the figure it undermines.
+    """
 
     needs_position: bool
     """A *starting* slot open at this position, counting FLEX for RB/WR/TE."""
@@ -161,7 +183,16 @@ class Affordability(BaseModel):
                 if opponent.aggression is None
                 else f"{opponent.aggression:+.1f}/pick vs model over {opponent.aggression_picks}"
             )
-            lines.append(f"{opponent.owner}: out above ${opponent.max_bid}, {need}, {read}")
+            # The suspect marker goes first, before the number it undermines. A reader
+            # scanning this ladder mid-nomination takes the dollar figure and moves on; a
+            # caveat trailing the line would be read after the decision it should have
+            # changed.
+            suspect = (
+                "⚠ FIGURES SUSPECT (negative amount in ledger) " if opponent.figures_suspect else ""
+            )
+            lines.append(
+                f"{opponent.owner}: {suspect}out above ${opponent.max_bid}, {need}, {read}"
+            )
         return lines
 
 
@@ -257,6 +288,7 @@ def affordability(
                 budget_remaining=team.remaining,
                 open_slots=team.open_slots,
                 max_bid=team.max_bid,
+                figures_suspect=team.figures_suspect,
                 needs_position=gap > 0,
                 starting_gap=gap,
                 aggression=aggression,

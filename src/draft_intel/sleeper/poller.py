@@ -126,13 +126,20 @@ def parse_pick(raw: dict[str, Any]) -> tuple[PickSnapshot | None, str | None]:
     slot = raw.get("draft_slot") or meta.get("slot")
     player_id = raw.get("player_id") or meta.get("player_id")
     pick_no = raw.get("pick_no")
+    # The conflict test must use the same truthiness rule as the fallback two lines above, or
+    # the two disagree about which value won. ``or`` falls through on any falsy primary, so
+    # ``player_id: ""`` and ``draft_slot: 0`` take the metadata value -- while an
+    # ``is not None`` test called them a conflict and reported "the primary field wins", which
+    # was the opposite of what happened. Sleeper does send ``""`` for ``player_id`` on some
+    # rows, so that was a spurious complaint on every poll, carrying a message that misstated
+    # which number was in effect.
     conflicts = [
         f"{field} is {primary!r} but metadata says {duplicate!r}"
         for field, primary, duplicate in (
             ("draft_slot", raw.get("draft_slot"), meta.get("slot")),
             ("player_id", raw.get("player_id"), meta.get("player_id")),
         )
-        if primary is not None and duplicate is not None and str(primary) != str(duplicate)
+        if primary and duplicate and str(primary) != str(duplicate)
     ]
     missing = [
         name
@@ -153,6 +160,7 @@ def parse_pick(raw: dict[str, Any]) -> tuple[PickSnapshot | None, str | None]:
             is_keeper=bool(raw.get("is_keeper")),
             position=str(meta.get("position") or ""),
             name=name,
+            conflicts=tuple(conflicts),
         )
     except (ValidationError, ValueError, TypeError) as exc:
         return None, f"pick {pick_no} failed validation: {exc}"

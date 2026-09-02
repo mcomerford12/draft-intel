@@ -73,33 +73,41 @@ def _classifier(
     identity: Identity,
     *,
     require: int | None,
-    armed: bool = True,
+    armed: bool = False,
 ) -> KeeperClassifier:
     """Build the pick classifier from the resolved manifest.
 
-    **Armed by default, which it had not been from any product path.** ``KeeperClassifier.armed``
-    is the charter's classification mechanism #4 -- an unmatched pick inside the ceremonial
-    window is FLAGGED for confirmation rather than silently treated as a competitive bid -- and
-    it was set ``True`` by nothing outside `tests/`. The backstop existed and never ran.
+    **Deliberately NOT armed, and this is the second decision on that in two cards.** DI-053
+    armed it by default, on the reasoning that ``KeeperClassifier.armed`` is the charter's
+    classification mechanism #4 -- an unmatched pick inside the ceremonial window is FLAGGED for
+    confirmation rather than silently treated as a competitive bid -- and was set ``True`` by
+    nothing outside `tests/`, so the backstop existed and never ran. That reasoning was right
+    about the gap and wrong about the remedy. DI-055 reverses it.
 
-    What it backstops is not hypothetical here. The manifest is a file typed in August; the
-    ceremonial keeper picks land in the first twenty picks on the night. A keeper swapped after
-    the manifest was written matches nothing, and unarmed it becomes a COMPETITIVE pick worth
-    real money against a player we still show as available. Armed, it is FLAGGED and the operator
-    is asked.
+    **What DI-053 missed: ``arming_window`` is a hardcoded count of 20, not a fact read from the
+    feed.** Its acceptance criterion claimed arming "changes nothing on a fully-resolving
+    manifest". That is true only of ``fixtures/picks.json``, where the ceremonial round happens
+    to occupy exactly picks 1-20. Generalising from one fixture:
 
-    The window is ``arming_window`` picks, not the whole draft, so a genuine competitive bid in
-    round three is never flagged, and on a manifest that resolves fully it changes nothing at
-    all -- the mock replays to the same 20 KEEPER / 140 COMPETITIVE ledger either way. Drop one
-    manifest key and the difference is the whole point:
+    ==================================  =========================================
+    ceremonial round at picks 1-20      no change (the fixture, and only it)
+    a keeper entered late, bid at 20    a real $37 bid becomes FLAGGED
+    no ceremonial round at all          **20 of 160 competitive picks lost**
+    ==================================  =========================================
 
-    ===========  ===========================================
-    unarmed      19 KEEPER, **141 COMPETITIVE**
-    armed        19 KEEPER, 140 COMPETITIVE, **1 FLAGGED**
-    ===========  ===========================================
+    Those are the most expensive picks of the night, and they vanish from ``competitive_seq`` --
+    so out of skew, inflation, run detection and every tendency profile. That is exactly the
+    poisoning ``pick_class`` exists to prevent, arriving from the mechanism meant to prevent it.
 
-    ``armed=False`` remains available for callers that genuinely want the raw classification,
-    but no product path uses it.
+    **And FLAGGED is currently terminal.** ``Reclassify`` is consumed by the ledger and produced
+    by no product path, so a flagged pick can never be confirmed or denied; charter §2 also
+    specifies a *prominent pre-draft toggle*, which is Sprint 3 and unbuilt. Arming a backstop
+    before its confirmation loop exists turns a recoverable mistake into a one-way trap, three
+    days before the draft.
+
+    So the switch stays available and off. Arming belongs with the toggle and the ``Reclassify``
+    producer, as one Sprint 3 change -- and the window should key on *manifest incompleteness*
+    (a slot that still owes keepers) rather than a pick-number constant.
     """
     manifest = load_manifest(CONFIG / "keepers.yaml")
     resolved = resolve_manifest(manifest, players)
