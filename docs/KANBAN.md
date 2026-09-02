@@ -43,18 +43,18 @@ you cannot sanity-check. The draft is 2026-09-05 19:00 MDT.
 - **Live check 2026-09-02: 5 of 10 have now joined.** `jswilliams5` holds roster 5, up from the
   four this card was written against. Still 8 of 20 keeper keys resolved, because a joined
   manager is only useful once their Sleeper name is mapped to a manifest owner.
-- **⚠️ One question is now answerable and is the cheapest win on this card.** `jswilliams5` set
-  no `team_name`, so which of the six remaining manifest owners they are cannot be read off the
-  API — and it must not be guessed. A wrong owner→slot mapping classifies that team's two
-  keepers as competitive bids, which poisons skew, inflation and every tendency profile for the
-  whole draft; the tool says so in its own blocker text. **Ask the user: which of Jake, Connor,
-  Keenan, Willie, Burt or TD is `jswilliams5`?** That answer alone takes keeper resolution from
-  8/20 to 10/20.
-- Still unjoined, and blocking the remaining 10 keys: **five of Jake, Connor, Keenan, Willie,
-  Burt, TD** (whichever five `jswilliams5` is not).
-- Mapped today: `mattchupiccu`→Me, `ajthebeard`→AJ, `MasonWAlpert`→Mason,
-  `steeveegee300`→Steve. `manifest_keys(require=20)` raises loudly rather than silently
-  classifying the unmapped keepers as competitive bids.
+- **✅ Resolved 2026-09-02: `jswilliams5` is Jake**, confirmed by the commissioner rather than
+  inferred. The account carries no `team_name` and the display name resembles more than one
+  manifest owner, so there was nothing in the API to read it off — and a wrong mapping here
+  classifies that team's two keepers as competitive bids, poisoning skew, inflation and every
+  tendency profile for the whole draft. Asked rather than guessed; the reasoning is recorded in
+  `config/owners.yaml` so the next mapping is confirmed the same way.
+- **Keeper resolution 8/20 → 10/20.** Verified against the live league, not the fixture.
+- Mapped: `mattchupiccu`→Me, `ajthebeard`→AJ, `MasonWAlpert`→Mason, `steeveegee300`→Steve,
+  `jswilliams5`→Jake.
+- Still unjoined, blocking the remaining 10 keys: **Connor, Keenan, Willie, Burt, TD** — draft
+  slots 6-10. `manifest_keys(require=20)` raises loudly rather than silently classifying their
+  keepers as competitive bids.
 - **Acceptance criteria:**
   - [ ] All 10 managers joined; `build_identity(...).is_complete(10)` is true
   - [ ] `config/owners.yaml` maps all 10 manifest owners to display names
