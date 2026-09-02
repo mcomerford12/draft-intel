@@ -396,10 +396,14 @@ def test_real_auction_values_beat_every_fallback(tmp_path, players, unique_names
     assert result.is_estimate is False
 
 
-def test_a_thin_file_falls_through_and_the_reason_travels_with_the_winner(
-    tmp_path, players, unique_names
-):
-    """Twelve good rows are not a market opinion about a 160-player board."""
+def test_a_thin_file_still_contributes_every_value_it_has(tmp_path, players, unique_names):
+    """The finding that made this layered rather than winner-take-all.
+
+    The module exists chiefly to make the 75% keeper rule computable, and the template tells the
+    user "the 20 keepers matter most". Under winner-take-all a user who supplied exactly those
+    twenty real values fell under a 50%-of-160 threshold and had every one silently replaced by
+    an ADP estimate. Twenty real values are twenty real values.
+    """
     pid, name, pos = unique_names[0]
     path = write_csv(tmp_path / "v.csv", [f"{name},{pos},20"])
     projections = [proj(p, n, ps, 100.0) for p, n, ps in unique_names[:10]]
@@ -413,30 +417,113 @@ def test_a_thin_file_falls_through_and_the_reason_travels_with_the_winner(
         required=10,
     )
 
-    assert result.source == "internal_model"
-    assert any("skipped csv" in note and "covered 1 of 10" in note for note in result.notes)
-    assert pid not in result.notes  # the reason, not the data, is what carries over
+    assert result.values[pid] == 20.0, "the real dollar value survives"
+    assert result.coverage == 10, "and the fallback fills the other nine"
+    assert result.source_for(pid) == "csv"
+    assert all(result.source_for(p.player_id) == "internal_model" for p in projections[1:])
 
 
-def test_coverage_is_judged_against_the_priced_pool_not_the_players_supplied(
+def test_provenance_is_recorded_per_player_not_just_per_board(tmp_path, players, unique_names):
+    """A board where some prices are observed and some are guessed must say which is which."""
+    pid, name, pos = unique_names[0]
+    path = write_csv(tmp_path / "v.csv", [f"{name},{pos},20"])
+    projections = [proj(p, n, ps, 100.0) for p, n, ps in unique_names[:3]]
+
+    result = resolve_market_values(
+        [
+            CsvMarketValues(path, players),
+            InternalMarketValues(dict.fromkeys((p.player_id for p in projections), 99.0)),
+        ],
+        projections,
+        required=3,
+    )
+
+    assert result.is_estimate_for(pid) is False
+    assert result.is_estimate_for(projections[1].player_id) is True
+    assert result.is_estimate is True, "one estimated value makes the board an estimated board"
+    assert result.source == "csv+internal_model"
+
+
+def test_a_board_entirely_of_real_values_is_not_badged_as_an_estimate(
     tmp_path, players, unique_names
 ):
-    """Ten complete rows out of ten supplied is still nothing against a 160-spot auction."""
+    """The pessimistic board-level badge must still be able to come off."""
+    picked = unique_names[:3]
+    path = write_csv(
+        tmp_path / "v.csv", [f"{name},{pos},{20 + i}" for i, (_p, name, pos) in enumerate(picked)]
+    )
+    projections = [proj(p, n, ps, 100.0) for p, n, ps in picked]
+
+    result = resolve_market_values([CsvMarketValues(path, players)], projections, required=3)
+
+    assert result.is_estimate is False
+    assert result.source == "csv"
+
+
+def test_a_higher_authority_provider_is_never_overwritten_by_a_lower_one(
+    tmp_path, players, unique_names
+):
+    pid, name, pos = unique_names[0]
+    path = write_csv(tmp_path / "v.csv", [f"{name},{pos},20"])
+    result = resolve_market_values(
+        [CsvMarketValues(path, players), InternalMarketValues({pid: 999.0})],
+        [proj(pid, name, pos, 100.0)],
+        required=1,
+    )
+    assert result.values[pid] == 20.0
+
+
+def test_a_losing_providers_unresolvable_rows_reach_the_user(tmp_path, players, unique_names):
+    """Previously only the winner's `unmatched` survived.
+
+    Draft-morning scenario: the user pastes 120 rows, 45 fail to resolve, the CSV falls short of
+    the threshold, and the output gives no way at all to learn which rows to fix -- which is
+    precisely what this function's own docstring promised to prevent.
+    """
+    _pid, name, pos = unique_names[0]
+    path = write_csv(
+        tmp_path / "v.csv",
+        [f"{name},{pos},20", "Nobody At All,QB,5", "Also Nobody,RB,6"],
+    )
+    projections = [proj(p, n, ps, 100.0) for p, n, ps in unique_names[:10]]
+
+    result = resolve_market_values(
+        [
+            CsvMarketValues(path, players),
+            InternalMarketValues(dict.fromkeys((p.player_id for p in projections), 99.0)),
+        ],
+        projections,
+        required=160,
+    )
+
+    assert len(result.unmatched) == 2
+    assert all(row.startswith("[csv]") for row in result.unmatched)
+    assert any("Nobody At All" in row for row in result.unmatched)
+
+
+def test_coverage_against_the_priced_pool_is_reported_even_though_it_no_longer_gates(
+    tmp_path, players, unique_names
+):
+    """It is still worth saying that ten values do not price a 160-spot auction."""
     projections = [proj(p, n, ps, 100.0) for p, n, ps in unique_names[:10]]
     provider = InternalMarketValues(dict.fromkeys((p.player_id for p in projections), 5.0))
 
-    assert resolve_market_values([provider], projections, required=10).source == "internal_model"
-    assert resolve_market_values([provider], projections, required=160).source == "none"
+    thin = resolve_market_values([provider], projections, required=160)
+
+    assert thin.coverage == 10
+    assert any(
+        "10 player(s) carry a market value against a priced pool of 160" in note
+        for note in thin.notes
+    )
+    assert any("below the 80 whole-board threshold" in note for note in thin.notes)
 
 
-def test_when_everything_falls_short_no_values_are_returned_at_all():
-    """Pricing off the weakest source's scraps is worse than saying there is nothing."""
+def test_no_provider_with_anything_to_say_leaves_the_source_named_none():
     result = resolve_market_values(
-        [InternalMarketValues({"a": 1.0})], [proj("a", "A", "RB", 1.0)], required=100
+        [InternalMarketValues({})], [proj("a", "A", "RB", 1.0)], required=100
     )
     assert result.source == "none"
     assert result.values == {}
-    assert any("no provider covered" in note for note in result.notes)
 
 
 def test_calling_with_no_providers_is_a_programming_error():
@@ -493,3 +580,100 @@ def test_the_clamp_keeps_a_dollar_player_from_becoming_a_free_one(tmp_path, play
     path = write_csv(tmp_path / "v.csv", [f"{name},{pos},1"])
     values = CsvMarketValues(path, players).market_values([])
     assert retention_price(int(values.values[pid])) == 1
+
+
+# ------------------------------------------------ regressions from review round 1
+
+
+def test_a_quoted_field_containing_a_newline_does_not_take_the_pricing_run_down(
+    tmp_path, players, unique_names
+):
+    """M2. Legal RFC-4180 CSV that Excel and Google Sheets both emit.
+
+    The reader filtered physical lines before csv parsed them, then paired the two streams with
+    ``zip(strict=True)``. One record spanning two physical lines desynchronised the streams and
+    raised, out of ``value()``, with a message naming neither the file nor a line -- on a file
+    the user had every reason to expect would work.
+    """
+    pid, name, pos = unique_names[0]
+    path = tmp_path / "v.csv"
+    path.write_text(f'name,pos,note,value\n{name},{pos},"line one\nline two",25\n')
+
+    result = CsvMarketValues(path, players).market_values([])
+
+    assert result.values == {pid: 25.0}
+    assert result.unmatched == ()
+
+
+def test_a_blank_line_inside_a_quoted_field_is_content_not_a_blank_row(
+    tmp_path, players, unique_names
+):
+    """The physical-line filter deleted these from inside the field, corrupting the value."""
+    pid, name, pos = unique_names[0]
+    path = tmp_path / "v.csv"
+    path.write_text(f'name,pos,note,value\n{name},{pos},"before\n\nafter",25\n')
+
+    result = CsvMarketValues(path, players).market_values([])
+
+    assert result.values == {pid: 25.0}
+
+
+def test_a_hash_inside_a_quoted_field_is_content_not_a_comment(tmp_path, players, unique_names):
+    """Parsing before filtering makes the comment test exact: it is the first *field* that
+    decides, not the first character of a physical line."""
+    pid, name, pos = unique_names[0]
+    path = tmp_path / "v.csv"
+    path.write_text(f'name,pos,value\n"{name}",{pos},25\n')
+    assert CsvMarketValues(path, players).market_values([]).values == {pid: 25.0}
+
+
+def test_a_short_row_is_reported_rather_than_raising(tmp_path, players, unique_names):
+    _pid, name, pos = unique_names[0]
+    path = write_csv(tmp_path / "v.csv", [f"{name},{pos}"])
+    result = CsvMarketValues(path, players).market_values([])
+    assert result.values == {}
+    assert len(result.unmatched) == 1
+
+
+def test_a_row_with_a_blank_player_id_cell_falls_back_to_name_resolution(
+    tmp_path, players, unique_names
+):
+    """m6. Reachable and previously untested."""
+    pid, name, pos = unique_names[0]
+    path = write_csv(tmp_path / "v.csv", [f"{name},{pos},,25"], header="name,pos,player_id,value")
+    assert CsvMarketValues(path, players).market_values([]).values == {pid: 25.0}
+
+
+def test_a_row_with_only_a_blank_id_and_no_name_column_is_reported(tmp_path, players):
+    path = write_csv(tmp_path / "v.csv", [",25"], header="player_id,value")
+    result = CsvMarketValues(path, players).market_values([])
+    assert result.values == {}
+    assert "no player_id and no name/position" in result.unmatched[0]
+
+
+def test_a_ladder_longer_than_the_ranked_list_reports_the_shortfall():
+    """M4. The docstring claimed the total was preserved exactly; it is not, and cannot be.
+
+    With more rungs than ranked players there is nobody to hand the surplus to. That is real
+    information about the ADP feed's coverage, not an arithmetic slip to be hidden by rescaling.
+    """
+    ladder = [50.0, 30.0, 20.0, 10.0]
+    payload = [{"player_id": "a", "stats": {"adp_2qb": 1.0}}]
+    players = [proj("a", "A", "RB", 1.0)]
+
+    result = AdpMarketValues(payload, ladder).market_values(players)
+
+    assert result.total == 50.0
+    assert result.total < sum(ladder)
+    assert any("$60 of it goes unassigned" in note for note in result.notes)
+
+
+def test_players_absent_from_the_adp_payload_are_counted_as_uncovered():
+    """m2. The old count looked only at payload records, so a projected player with no record
+    at all was invisible -- understating the very gap it was reporting."""
+    payload = [{"player_id": "a", "stats": {"adp_2qb": 1.0}}]
+    players = [proj("a", "A", "RB", 1.0), proj("ghost", "G", "RB", 1.0)]
+
+    result = AdpMarketValues(payload, [50.0, 30.0]).market_values(players)
+
+    assert any("1 of 2 priced players carry no usable adp_2qb" in note for note in result.notes)

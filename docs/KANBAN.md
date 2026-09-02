@@ -967,6 +967,123 @@ Criteria 1-5 and 10 are solid and independently confirmed. The defects are conce
 "what happens when the input is not the mock fixture" boundary, and every one of them fails silently
 — which is the failure mode this project's charter says is the only one that matters.
 
+## In Progress — Sprint 2 cards to schema
+
+The reviewer's process blocker on round 1 was correct: DI-045 had no card at all and DI-027
+existed only as a row in the table below, with no acceptance criteria and no verdict fields. §6.3
+requires the verdict to be a written artifact appended to the card, and there was no card to
+append to. Written to schema here, retroactively for the cards already built.
+
+### [DI-045] Separate `draft_rounds` from `roster_size`
+
+- **Sprint:** 2 · **Owner:** architect · **Size:** S · **Branch:** `di-045-rounds-vs-roster-size`
+  · **PR:** #7
+- **Why:** `total_slots` did triple duty — roster-size tripwire, priced-pool multiplier, per-team
+  slot cap — and was right only because this league happens to draft every roster spot. The
+  commissioner then reported 18 roster positions against 16 draft rounds, which the single field
+  cannot represent.
+- **Acceptance criteria:**
+  - [x] `auction_pool = teams * draft_rounds` is the sole feed to the priced pool
+  - [x] roster capacity above `draft_rounds` moves no price and does not refuse the boot
+  - [x] `roster_size < draft_rounds` still blocks; a self-contradictory config file is caught at load
+  - [x] `draft_rounds` cannot be silently wrong — see DI-046 B1
+  - [x] `draft_start` tripwire, warning-only, matching Sleeper's `start_time` exactly
+  - [x] ADR-0005; the 18-vs-16 contradiction flagged as Finding 10 rather than resolved silently
+- **Reviewer verdict:** REJECT (round 1) — B1, `draft_rounds` documented as blocking in three
+  places and blocking against nothing. Closed in DI-046.
+- **Evaluator verdict:** pending.
+
+### [DI-027] `MarketValueProvider` + the auction-value ingest path
+
+- **Sprint:** 2 · **Owner:** quant · **Size:** M · **Branch:** `di-027-market-value-provider`
+  · **PR:** #8
+- **Why:** Sleeper publishes no auction value (Finding 3), and the commissioner has confirmed the
+  `floor(0.75 × sleeper_auction_value)` keeper rule *will* be applied on draft day. Without a
+  route for those values in, the league's own rule is not computable and every keeper price is a
+  guess. Also §4.4: market value must be a pluggable interface with at least three
+  implementations, and no feature may hard-depend on an undocumented endpoint.
+- **Acceptance criteria:**
+  - [x] three implementations: CSV, ADP rank transfer, internal model
+  - [x] CSV resolves by name **and** position, with `player_id` as the escape hatch
+  - [x] unresolvable rows reported with true file line numbers, never dropped
+  - [x] `inf`/`nan` rejected at the cell that carried them
+  - [x] provenance inseparable from the numbers; estimates badged
+  - [x] the app functions with `api.sleeper.com` dead (CSV and internal both work)
+  - [x] supplying only the 20 keeper values is useful — see DI-046 M6
+- **Reviewer verdict:** REJECT (round 1) — M2 crash on a legal CSV, M3 diagnostics discarded,
+  M4 false docstring claim, M5 unreproducible arithmetic, M6 gate defeats the primary use case.
+  All closed in DI-046.
+- **Evaluator verdict:** pending.
+
+### [DI-031] Keeper surplus board + structural `keeper_inflation`
+
+- **Sprint:** 2 · **Owner:** quant · **Size:** M · **Branch:** `di-031-keeper-surplus` · **PR:** #9
+- **Why:** §1.1 calls the structural inflation figure "the single most actionable pre-draft output
+  of the whole system", and §8 says it should land early in the sprint rather than last.
+- **Acceptance criteria:**
+  - [x] per-keeper book vs paid; league-wide surplus
+  - [x] `keeper_inflation = total_live_money / available_book_value`, never a ratio of money pools
+  - [x] both scenarios carried: prices as loaded, and prices under the 75% rule
+  - [x] a partial keeper spend refuses to produce derived figures rather than approximating
+  - [x] §2 reconciliation alerts on loaded price vs rule-implied price
+- **Reviewer verdict:** not yet reviewed (built after round 1 was commissioned).
+- **Evaluator verdict:** pending.
+
+### [DI-032] Live `market_inflation`, overall and per position
+
+- **Sprint:** 2 · **Owner:** quant · **Size:** M · **Branch:** `di-032-live-inflation`
+- **Why:** §4.5. The live figure the user bids against, kept permanently distinct from the
+  structural one.
+- **Acceptance criteria:**
+  - [x] §4.5 formula exactly; inflation is exactly 1.0000 at pick 0, tested as an identity
+        against the real board
+  - [x] every input filtered to `COMPETITIVE`, through one function
+  - [x] time series keyed on `competitive_seq`; Case A/B curve equivalence asserted
+  - [x] positional figure carries real positional signal — see the deviation note below
+- **Deviation from the charter, deliberate:** §4.5's *forward* positional formula is degenerate.
+  Allocating remaining money in proportion to remaining positional model value makes the value
+  term cancel, so every position reports the overall figure. What ships is the *realized* ratio,
+  which is what §4.5's own example sentence ("RB is inflating at 1.18×") describes.
+  `forward_positional_inflation` exists only to pin the degeneracy under test.
+- **Reviewer verdict:** pending.
+- **Evaluator verdict:** pending.
+
+### [DI-046] Close review round 1 findings
+
+- **Sprint:** 2 · **Owner:** orchestrator · **Size:** M · **Branch:** `di-046-review-round1-fixes`
+- **Acceptance criteria:**
+  - [x] **B1** `draft_rounds` blocks when `draft.settings.rounds` and `len(roster_positions)`
+        agree against the config, and warns while the API disagrees with itself. Two-sided.
+        ADR-0005's self-contradiction struck, and both of its false compensating controls
+        removed rather than quietly dropped.
+  - [x] **B1b** `validate()` runs on the pricing path, not only on `smoke`. The auction pool,
+        budget and draft start print above the board.
+  - [x] **M2** CSV comments and blanks are dropped *after* parsing, so a quoted field containing
+        a newline no longer crashes the pricing run. True file line numbers via `reader.line_num`.
+  - [x] **M3** every provider's unresolvable rows reach the user, prefixed with their source.
+  - [x] **M4** the ADP ladder's total is preserved only when the ranked list covers it; the
+        docstring said otherwise and the shortfall is now reported in dollars.
+  - [x] **M5** the retention table's arithmetic reproduces by hand: the value is rounded to
+        dollars once and both the display and the rule use that figure.
+  - [x] **M6** providers are **layered**, not winner-take-all. Twenty real keeper values are
+        twenty real values. Provenance recorded per player.
+  - [x] **m1** the `pid not in result.notes` tautology replaced.
+  - [x] **m2** ADP's uncovered count measured against the priced players, not the payload.
+  - [x] **m3** every spelling of the draft start collapses to one; a non-numeric `start_time`
+        warns rather than raising.
+  - [x] **m4** the blocking roster message names the configured value.
+  - [x] **m5/m7** the CSV template's description of comment handling corrected; player names
+        removed from source prose.
+  - [x] **m6** the blank-`player_id` branch covered.
+  - [x] 18/18 mutation-verified across `market.py`, `config.py`, `keeper_board.py`
+- **Open question for the orchestrator (m7):** §1's CRITICAL DATA RULE reads literally as "any
+  player name appearing in source outside of a clearly-labeled test fixture is a review-blocking
+  defect", but `domain/keepers.py` has named two players in prose since Sprint 1 to explain the
+  collision hazard. New code avoids names entirely; the existing precedent is untouched. Whether
+  prose exceptions are allowed needs settling before a future reviewer rejects them.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.

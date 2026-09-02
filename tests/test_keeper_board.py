@@ -469,3 +469,43 @@ def test_a_board_with_no_available_book_value_does_not_divide_by_zero():
         complete=True,
     )
     assert scenario.keeper_inflation == 1.0
+
+
+# --------------------------------------- review round 1: M5, arithmetic a human can check
+
+
+def test_the_displayed_market_value_and_the_rule_price_agree_with_each_other():
+    """M5. The board printed rows a human could not reproduce.
+
+    A $29.60 value displayed as $30 while the rule truncated to $29 and produced $21, under a
+    header reading floor(0.75 x market value) -- where floor(0.75 x 30) is $22. The Sprint 2
+    gate is a human reading this board; a table whose own arithmetic does not hold trains them
+    to chase phantom $1 divergences across half the slate.
+    """
+    priced = board(value("k1", market_value=40.0, is_keeper=True), value("a", market_value=60.0))
+    result = keeper_board(
+        priced,
+        keeper_owners={"k1": "AJ"},
+        prices={"k1": 30},
+        market=MarketValues(source="csv", values={"k1": 29.6}),
+    )
+
+    (line,) = result.lines
+    assert line.market_value == 30
+    assert line.rule_price == 22  # floor(0.75 * 30), reproducible from the displayed value
+
+
+@pytest.mark.parametrize("raw", [29.6, 30.0, 30.4])
+def test_the_rule_is_applied_to_the_rounded_dollar_value_not_the_raw_float(raw):
+    """The league rule is floor(0.75 x sleeper_auction_value), and an auction value is whole
+    dollars. Rounding once, up front, is what makes every row on the board self-consistent."""
+    priced = board(value("k1", market_value=40.0, is_keeper=True), value("a", market_value=60.0))
+    result = keeper_board(
+        priced,
+        keeper_owners={"k1": "AJ"},
+        prices={"k1": 30},
+        market=MarketValues(source="csv", values={"k1": raw}),
+    )
+    line = result.lines[0]
+    assert line.market_value is not None
+    assert line.rule_price == (int(line.market_value) * 3) // 4

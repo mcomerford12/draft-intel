@@ -7,10 +7,16 @@
 # Severity is graded (ADR-0002), and the grading now turns on ONE question: does the field
 # change what a player costs?
 #
-#   BLOCKING - starting slots, budget, team count, draft_rounds. These scale every price in
-#              the model. Refuse to start.
+#   BLOCKING - starting slots, budget, team count. These scale every price in the model and
+#              have an unambiguous API source. Refuse to start.
 #   WARNING  - roster_size, bench depth, draft.settings staleness, start_time drift. Loud,
 #              persistent banner, but the tool boots.
+#
+#   draft_rounds is CONDITIONAL. It scales every price, but has no unambiguous API source
+#   today: draft.settings.rounds says 15 (stale, Finding 1) and roster length stops being
+#   evidence about the draft once the two are decoupled. So it BLOCKS when those two API
+#   fields agree with each other and disagree with this file, and WARNS when the API
+#   disagrees with itself. See ADR-0005.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # WHY roster_size AND draft_rounds ARE SEPARATE FIELDS (ADR-0005)
@@ -38,7 +44,7 @@
 teams: 10
 budget: 200
 
-# Players each team buys at auction. Scales every price. BLOCKING.
+# Players each team buys at auction. Scales every price. Conditionally blocking (above).
 draft_rounds: 16
 
 # Total roster capacity per team. Anything above draft_rounds is waiver space and costs

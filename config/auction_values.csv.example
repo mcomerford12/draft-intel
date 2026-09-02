@@ -16,10 +16,10 @@ name,pos,team,player_id,value
 # COLUMNS
 #   value      REQUIRED. Dollars. `47`, `$47`, `47.0` and `1,200` all parse.
 #   name + pos REQUIRED unless player_id is given. Position is confirmed against Sleeper's
-#              map, and that confirmation is not decoration: Sleeper carries a guard named
-#              Josh Allen alongside the Buffalo quarterback, and a cornerback named Lamar
-#              Jackson alongside the Baltimore one. Name-only matching attaches the value to
-#              the wrong player silently.
+#              map, and that confirmation is not decoration: full names collide across the
+#              thousands of defensive and offensive-line players Sleeper also carries, and on
+#              the current slate two of this league's own keepers share a name with a
+#              defender. Name-only matching attaches the value to the wrong player silently.
 #   player_id  OPTIONAL. Wins over name resolution when present. This is the escape hatch
 #              for a collision the name and position cannot resolve between them.
 #   team       OPTIONAL, ignored. Included because exports usually carry it.
@@ -29,17 +29,22 @@ name,pos,team,player_id,value
 # `pos`/`position`, `value`/`price`/`auction`/`cost`/`$`.
 #
 # WHAT HAPPENS TO ROWS THAT DO NOT RESOLVE
-#   They are reported, never dropped. Run `make prep` and any unresolvable row is printed
-#   with its line number and the reason. A row that quietly vanished would understate
-#   coverage and silently omit a player from the keeper-price check.
+#   They are reported, never dropped. Run `uv run python -m draft_intel.cli value` and any
+#   unresolvable row is printed with its line number and the reason. A row that quietly
+#   vanished would understate coverage and omit a player from the keeper-price check.
 #
 # HOW COMPLETE DOES IT NEED TO BE?
-#   The 20 keepers matter most -- they are what the 75% rule prices. Beyond that, coverage of
-#   at least half the 160-player pool is needed before the file is preferred over the
-#   fallbacks; below that the tool says so and falls through rather than pricing a board off
-#   a handful of rows.
+#   As complete as you like. Sources are LAYERED, not winner-take-all: every value in this
+#   file is used, and the fallbacks fill only the players it does not mention. Twenty rows
+#   covering the twenty keepers give twenty real retention prices, and the rest of the board
+#   stays estimated and is labelled as such.
 #
-# Delete these comment lines before use if your spreadsheet dislikes them; the reader skips
-# any row whose value column will not parse, and reports it, so leaving them is harmless but
-# noisy.
+#   The 20 keepers matter most -- they are what the 75% rule prices. Anything beyond that
+#   sharpens the edge figures, which compare what the room will pay against what the model
+#   says a player is worth.
+#
+# Leave or delete these comment lines as you please. Any row whose first field starts with #
+# is skipped, as is any blank row, and neither is reported as a problem. The skip happens
+# after the file is parsed as CSV, so a quoted field containing a # or a line break is treated
+# as content rather than as a comment.
 # ---------------------------------------------------------------------------------------

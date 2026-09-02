@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -312,3 +313,130 @@ def test_draft_rounds_and_roster_size_are_not_the_same_knob(tmp_path):
     (tmp_path / "b.yaml").write_text(body.format(size=18))
     assert load_league_config(tmp_path / "a.yaml").auction_pool == 160
     assert load_league_config(tmp_path / "b.yaml").auction_pool == 160
+
+
+# ------------------------------------- draft_rounds severity (DI-046, review B1)
+
+
+def _league_with(real_league: dict, *, rounds_in_roster: int) -> dict:
+    """The real league with its roster padded or trimmed to a given length."""
+    positions = list(real_league["roster_positions"])
+    while len(positions) < rounds_in_roster:
+        positions.append("BN")
+    return {**real_league, "roster_positions": positions[:rounds_in_roster]}
+
+
+def test_draft_rounds_blocks_when_both_api_fields_agree_against_the_config(real_league, real_draft):
+    """The scenario the first version of this check shipped without covering.
+
+    The commissioner re-saves draft settings, the roster grows to 18 and `rounds` becomes 18.
+    The two independent API fields now corroborate each other and our configured 16 is wrong.
+    Under the old code this booted with warnings and priced a 160-player pool against a
+    180-pick draft: `pool_full` excludes twenty players who will actually be bought,
+    `discretionary` is off by twenty dollars, and the §4.3 sum invariants still pass because
+    they are self-consistent against the wrong pool. A wrong-priced board with no error.
+    """
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    league = _league_with(real_league, rounds_in_roster=18)
+    draft = json.loads(json.dumps(real_draft))
+    draft["settings"]["rounds"] = 18
+
+    with pytest.raises(ConfigMismatch, match="draft_rounds"):
+        assert_startable(validate(config, league, draft))
+
+
+def test_draft_rounds_blocks_in_the_dangerous_direction_too(real_league, real_draft):
+    """A configured value LARGER than reality is the direction no downstream guard catches.
+
+    The ledger's per-team slot cap fires only when a team takes one pick too many, which is the
+    end of the draft, and never fires at all when the configured figure exceeds reality.
+    """
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    league = _league_with(real_league, rounds_in_roster=14)
+    draft = json.loads(json.dumps(real_draft))
+    draft["settings"]["rounds"] = 14
+
+    issues = validate(config, league, draft)
+    blocking = [i for i in issues if i.severity == Severity.BLOCKING]
+    assert any(i.field == "draft_rounds" for i in blocking), blocking
+
+
+def test_draft_rounds_only_warns_while_the_api_disagrees_with_itself(real_league, real_draft):
+    """Today's state: roster says 16, draft.settings says 15. Nothing is authoritative, so the
+    tool must boot -- blocking here takes it down on draft night over a diagnosed discrepancy."""
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    warnings = assert_startable(validate(config, real_league, real_draft))  # must not raise
+    assert any(w.field == "draft.rounds" for w in warnings)
+
+
+def test_a_bigger_roster_alone_does_not_block_draft_rounds(real_league, real_draft):
+    """Roster length stops being evidence about the draft once the two are decoupled.
+
+    18 roster positions with draft.settings still saying 15: the API disagrees with itself, so
+    this is the commissioner's reported shape and it must boot.
+    """
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    league = _league_with(real_league, rounds_in_roster=18)
+    warnings = assert_startable(validate(config, league, real_draft))  # must not raise
+    assert {"roster_size", "bench"} <= {w.field for w in warnings}
+
+
+def test_a_non_numeric_rounds_value_warns_rather_than_crashing(real_league, real_draft):
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    draft = json.loads(json.dumps(real_draft))
+    draft["settings"]["rounds"] = "sixteen"
+    warnings = assert_startable(validate(config, real_league, draft))
+    assert any(w.field == "draft.rounds" for w in warnings)
+
+
+def test_a_blocking_roster_size_message_still_names_the_configured_value(real_league, real_draft):
+    """m4: the operator needs to see what was expected at the moment it refuses to start."""
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    league = _league_with(real_league, rounds_in_roster=12)
+    with pytest.raises(ConfigMismatch, match=r"expected '16 \(and at least draft_rounds, 16\)'"):
+        assert_startable(validate(config, league, real_draft))
+
+
+# ------------------------------------------------ draft_start normalisation (m3)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "2026-09-06T01:00:00Z",
+        "2026-09-06T01:00:00+00:00",
+        "2026-09-05T19:00:00-06:00",
+        datetime(2026, 9, 6, 1, 0, tzinfo=UTC),
+        datetime(2026, 9, 6, 1, 0),
+    ],
+)
+def test_every_spelling_of_the_same_instant_collapses_to_one(tmp_path, raw):
+    """An unquoted timestamp is parsed by yaml into a datetime, which would never equal a str
+    and would warn permanently about a draft that has not moved."""
+    path = tmp_path / "league.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "teams": 10,
+                "budget": 200,
+                "draft_rounds": 16,
+                "roster_size": 16,
+                "keepers_per_team": 2,
+                "bench": 6,
+                "starters": {"QB": 2},
+                "draft_start": raw,
+            }
+        )
+    )
+    assert load_league_config(path).draft_start == "2026-09-06T01:00:00Z"
+
+
+def test_an_unparseable_start_time_warns_rather_than_raising(real_league, real_draft):
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    draft = json.loads(json.dumps(real_draft))
+    draft["settings"]["rounds"] = 16  # quiet the unrelated warning
+    draft["start_time"] = "not a timestamp"
+    warnings = assert_startable(validate(config, real_league, draft))
+    drift = [w for w in warnings if w.field == "draft.start_time"]
+    assert len(drift) == 1
+    assert "unparseable" in str(drift[0].actual)

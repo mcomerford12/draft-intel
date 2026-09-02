@@ -9,8 +9,12 @@ DEF, 6 bench, 16 slots; ``draft.settings`` says 1 QB, 1 DEF, 5 bench, 15 rounds.
 docs/api-findings.md, Finding 1. So validation is graded rather than binary, and the grading
 turns on a single question: **does this field change what a player costs?**
 
-* Starting slots, budget, team count and ``draft_rounds`` all scale every price in the
-  model. Disagreement is **blocking** - refuse to start.
+* Starting slots, budget and team count all scale every price in the model. Disagreement is
+  **blocking** - refuse to start.
+* ``draft_rounds`` also scales every price, but has no unambiguous API source today, so its
+  severity is conditional: it **blocks** when ``draft.settings.rounds`` and
+  ``len(roster_positions)`` agree with each other and disagree with the config, and warns when
+  the API disagrees with itself. See :func:`_check_draft_rounds`.
 * Roster size beyond ``draft_rounds``, bench depth, the stale ``draft.settings`` block and
   a moved ``start_time`` change no price. They are **loud but non-blocking**.
 
@@ -110,7 +114,7 @@ def load_league_config(path: str | Path = "config/league.yaml") -> LeagueConfig:
         keepers_per_team=int(data["keepers_per_team"]),
         bench=int(data["bench"]),
         starters={str(k): int(v) for k, v in (data.get("starters") or {}).items()},
-        draft_start=data.get("draft_start"),
+        draft_start=_normalise_start(data.get("draft_start")),
     )
     # Caught here rather than at validate(): a config file that contradicts itself is a typo
     # in our own repo, not a league that drifted, and it should never reach the API comparison.
@@ -128,9 +132,94 @@ def _utc_iso(epoch_millis: int) -> str:
     return datetime.fromtimestamp(epoch_millis / 1000, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _normalise_start(raw: Any) -> str | None:
+    """Reduce whatever the YAML gave us to the one canonical spelling we compare on.
+
+    The comparison is between formatted strings, so every equivalent spelling of the same
+    instant has to collapse to one. Three arrive in practice and all three mean draft night:
+
+    * a quoted ``"2026-09-06T01:00:00Z"`` -- the intended form;
+    * the same value unquoted, which ``yaml.safe_load`` silently parses into a ``datetime``
+      and which would then never equal a ``str``, warning permanently about a draft that has
+      not moved;
+    * an explicit ``+00:00`` offset, or a local offset like ``-06:00``, which names the same
+      instant in different words.
+
+    A value that is none of those is returned untouched, so it surfaces as a mismatch the user
+    can see and fix rather than as a silent ``None``.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        moment = raw if raw.tzinfo else raw.replace(tzinfo=UTC)
+        return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if isinstance(raw, str):
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return raw
+        moment = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return str(raw)
+
+
 def positions_from_roster(roster_positions: list[str]) -> dict[str, int]:
     """Count starting slots from ``league.roster_positions``, excluding bench and IR."""
     return {k: v for k, v in Counter(roster_positions).items() if k not in {"BN", "IR", "TAXI"}}
+
+
+def _check_draft_rounds(
+    config: LeagueConfig, draft_rounds: Any, roster_size: int
+) -> list[ConfigIssue]:
+    """Grade ``draft_rounds`` against the two API fields that speak to the auction pool size.
+
+    ``draft_rounds`` scales every price in the model -- get it wrong and ``pool_full`` excludes
+    players who will actually be bought, ``discretionary`` is off by the difference, and the
+    §4.3 sum invariants still pass because they are self-consistent against the wrong pool. A
+    wrong-priced board with no error. So this cannot be a warning in general.
+
+    But it also cannot be a hard block against ``draft.settings.rounds``, which says 15 today
+    while the league is a 16-round league (Finding 1); blocking on that takes the tool down on
+    draft night over a discrepancy already diagnosed. And roster length is not corroboration on
+    its own -- the whole point of ADR-0005 is that a roster may be larger than the draft.
+
+    So the severity turns on **whether the API agrees with itself**:
+
+    * ``settings.rounds == roster_size`` -- the two independent API fields corroborate each
+      other. That agreed value is authoritative and disagreeing with it **blocks**. This is the
+      state the league reaches once DI-004 lands, and it is the case where a silently wrong
+      pool size would otherwise be shipped.
+    * they disagree -- the API is internally inconsistent, which is today. Nothing is
+      authoritative, so warn on each and let the tool boot.
+
+    The check is deliberately two-sided. A ``draft_rounds`` that is too *large* is the more
+    dangerous direction and the one the ledger's per-team slot cap can never catch: that cap
+    fires only when a team takes one pick too many, which is the end of the draft, and never
+    fires at all when the configured figure exceeds reality.
+    """
+    if draft_rounds is None:
+        return []
+    if not isinstance(draft_rounds, int) or isinstance(draft_rounds, bool):
+        return [
+            ConfigIssue(
+                Severity.WARNING, "draft.rounds", config.draft_rounds, draft_rounds, "draft"
+            )
+        ]
+    if draft_rounds == config.draft_rounds:
+        return []
+    if draft_rounds == roster_size:
+        return [
+            ConfigIssue(
+                Severity.BLOCKING,
+                "draft_rounds",
+                config.draft_rounds,
+                draft_rounds,
+                "draft.settings.rounds, corroborated by roster_positions",
+            )
+        ]
+    return [
+        ConfigIssue(Severity.WARNING, "draft.rounds", config.draft_rounds, draft_rounds, "draft")
+    ]
 
 
 def validate(
@@ -171,12 +260,12 @@ def validate(
             ConfigIssue(
                 Severity.BLOCKING,
                 "roster_size",
-                f">= draft_rounds ({config.draft_rounds})",
+                f"{config.roster_size} (and at least draft_rounds, {config.draft_rounds})",
                 roster_size,
                 "league",
             )
         )
-    elif roster_size != config.roster_size:
+    if roster_size != config.roster_size:
         issues.append(
             ConfigIssue(Severity.WARNING, "roster_size", config.roster_size, roster_size, "league")
         )
@@ -205,23 +294,20 @@ def validate(
         issues.append(
             ConfigIssue(Severity.WARNING, "draft.slots_def", 0, settings["slots_def"], "draft")
         )
-    # `draft.settings.rounds` is the only API field that speaks to the auction pool size, and
-    # it is currently stale at 15 (Finding 1). Roster length is NOT corroboration: the whole
-    # point of separating the two is that a roster can be larger than the draft. So there is no
-    # source to block against today, and this warns. Once DI-004 lands -- the commissioner
-    # re-saving draft settings -- this field becomes authoritative and the warning goes quiet;
-    # if it then disagrees, the pool size is genuinely in doubt and the banner is the signal.
-    if settings.get("rounds") is not None and settings["rounds"] != config.draft_rounds:
-        issues.append(
-            ConfigIssue(
-                Severity.WARNING, "draft.rounds", config.draft_rounds, settings["rounds"], "draft"
-            )
-        )
+    issues.extend(_check_draft_rounds(config, settings.get("rounds"), roster_size))
     # A moved draft invalidates every "how long do I have" answer the tool gives, but it must
     # never keep the tool from starting -- a commissioner nudging the start time by an hour is
     # routine, and refusing to boot over it on the night is the worst possible trade.
-    if config.draft_start is not None and draft.get("start_time") is not None:
-        actual = _utc_iso(int(draft["start_time"]))
+    start_time = draft.get("start_time")
+    if config.draft_start is not None and start_time is not None:
+        # Not `int(start_time)`: Sleeper has returned a string here before, and a start time
+        # that cannot be parsed must warn like any other drift rather than take the boot down
+        # over a field that changes no price.
+        actual = (
+            _utc_iso(int(start_time))
+            if isinstance(start_time, int | float) and not isinstance(start_time, bool)
+            else f"unparseable ({start_time!r})"
+        )
         if actual != config.draft_start:
             issues.append(
                 ConfigIssue(

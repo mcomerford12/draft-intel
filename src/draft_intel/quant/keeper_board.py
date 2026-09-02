@@ -287,10 +287,18 @@ def keeper_board(
                 name=player.name,
                 position=player.position,
                 book_value=player.market_value,
-                market_value=value,
                 price_paid=prices.get(player_id),
+                # `round`, not `int`. The rule is floor(0.75 x sleeper_auction_value) where the
+                # auction value is a whole-dollar figure, so the value is rounded to dollars
+                # ONCE and the rule applied to that -- and `market_value` below carries the same
+                # rounded figure. Truncating instead put a different number into the rule than
+                # the one displayed: a $29.60 value showed as $30 and ruled to $21, under a
+                # header reading floor(0.75 x market value), where floor(0.75 x 30) is $22. A
+                # human checking the board by hand could not reproduce it, and would chase a
+                # phantom $1 divergence across half the slate.
+                market_value=round(value) if value is not None else None,
                 rule_price=(
-                    retention_price(int(value), minimum=minimum_retention_price)
+                    retention_price(round(value), minimum=minimum_retention_price)
                     if value is not None
                     else None
                 ),

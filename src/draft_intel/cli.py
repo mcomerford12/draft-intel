@@ -189,6 +189,28 @@ def value() -> int:
     draft = json.loads((FIXTURES / "draft.json").read_text())
     picks = load_picks(FIXTURES / "picks.json")
 
+    # The tripwire runs on the pricing path, not only on `smoke`. It previously fired nowhere a
+    # person reading a priced board would see it, which made a blocking check that nothing
+    # blocked on: every figure below is scaled by draft_rounds, the budget and the starting
+    # slots, and a board printed against a league that has drifted is wrong in silence.
+    # Validated against the REAL draft object, since that is the one the tool will meet on the
+    # night; the mock below only supplies identity and picks.
+    print("=" * 78)
+    print("CONFIG TRIPWIRE  (ADR-0002 / ADR-0005)")
+    print("=" * 78)
+    warnings = assert_startable(
+        validate(config, league, json.loads((FIXTURES / "real_draft.json").read_text()))
+    )
+    print(
+        f"  auction pool  {config.teams} teams x {config.draft_rounds} draft rounds = "
+        f"{config.auction_pool} players bought   (roster capacity {config.roster_size})"
+    )
+    print(f"  budget        ${config.budget}/team, ${config.teams * config.budget} in the room")
+    print(f"  draft starts  {config.draft_start}")
+    for warning in warnings:
+        print(f"  WARN {warning}")
+
+    print()
     projections, unreliable = build_projections(projections_raw, league["scoring_settings"])
 
     manifest = load_manifest(CONFIG / "keepers.yaml")
@@ -316,7 +338,12 @@ def value() -> int:
         [
             CsvMarketValues(CONFIG / "auction_values.csv", players_map),
             AdpMarketValues(projections_raw, ladder),
-            InternalMarketValues({p.player_id: p.market_value for p in board.players}),
+            # Pool members only. A player outside pool_full carries market_value 0.0, which is
+            # the absence of a valuation rather than an opinion that they are worthless, and
+            # feeding those in reports coverage of 596 against a 160-spot pool.
+            InternalMarketValues(
+                {p.player_id: p.market_value for p in board.players if p.in_pool_full}
+            ),
         ],
         projections,
         required=roster_full,
@@ -328,7 +355,8 @@ def value() -> int:
     print("=" * 78)
     print(f"  source     {market.source}" + ("   [ESTIMATE]" if market.is_estimate else ""))
     print(
-        f"  coverage   {market.coverage} of {roster_full} priced spots   total ${market.total:.0f}"
+        f"  coverage   {market.coverage} players carry a market value "
+        f"(priced pool is {roster_full})   total ${market.total:.0f}"
     )
     for note in market.notes:
         print(f"  note       {note}")
