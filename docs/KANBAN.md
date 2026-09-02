@@ -19,10 +19,20 @@ conventional commits, squash-merge only after both verdicts, tag a release at ev
 | Sprint | State | Gate |
 |---|---|---|
 | Sprint 0 — Discovery & scaffolding | ⬜ In Review (PR #1) | Fixtures + findings ✅, league validated ⚠️ (fails, see DI-004) |
-| Sprint 1 — Data spine | 🟥 **REJECTED again** (PR #2, #4) — see DI-EVAL-2 | Replay exact ✅, CI green ❌ (2 of 6 clean runs fail), Case A/B gate no longer vacuous ✅ but breaks on a stale manifest ⚠️ — 3 blocking |
-| Sprint 2 — Intelligence core | ⬜ Ready | `make prep` priced board, reviewed by a human |
+| Sprint 1 — Data spine | 🟨 **Findings closed, awaiting re-evaluation** (PR #2, #4, #17, #18) | Replay exact ✅, CI green ✅ (**6 of 6** clean runs, `.hypothesis` deleted each time), Case A/B holds on a stale manifest ✅ (DI-053 armed the classifier) — 0 blocking open |
+| Sprint 2 — Intelligence core | 🟨 **Built; review and evaluation rounds closed** (PR #12–#16) | `make prep` renders all seven §4.9 sections against the real fixtures ✅, **not yet read by a human** ❌ |
 | Sprint 3 — Cockpit | ⬜ Backlog | Playwright 160-pick replay, p99 ≤ 2s |
 | Sprint 4 — Hardening | ⬜ Backlog | 60-minute rehearsal ×2 |
+
+
+**On the two 🟨 rows.** Neither is a self-granted pass. Sprint 1's three DI-EVAL-2 blockers are
+closed and its gate now measures green — but the verdict on that belongs to an independent
+evaluator under §6, and round 3 has not been commissioned, so the row says what was measured and
+not what it earns. Sprint 2's gate is *"`make prep` priced board, **reviewed by a human**"*, and
+that has not happened: every section renders, the arithmetic reconciles, two review rounds and two
+evaluation rounds are closed, and none of that is a human reading their own board and arguing with
+it. §4.9 exists precisely because a model you first see three minutes before the auction is one
+you cannot sanity-check. The draft is 2026-09-05 19:00 MDT.
 
 ---
 
