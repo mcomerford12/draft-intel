@@ -1,0 +1,219 @@
+"""DI-036 — walk-away curves. No player name is hardcoded."""
+
+from __future__ import annotations
+
+import pytest
+
+from draft_intel.quant.optimizer import Candidate
+from draft_intel.quant.slots import FLEX
+from draft_intel.quant.walkaway import walkaway_board, walkaway_curve
+
+
+def player(pid: str, position: str, points: float, price: int) -> Candidate:
+    return Candidate(
+        player_id=pid,
+        name=f"{position}-{pid}",
+        position=position,
+        points=points,
+        vorp=points,
+        price=price,
+    )
+
+
+def board() -> list[Candidate]:
+    """One clear star and a field of interchangeable alternatives."""
+    return [
+        player("star", "RB", 200.0, 1),
+        *[player(f"r{i}", "RB", 100.0 - i, 1) for i in range(6)],
+    ]
+
+
+STARTERS = {"RB": 1}
+
+
+# ------------------------------------------------------------------- the curve
+
+
+def test_the_curve_falls_as_the_price_rises():
+    """Paying more for the same player cannot leave a better team: every roster affordable at a
+    higher price is also affordable at a lower one."""
+    curve = walkaway_curve(
+        board(), board()[0], budget=12, slots=3, starters=STARTERS, bench_weight=0.0
+    )
+    assert curve.monotone
+    deltas = [p.delta for p in curve.points if p.feasible]
+    assert deltas == sorted(deltas, reverse=True)
+
+
+def test_the_walk_away_price_is_the_highest_price_still_worth_paying():
+    """Not the first non-positive price, and not a fitted crossing point. The user needs "the
+    most I should pay", which has to be a price they would actually bid."""
+    curve = walkaway_curve(
+        board(), board()[0], budget=12, slots=3, starters=STARTERS, bench_weight=0.0
+    )
+    assert curve.walk_away_price is not None
+    at_price = curve.delta_at(curve.walk_away_price)
+    assert at_price is not None and at_price > 0
+    above = curve.delta_at(curve.walk_away_price + 1)
+    assert above is None or above <= 0
+
+
+def test_a_player_who_improves_nothing_has_no_walk_away_price():
+    """A replacement-level player behind a better one at the same position, with λ=0."""
+    pool = [player("best", "RB", 200.0, 1), *[player(f"r{i}", "RB", 10.0, 1) for i in range(5)]]
+    curve = walkaway_curve(pool, pool[-1], budget=10, slots=2, starters=STARTERS, bench_weight=0.0)
+    assert curve.walk_away_price is None
+    assert "not worth buying at any price" in curve.describe()
+
+
+def test_the_curve_defaults_to_every_price_the_user_could_legally_bid():
+    """$12 across 3 slots means the most biddable is $10, reserving $1 for each other slot."""
+    curve = walkaway_curve(board(), board()[0], budget=12, slots=3, starters=STARTERS)
+    assert [p.price for p in curve.points] == list(range(1, 11))
+
+
+def test_a_price_beyond_the_budget_is_infeasible_rather_than_a_number():
+    curve = walkaway_curve(
+        board(), board()[0], budget=12, slots=3, starters=STARTERS, prices=[5, 50]
+    )
+    assert curve.points[0].feasible
+    assert curve.points[1].feasible is False
+    assert curve.points[1].delta == float("-inf")
+
+
+def test_an_infeasible_tail_does_not_make_the_curve_look_broken():
+    """Infeasible is the absence of a value, not a low one. Threading -inf through the
+    monotonicity comparison would report every curve that runs off the budget as broken."""
+    curve = walkaway_curve(
+        board(), board()[0], budget=12, slots=3, starters=STARTERS, prices=[1, 50, 5]
+    )
+    assert curve.monotone
+
+
+def test_the_y_axis_is_delta_starting_points_as_the_charter_specifies():
+    curve = walkaway_curve(
+        board(), board()[0], budget=12, slots=3, starters=STARTERS, bench_weight=0.0, prices=[1]
+    )
+    # Buying the 200-point star instead of the best alternative (100) gains 100 starting points.
+    assert curve.points[0].starting_points_delta == 100.0
+
+
+# ------------------------------------------------------------- the excluded arm
+
+
+def test_the_baseline_is_the_best_team_without_this_player():
+    """Every delta is measured against it, so it has to be the real alternative rather than
+    an empty roster."""
+    pool = board()
+    curve = walkaway_curve(pool, pool[0], budget=12, slots=3, starters=STARTERS, bench_weight=0.0)
+    # Without the star, the best starter available scores 100.
+    assert curve.baseline_objective == pytest.approx(100.0)
+
+
+def test_the_excluded_arm_does_not_depend_on_the_price():
+    """It is solved once for the whole curve. A player you are not buying costs nothing at
+    every price, so recomputing it per point doubles the work for an unchanging answer."""
+    pool = board()
+    short = walkaway_curve(pool, pool[0], budget=12, slots=3, starters=STARTERS, prices=[1])
+    long = walkaway_curve(pool, pool[0], budget=12, slots=3, starters=STARTERS, prices=[1, 2, 3])
+    assert short.baseline_objective == long.baseline_objective
+
+
+def test_the_forced_arm_never_buys_the_player_twice():
+    """The forced copy is priced at the hypothetical bid; the board copy must be excluded, or
+    the optimizer can buy both and the delta is measured against a roster that cannot exist."""
+    pool = board()
+    curve = walkaway_curve(
+        pool, pool[0], budget=12, slots=3, starters=STARTERS, bench_weight=0.2, prices=[3]
+    )
+    assert curve.points[0].feasible
+    assert curve.points[0].delta > 0
+
+
+# ---------------------------------------------------------------------- guards
+
+
+def test_curving_a_player_who_is_not_on_the_board_is_an_error():
+    """Otherwise they are silently measured against a pool that still contains them."""
+    with pytest.raises(ValueError, match="not on the board"):
+        walkaway_curve(
+            board(), player("ghost", "RB", 50.0, 1), budget=10, slots=2, starters=STARTERS
+        )
+
+
+def test_at_lambda_zero_the_walk_away_price_is_just_the_budget_ceiling():
+    """ADR-0004's complaint, made concrete.
+
+    With the bench worth nothing, money held back is worth nothing either, so the delta is flat
+    all the way up and the curve only ever "crosses" where the budget runs out. The advice is
+    always "bid everything you legally can", which is how the user ends the night at $0 with no
+    injury cover.
+    """
+    pool = [
+        player("star", "RB", 200.0, 1),
+        *[player(f"good{i}", "RB", 150.0, 8) for i in range(3)],
+        *[player(f"scrub{i}", "RB", 10.0, 1) for i in range(4)],
+    ]
+    lean = walkaway_curve(pool, pool[0], budget=20, slots=3, starters=STARTERS, bench_weight=0.0)
+
+    assert lean.walk_away_price == 18, "budget 20 across 3 slots: the ceiling, nothing else"
+    deltas = [p.delta for p in lean.points if p.feasible]
+    assert len(set(deltas)) == 1, "flat, because the money saved buys nothing worth having"
+
+
+def test_the_bench_weight_moves_the_walk_away_number():
+    """ADR-0004: λ is a judgement coefficient, and the UI is required to say that moving the
+    slider moves the number. Here is the evidence that it does -- on the same board as above."""
+    pool = [
+        player("star", "RB", 200.0, 1),
+        *[player(f"good{i}", "RB", 150.0, 8) for i in range(3)],
+        *[player(f"scrub{i}", "RB", 10.0, 1) for i in range(4)],
+    ]
+    lean = walkaway_curve(pool, pool[0], budget=20, slots=3, starters=STARTERS, bench_weight=0.0)
+    fat = walkaway_curve(pool, pool[0], budget=20, slots=3, starters=STARTERS, bench_weight=1.0)
+
+    assert fat.walk_away_price is not None
+    assert lean.walk_away_price is not None
+    assert fat.walk_away_price < lean.walk_away_price, (
+        "valuing the bench holds money back, which lowers what the star is worth"
+    )
+
+
+# ------------------------------------------------------------------ precompute
+
+
+def test_the_board_precomputes_curves_for_the_most_valuable_players_only():
+    """ADR-0003 wants the live path to be a lookup. A curve costs two solves per price point,
+    so covering every player at every dollar does not fit between two picks."""
+    curves = walkaway_board(board(), budget=12, slots=3, starters=STARTERS, top=3, prices=[1, 2])
+    assert len(curves) == 3
+    assert curves[0].player_id == "star", "ranked by projected points"
+    assert all(len(c.points) == 2 for c in curves)
+
+
+def test_a_precomputed_board_is_keyed_so_the_live_path_is_a_lookup():
+    curves = {
+        c.player_id: c
+        for c in walkaway_board(board(), budget=12, slots=3, starters=STARTERS, top=2, prices=[1])
+    }
+    assert curves["star"].delta_at(1) is not None
+    assert curves["star"].delta_at(999) is None
+
+
+def test_flex_slots_are_honoured_in_the_curve():
+    pool = [
+        player("star", "RB", 200.0, 1),
+        player("w1", "WR", 190.0, 1),
+        *[player(f"r{i}", "RB", 50.0, 1) for i in range(4)],
+    ]
+    curve = walkaway_curve(
+        pool,
+        pool[0],
+        budget=10,
+        slots=3,
+        starters={"RB": 1, "WR": 1, FLEX: 1},
+        bench_weight=0.0,
+        prices=[1],
+    )
+    assert curve.points[0].feasible
+    assert curve.points[0].delta > 0
