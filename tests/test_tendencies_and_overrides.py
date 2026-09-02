@@ -16,7 +16,13 @@ from draft_intel.quant.overrides import (
     renormalise,
 )
 from draft_intel.quant.skew import SkewBoard, skew_board
-from draft_intel.quant.tendencies import MIN_PROFILE_PICKS, MIN_SLOPE_PICKS, _gini, profiles
+from draft_intel.quant.tendencies import (
+    MIN_PROFILE_PICKS,
+    MIN_SLOPE_PICKS,
+    _gini,
+    _slope,
+    profiles,
+)
 from draft_intel.quant.valuation import PlayerValue
 
 SLOTS = range(1, 4)
@@ -401,3 +407,69 @@ def test_points_can_be_overridden_independently_of_price():
     assert result.values[0].points == 250.0
     assert result.values[0].baseline_value == 10.0
     assert result.values[0].sources["points"] == "manual"
+
+
+# --------------------------------------------- mutation escapes from the DI-049 batch
+#
+# Three mutations of `tendencies.py` survived the suite above. All three are in the two private
+# helpers, which is where this module's arithmetic actually lives -- `_gini` was already pinned
+# directly here for the same reason, and these follow that precedent rather than inventing a
+# public surface to reach them through.
+
+
+def test_the_slope_is_none_rather_than_zero_when_it_is_undefined():
+    """Every pick at the same point gives the fit no direction to report. Returning 0.0 would
+    claim the manager's behaviour is flat, when it was never observed changing at all -- the
+    same "no information rendered as a measurement" error `_gini` guards against."""
+    assert _slope([(4, 1.0), (4, 2.0), (4, 3.0)]) is None
+    assert _slope([(4, 1.0)]) is None
+    assert _slope([]) is None
+    assert _slope([(1, 1.0), (2, 3.0)]) == 2.0, "and a real fit still comes back"
+
+
+def test_a_run_at_the_very_end_of_the_night_is_still_a_run():
+    """`range(len(ordered) - length + 1)` -- the `+ 1` is the last window. Without it a run
+    occupying the final three picks is invisible, and the last three picks of an auction are
+    exactly where a positional run is most likely and most expensive."""
+    board = {
+        **{f"r{i}": value(f"r{i}", baseline=5.0, position="RB") for i in range(4)},
+        **{f"q{i}": value(f"q{i}", baseline=5.0, position="QB") for i in range(2)},
+    }
+    # QB RB QB then RB RB RB: no window of three matches until the final one.
+    state = state_from(
+        (1, "q0", 2, 5, False),
+        (2, "r0", 2, 5, False),
+        (3, "q1", 2, 5, False),
+        (4, "r1", 2, 5, False),
+        (5, "r2", 2, 5, False),
+        (6, "r3", 2, 5, False),
+    )
+    profile = profiles(par_skew(state, board))[2]
+    assert profile.run_picks == 3, "the trailing run is the only one, and it must be found"
+
+
+def test_run_chasing_is_measured_against_the_managers_own_average_not_in_absolute_terms():
+    """A manager who overpays for everything is not a run-chaser; they are expensive. The figure
+    is `during runs - their own overall`, and dropping the subtraction turns every habitual
+    overpayer into a chaser and every habitual bargain-hunter into disciplined."""
+    board = {
+        **{f"r{i}": value(f"r{i}", baseline=5.0, position="RB") for i in range(4)},
+        **{f"q{i}": value(f"q{i}", baseline=5.0, position="QB") for i in range(2)},
+    }
+    # Slot 2 pays $20 against a $5 board on every single pick, inside the run and outside it.
+    state = state_from(
+        (1, "q0", 2, 20, False),
+        (2, "r0", 2, 20, False),
+        (3, "q1", 2, 20, False),
+        (4, "r1", 2, 20, False),
+        (5, "r2", 2, 20, False),
+        (6, "r3", 2, 20, False),
+    )
+    profile = profiles(par_skew(state, board))[2]
+    assert profile.run_picks > 0 and profile.run_picks < profile.picks
+    assert profile.early_mean_skew is not None and profile.early_mean_skew > 5.0
+    assert profile.late_mean_skew is not None and profile.late_mean_skew > 5.0
+    assert profile.chases_runs is not None
+    assert abs(profile.chases_runs) < 1.0, (
+        "uniform overpayment is not run-chasing: measured against their own average it is zero"
+    )

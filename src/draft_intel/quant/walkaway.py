@@ -88,7 +88,14 @@ class WalkAway(BaseModel):
     """
 
     max_legal_bid: int
-    """``budget - (slots - 1)``: the most this user could bid without stranding a roster spot."""
+    """``budget - (slots - 1)``: the most this user could bid without stranding a roster spot.
+
+    Floored at $1, the minimum legal bid in an auction. A user whose remaining dollars cannot
+    even cover a dollar per open slot has a roster problem, not a bidding one, and the optimizer
+    reports that separately as an infeasible completion. Without the floor this goes negative
+    and ``worth_it_at_any_legal_price`` becomes trivially true at the exact moment it matters
+    most.
+    """
 
     baseline_objective: float
     """The best team achievable without this player. Every delta is measured against it."""
@@ -220,17 +227,29 @@ def _find_crossing(delta_at: Callable[[int], float], *, ceiling: int) -> int | N
 
     Exact because the curve is monotone non-increasing, and costs about eight solves against
     the ceiling's worth of a linear scan. Returns ``None`` when even $1 is not worth paying.
+
+    **The ``+ 1`` in the midpoint is load-bearing and the loop is bounded because of it.**
+    Rounding down instead, with ``low == high - 1`` and a positive delta, sets ``low = low`` and
+    the search never terminates. That is the worst failure mode this module has: the walk-away
+    curve runs in the draft-night hot path, and a hang there gives the operator nothing at all
+    while the clock runs, which is worse than giving them a wrong number they can argue with.
+    The correct search halves its interval every pass, so it cannot exceed the bound below --
+    exceeding it means the invariant is broken, and this says so loudly and immediately.
     """
     if delta_at(1) <= 0:
         return None
     low, high = 1, ceiling
-    while low < high:
+    for _ in range(max(1, ceiling).bit_length() + 1):
+        if low >= high:
+            return low
         middle = (low + high + 1) // 2
         if delta_at(middle) > 0:
             low = middle
         else:
             high = middle - 1
-    return low
+    raise AssertionError(  # pragma: no cover -- unreachable while the midpoint rounds up
+        f"walk-away search did not converge on [1, {ceiling}]; the midpoint rule is wrong"
+    )
 
 
 def _forced(

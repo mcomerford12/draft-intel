@@ -1353,8 +1353,13 @@ append to. Written to schema here, retroactively for the cards already built.
   - [x] PuLP/CBC retained as a test oracle, written from the §4.7b ILP independently
   - [x] ADR-0004's objective in both engines, λ included
   - [x] never returns an illegal lineup; never proposes a keeper (keepers are not candidates)
-  - [ ] **not mutation-verified.** DI-033 and DI-034 were; this and DI-036–039 were not, which
-        is the largest verification gap in the sprint and is stated rather than hidden.
+  - [x] **13/13 mutation-verified** (DI-049). Aimed at the round 2 fixes: all three call sites
+        where starter ordering can revert to `points`, each of dominance's three comparison
+        dimensions, the slot-aware rule, the cap's reserved tranche in both directions, the
+        capped-infeasibility note, and the FLEX enumeration. Two escaped on the first pass —
+        disabling the slot-aware rule, and letting the cap overrun by one — and both are
+        invisible from outside by construction, because a correct prune never changes the
+        answer. Pinned directly on `_prune`, which is the only place they are observable.
 - **Three defects found during the card**, all of the "right number, wrong answer" shape:
   dominance pruning unsound with a fixed slot count; forced players reserving a starting slot so
   the DP optimised an objective it did not report; back-pointer reconstruction rebuilding rosters
@@ -1390,7 +1395,15 @@ append to. Written to schema here, retroactively for the cards already built.
   - [x] monotonicity checked, not assumed; infeasible points excluded from the check
   - [x] walk-away price is the *highest* price still worth paying
   - [x] the precompute ranks by VORP, not raw points
-  - [ ] not mutation-verified
+  - [x] **4/4 mutation-verified** (DI-049). The off-by-one in the binary search does not fail,
+        it *hangs* — `(low + high) // 2` with `low == high - 1` sets `low = low` forever — which
+        is the worst failure mode this module has, because the curve runs in the draft-night hot
+        path and a hang gives the operator nothing at all. The loop now carries the bound its own
+        halving argument justifies and says so loudly instead. Two further escapes closed: the
+        monotonicity flag was hardcodeable to `True` without any test noticing (every real curve
+        is monotone, so nothing could tell a computed `True` from a literal one) and
+        `max_legal_bid` lost its $1 floor, which makes `worth_it_at_any_legal_price` trivially
+        true exactly when the budget is the binding constraint.
 - **Reviewer verdict:** REJECTED (round 1, `di-039-make-prep` @ `29fab99`) — M5:
   `walk_away_price = max(positive)` cannot distinguish a genuine zero crossing from the top of
   the sampled grid; repro reported $58 against a true $117. Inherits DI-035's M1. The
@@ -1409,7 +1422,13 @@ append to. Written to schema here, retroactively for the cards already built.
   - [x] every figure fitted on `competitive_seq`; the whole profile identical under a 20-pick
         `pick_no` offset, which is what Case A and Case B differ by
   - [x] sample floors, with `None` distinguished from zero throughout
-  - [ ] not mutation-verified
+  - [x] **7/8 mutation-verified** (DI-049); the survivor is provably equivalent (`len(points)
+        < 1` still returns `None` at the zero-denominator guard one line later). Three real
+        escapes closed, all "no information rendered as a measurement" or its mirror: `_slope`
+        returning 0.0 where it is undefined, a run occupying the *final* three picks going
+        unseen because the last window was never opened, and run-chasing measured absolutely
+        rather than against the manager's own average — which turns every habitual overpayer
+        into a chaser.
 - **Charter item not built:** nomination behaviour. Sleeper's picks endpoint records who *won*
   each player and carries no field anywhere for who nominated them, so any figure would be
   invented. Reported through `Profile.unavailable` rather than omitted silently.
@@ -1429,7 +1448,9 @@ append to. Written to schema here, retroactively for the cards already built.
   - [x] the model's number retained alongside the user's, permanently
   - [x] no implicit renormalisation; the deviation shown; `renormalise()` is a preview only
   - [x] an override naming nobody raises; a non-positive multiplier is refused
-  - [ ] not mutation-verified
+  - [x] **5/5 mutation-verified** (DI-049), first pass, no escapes: precedence order in both
+        directions, the blacklist reaching both value fields, provenance recorded, and the
+        unknown-player raise.
 - **Reviewer verdict:** APPROVED (round 1, `di-039-make-prep` @ `29fab99`). No derived-state
   mutation, precedence order correct (multiplier, then manual, then blacklist), the deviation
   exposed rather than buried, `renormalise()` preview-only, and both a non-positive multiplier and
@@ -1446,7 +1467,11 @@ append to. Written to schema here, retroactively for the cards already built.
   - [x] tiers found from the board, never declared (§1 CRITICAL DATA RULE)
   - [x] the config tripwire runs above the board
   - [x] written to `reports/prep.txt`; `make prep` runs in ~90s
-  - [ ] not mutation-verified
+  - [x] **11/11 mutation-verified** (DI-049) across `tiers.py`, `skew.py` and `inflation.py`,
+        the modules the report renders from. One escape closed: the tier sheet's `min_sample`
+        floor could be removed entirely without a test noticing, because the thin board it was
+        pinned on had gaps under the threshold anyway — the floor was never the thing being
+        measured.
 - **Two deviations, both stated in the report itself** rather than only in a docstring: §4.9
   item 1's p25/p50/p75 labels are refused in favour of a sourced two-point band (the Monte Carlo
   that would make percentiles real is Sprint 3), and item 6's interactive planner renders as
@@ -1609,6 +1634,42 @@ append to. Written to schema here, retroactively for the cards already built.
   `inflation.py::forward_positional_inflation` implements the charter's formula.
 - **Reviewer verdict:** pending (round 2 not yet commissioned).
 - **Evaluator verdict:** pending.
+
+### [DI-049] Mutation-verify DI-035 through DI-039
+
+- **Sprint:** 2 · **Owner:** test-engineer · **Size:** M · **Branch:** `di-048-review-round2-fixes`
+  · **PR:** #15
+- **Why the card exists:** the round 2 reviewer flagged that DI-035 through DI-039 were never
+  mutation-verified, and the cards said so honestly rather than hiding it. That is the largest
+  verification gap in Sprint 2 and it sits under the optimizer, which every price on the page
+  eventually routes through.
+- **41 mutations across seven modules. 39 caught; 1 provably equivalent; 1 escape survives as
+  documented-equivalent.** Ten escaped on the first pass and nine were real gaps.
+- **Acceptance criteria:**
+  - [x] `optimizer.py` 13/13 — starter ordering at all three call sites, dominance in each of
+        its three dimensions, the slot-aware rule, the cap's reserve, the capped-infeasibility
+        note, FLEX enumeration
+  - [x] `walkaway.py` 4/4 · `tiers.py` 4/4 · `skew.py` 3/3 · `inflation.py` 4/4
+  - [x] `tendencies.py` 7/8 (one equivalent) · `overrides.py` 5/5
+  - [x] every escape either closed by a test or shown equivalent in writing; none waved through
+- **Two production changes came out of it**, both about failure modes rather than wrong answers:
+  - `_prune`'s cap reserves its bottom `slots` places for the cheapest survivors. Truncating a
+    points-sorted list keeps the players you cannot afford and discards the ones you can, so the
+    cap could turn a buyable board infeasible — and then say so flatly. Feasibility after the cap
+    now holds whenever it held before it.
+  - `_find_crossing` carries the iteration bound its own halving argument justifies. The
+    off-by-one mutant did not fail, it **hung**: `(low + high) // 2` with `low == high - 1` sets
+    `low = low` forever. It span at 100% CPU for eleven minutes and wedged the first batch, which
+    is precisely what it would do on draft night — the walk-away curve is in the hot path, and a
+    hang gives the operator nothing at all while the clock runs.
+- **A note on testing private helpers.** Six of the nine closed escapes are pinned directly on
+  `_prune`, `_slope` and `_find_crossing`. That is deliberate, not laziness: a correct prune
+  never changes the answer, so no assertion about `best_roster`'s output can observe it working,
+  and the two escapes there both *keep more candidates* — they cannot produce a wrong roster,
+  which is exactly why nothing saw them. `_gini` was already pinned this way in Sprint 2 for the
+  same reason; this follows that precedent rather than inventing a public surface to reach
+  through.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
 ---
 

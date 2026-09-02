@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from draft_intel.quant import walkaway
 from draft_intel.quant.optimizer import Candidate
 from draft_intel.quant.slots import FLEX
 from draft_intel.quant.walkaway import walkaway_board, walkaway_curve
@@ -316,3 +317,30 @@ def test_the_binary_search_finds_the_same_answer_as_an_exhaustive_scan():
     ]
     assert curve.monotone
     assert curve.walk_away_price == (max(exhaustive) if exhaustive else None)
+
+
+# ------------------------------------------------ mutation escapes from the DI-049 batch
+
+
+def test_the_monotonicity_flag_is_computed_not_asserted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mutation replacing `monotone=_is_monotone(points)` with `monotone=True` survived the
+    whole suite. Every real curve here is monotone -- necessarily, because the optimizer is
+    exact -- so no assertion could tell a computed True from a hardcoded one.
+
+    That flag is the tripwire proving the optimizer returned optima, and `make prep` prints
+    BROKEN off it. A tripwire wired to a constant is worse than no tripwire, because the page
+    then says the curves are sound on a night when they are not. Pinned by forcing the
+    predicate to disagree with reality and checking the flag follows it.
+    """
+    monkeypatch.setattr(walkaway, "_is_monotone", lambda points: False)
+    curve = walkaway_curve(board(), board()[0], budget=10, slots=3, starters=STARTERS)
+    assert curve.monotone is False, "the flag must come from the check, not from a literal"
+
+
+def test_the_maximum_legal_bid_never_goes_below_a_dollar():
+    """`budget - (slots - 1)` is negative for a user who cannot cover a dollar per open slot.
+    Unfloored, `max_legal_bid` reports a negative number and `worth_it_at_any_legal_price`
+    becomes trivially true -- at the exact moment the budget is the binding constraint."""
+    curve = walkaway_curve(board(), board()[0], budget=2, slots=6, starters=STARTERS)
+    assert curve.max_legal_bid == 1, "budget 2 across 6 slots: the floor, not -3"
+    assert all(point.price >= 1 for point in curve.points)

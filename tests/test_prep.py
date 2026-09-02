@@ -64,6 +64,19 @@ def test_a_position_too_thin_to_measure_is_one_tier_rather_than_omitted():
     assert sheet["K"][0].size == 3
 
 
+def test_the_sample_floor_suppresses_a_break_a_thin_board_would_otherwise_declare():
+    """The version above cannot see the floor working: its gaps fall under the threshold anyway,
+    so removing the `min_sample` guard entirely left it passing. Four players, three gaps, and
+    the last one is sixteen times the median -- a "cliff" measured against a distribution of two
+    numbers. Below the floor the honest answer is one tier, because there is nothing to call
+    that gap unusual against."""
+    thin = rows("K", 20, 19, 18, 2)
+    assert len(tier_sheet(thin)["K"]) == 1, "four players: no distribution, no breaks"
+    # The same board with the floor lowered does find the break, so the gap is genuinely
+    # break-sized and this test is measuring the floor rather than the threshold.
+    assert len(tier_sheet(thin, min_sample=3)["K"]) == 2
+
+
 def test_a_position_where_every_player_costs_the_same_is_one_tier():
     """Every gap is zero, so there is no distribution to call anything unusual against."""
     sheet = tier_sheet(rows("K", *[1.0] * MIN_TIER_SAMPLE))
