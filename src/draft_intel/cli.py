@@ -469,7 +469,14 @@ def main(argv: list[str] | None = None) -> int:
         return smoke()
     if command == "value":
         return value()
-    print(f"unknown command {command!r}; expected 'replay', 'smoke' or 'value'", file=sys.stderr)
+    if command == "prep":
+        from draft_intel.prep import main as prep_main
+
+        return prep_main()
+    print(
+        f"unknown command {command!r}; expected 'replay', 'smoke', 'value' or 'prep'",
+        file=sys.stderr,
+    )
     return 2
 
 

@@ -211,10 +211,15 @@ def walkaway_board(
     ADR-0003 requires walk-away prices to be precomputed after each settled pick so the live
     path is a dictionary lookup rather than a solve. This is that precompute, and ``top`` is
     the honest limit on it: a curve costs two solves per price point, so covering the whole
-    board at every dollar is not something that fits between two picks. Ranked by projected
-    points, because the players worth curving are the ones worth bidding on.
+    board at every dollar is not something that fits between two picks.
+
+    **Ranked by VORP, not by projected points.** Raw points are not comparable across
+    positions -- in a 2QB league a quarterback outscores every running back on the board, so
+    ranking by points returns a target list of twelve quarterbacks and nothing else. VORP is
+    already measured against each position's own replacement level, which is what makes it the
+    right axis for "who is worth bidding on" rather than "who scores most".
     """
-    ranked = sorted(candidates, key=lambda c: -c.points)[:top]
+    ranked = sorted(candidates, key=lambda c: (-c.vorp, -c.points))[:top]
     return [
         walkaway_curve(
             candidates,

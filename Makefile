@@ -1,4 +1,4 @@
-.PHONY: install lint types test ci replay smoke
+.PHONY: install lint types test ci replay smoke prep
 
 install:
 	uv sync
@@ -20,3 +20,8 @@ replay:
 
 smoke:
 	uv run python -m draft_intel.cli smoke
+
+# Charter 4.9: the Sprint 2 gate. The user should be arguing with this board at least
+# three days before the draft.
+prep:
+	uv run python -m draft_intel.cli prep

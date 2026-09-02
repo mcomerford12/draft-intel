@@ -217,3 +217,27 @@ def test_flex_slots_are_honoured_in_the_curve():
     )
     assert curve.points[0].feasible
     assert curve.points[0].delta > 0
+
+
+def test_the_precompute_ranks_by_vorp_not_raw_points():
+    """Raw points are not comparable across positions.
+
+    In a 2QB league a quarterback outscores every running back on the board, so ranking by
+    points returns a target list of twelve quarterbacks and nothing else -- which is exactly
+    what the first `make prep` run printed. VORP is measured against each position's own
+    replacement level, which is what makes it the right axis for "worth bidding on".
+    """
+    pool = [
+        Candidate(player_id="qb", name="QB-qb", position="QB", points=320.0, vorp=40.0, price=1),
+        Candidate(player_id="rb", name="RB-rb", position="RB", points=250.0, vorp=140.0, price=1),
+        *[
+            Candidate(
+                player_id=f"f{i}", name=f"RB-f{i}", position="RB", points=50.0, vorp=5.0, price=1
+            )
+            for i in range(4)
+        ],
+    ]
+    curves = walkaway_board(
+        pool, budget=10, slots=2, starters={"QB": 1, "RB": 1}, top=1, prices=[1]
+    )
+    assert [c.player_id for c in curves] == ["rb"]
