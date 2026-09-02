@@ -175,6 +175,16 @@ def _prune(
 
     Ties are broken on ``player_id`` so that exactly one of an identical pair survives the
     comparison, which is right because they are interchangeable.
+
+    **The cap reserves room for the cheapest, or it can turn a feasible board infeasible.**
+    Truncating a points-sorted list keeps the expensive players and throws away the $1 fills, so
+    ten $50 wideouts and ten $1 wideouts capped at five leaves nothing buyable on $10 -- and the
+    optimizer then reports, flatly and falsely, that no legal roster exists. The bottom
+    ``max_take`` places are given to the cheapest survivors, which is exactly enough for any one
+    position to fill every remaining slot. Feasibility after the cap is then guaranteed whenever
+    it held before it: swapping each chosen player for their position's cheapest survivor never
+    costs more and never changes anyone's position. Optimality is still not guaranteed -- that
+    is what the ``CAPPED`` note says -- but "no roster exists" is no longer a lie.
     """
     kept: list[Candidate] = []
     for candidate in candidates:
@@ -201,7 +211,15 @@ def _prune(
         if better < max_take:
             kept.append(candidate)
     kept.sort(key=lambda c: (-c.points, c.price, c.player_id))
-    return kept[:cap], len(kept) > cap
+    if len(kept) <= cap:
+        return kept, False
+    reserve = min(max_take, cap)
+    survivors = {c.player_id for c in sorted(kept, key=lambda c: (c.price, -c.points))[:reserve]}
+    for candidate in kept:
+        if len(survivors) >= cap:
+            break
+        survivors.add(candidate.player_id)
+    return [c for c in kept if c.player_id in survivors], True
 
 
 NEG = -1e18
@@ -411,7 +429,10 @@ def best_roster(
             best = roster
 
     if best is None:
-        return infeasible(f"no legal roster fills {slots} slot(s) within ${budget}", notes=notes)
+        reason = f"no legal roster fills {slots} slot(s) within ${budget}"
+        if any(note.startswith("CAPPED") for note in notes):
+            reason += " from the capped candidate list"
+        return infeasible(reason, notes=notes)
     return best
 
 

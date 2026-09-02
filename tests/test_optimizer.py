@@ -267,6 +267,33 @@ def test_forcing_a_player_the_budget_cannot_cover_is_infeasible_not_wrong():
     assert any("INFEASIBLE" in note for note in result.notes)
 
 
+def test_the_candidate_cap_never_makes_a_buyable_board_look_infeasible():
+    """m3. The cap sorted by points and truncated, which keeps the players you cannot afford and
+    throws away the ones you can. Ten $50 wideouts and ten $1 wideouts capped at five left a
+    board with nothing buyable on $10, and the optimizer reported -- flatly, and falsely -- that
+    no legal roster existed. The cap now reserves its bottom `slots` places for the cheapest."""
+    pool = [player(f"hi{i}", "WR", 100.0 - i, 50) for i in range(10)]
+    pool += [player(f"lo{i}", "WR", 1.0 - i / 10, 1) for i in range(10)]
+
+    capped = best_roster(pool, budget=10, slots=5, starters={"WR": 1}, cap=5)
+    uncapped = best_roster(pool, budget=10, slots=5, starters={"WR": 1}, cap=100)
+
+    assert uncapped.objective > float("-inf"), "the board is buyable; this is the control"
+    assert capped.objective > float("-inf"), "the cap must not invent an infeasibility"
+    assert capped.spent <= 10
+    assert len(capped.players) == 5
+    assert any(note.startswith("CAPPED") for note in capped.notes)
+
+
+def test_an_infeasible_result_says_when_only_the_capped_list_was_searched():
+    """The honest half of m3: where the cap did bite, "no legal roster exists" is a claim about
+    the pruned list, not about the board, and the note has to say which."""
+    pool = [player(f"w{i}", "WR", 100.0 - i, 50) for i in range(10)]
+    result = best_roster(pool, budget=3, slots=5, starters={"WR": 1}, cap=2)
+    assert result.objective == float("-inf")
+    assert any("capped candidate list" in note for note in result.notes)
+
+
 def test_a_board_too_thin_to_fill_the_slots_is_infeasible():
     """ "There is no legal roster from here" is a real answer during a draft, and the completion
     planner's most important output when it is true."""

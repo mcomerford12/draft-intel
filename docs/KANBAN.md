@@ -1317,7 +1317,14 @@ append to. Written to schema here, retroactively for the cards already built.
   - [x] aggregated per pick, per team, per position, with `$ spent per projected point`
   - [x] `COMPETITIVE` only; a pick with no consensus value excluded rather than counted as zero
 - **Mutation-verified:** 12/12, including both directions of the before/after choice.
-- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+- **Reviewer verdict:** REJECTED (round 1, `di-039-make-prep` @ `29fab99`) — M3: §4.6 requires
+  five aggregations; per-price-bucket and league-wide median + per-pick z-score were absent with
+  no stated deviation, on a card titled "all aggregations" with every criterion ticked. The rest
+  verified clean: consensus value sourced from `quant.market` and not our own field; the
+  before-inflation choice confirmed; the `COMPETITIVE` filter confirmed; unpriced picks excluded
+  rather than zeroed. **Closed in DI-048** — `Distribution`, `PriceBucket`, `PickSkew.edge_z`,
+  `SkewBoard.by_price_bucket`, `SkewBoard.distribution`, `SkewBoard.outliers()`.
+- **Evaluator verdict:** pending (round 1 in flight).
 
 ### [DI-034] Opponent max-bid and affordability engine
 
@@ -1331,7 +1338,12 @@ append to. Written to schema here, retroactively for the cards already built.
 - **Mutation-verified:** 16/17. The survivor is provably equivalent (the neutral multiplier
   equals the formula at zero skew); the tempting wrong version — a zero *threat* rather than a
   zero *skew* — is pinned by a test.
-- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+- **Reviewer verdict:** APPROVED (round 1, `di-039-make-prep` @ `29fab99`). Max bid read from
+  `TeamState`, FLEX overflow collective, slot-keyed aggression, `None` distinct from zero, and the
+  user excluded from their own threat list — all verified independently. One MINOR (m4): the
+  `drops_out_above` docstring said "one dollar under its max bid" and the function returns
+  `max_bid`. **Closed in DI-048** — the docstring now states what the code does and why.
+- **Evaluator verdict:** pending (round 1 in flight).
 
 ### [DI-035] DP roster optimizer + CBC oracle equivalence test
 
@@ -1353,7 +1365,21 @@ append to. Written to schema here, retroactively for the cards already built.
 - **Performance against §4.7b's 200ms budget, measured not claimed:** 14 slots ~450ms (over),
   8 slots ~156ms, 4 slots ~45ms. The 14-slot case is the only state that cannot occur during
   live bidding. Was 4.4s before the inner loop was vectorised.
-- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+- **Reviewer verdict:** REJECTED (round 1, `di-039-make-prep` @ `29fab99`) — M1: the exactness
+  argument was false. Starters must be chosen on `points - λ x vorp`, not on `points`, and the
+  CBC oracle set `vorp = points`, so it explored a two-dimensional space along its diagonal and
+  was structurally incapable of seeing the defect. Two-player repro: DP 100.0, CBC and brute
+  force 119.0. Safe in production only via an unstated invariant from `replacement.py` that
+  DI-038's overrides are positioned to break. m3: the cap path emitted a flat falsehood — ten $50
+  wideouts and ten $1 wideouts capped at five reported no legal roster on a board that was
+  plainly buyable — and `prep.py` branched on the objective alone, dropping the `CAPPED` note.
+  **NOT rejected:** 7,400 independently brute-forced states found the DP exact and legal
+  throughout the vorp-monotone regime; `_prune`, `_reconstruct`, `_unwind`, the mandatory path and
+  the FLEX enumeration are all sound, and measured latency beats the docstring's claim (240ms
+  against 450ms). **Closed in DI-048** — `starter_priority`, dominance on both dimensions, an
+  independently-drawn VORP in `random_pool`, the seed sweep 12 → 30, a reserved cheapest tranche
+  in the cap, and the notes carried to the page.
+- **Evaluator verdict:** pending (round 1 in flight).
 
 ### [DI-036] Walk-away curves, precomputed per player
 
@@ -1365,7 +1391,14 @@ append to. Written to schema here, retroactively for the cards already built.
   - [x] walk-away price is the *highest* price still worth paying
   - [x] the precompute ranks by VORP, not raw points
   - [ ] not mutation-verified
-- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+- **Reviewer verdict:** REJECTED (round 1, `di-039-make-prep` @ `29fab99`) — M5:
+  `walk_away_price = max(positive)` cannot distinguish a genuine zero crossing from the top of
+  the sampled grid; repro reported $58 against a true $117. Inherits DI-035's M1. The
+  excluded-arm-solved-once optimisation, the monotonicity check and the VORP ranking all verified
+  correct; no double-buy, and the baseline arm confirmed to genuinely exclude the player.
+  **Closed in DI-048** — binary search over the delta, plus `max_legal_bid` and
+  `worth_it_at_any_legal_price`.
+- **Evaluator verdict:** pending (round 1 in flight).
 
 ### [DI-037] Manager tendency profiles (keyed on `competitive_seq`)
 
@@ -1380,7 +1413,12 @@ append to. Written to schema here, retroactively for the cards already built.
 - **Charter item not built:** nomination behaviour. Sleeper's picks endpoint records who *won*
   each player and carries no field anywhere for who nominated them, so any figure would be
   invented. Reported through `Profile.unavailable` rather than omitted silently.
-- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+- **Reviewer verdict:** APPROVED (round 1, `di-039-make-prep` @ `29fab99`). `competitive_seq`
+  throughout, `None` distinct from zero, sample floors honoured. The nomination-behaviour
+  deviation is judged SOUND — verified against the actual pick payload keys and corroborated by
+  charter §2 — and is correctly surfaced through `Profile.unavailable` rather than left in a
+  docstring.
+- **Evaluator verdict:** pending (round 1 in flight).
 
 ### [DI-038] Value override plumbing
 
@@ -1392,7 +1430,13 @@ append to. Written to schema here, retroactively for the cards already built.
   - [x] no implicit renormalisation; the deviation shown; `renormalise()` is a preview only
   - [x] an override naming nobody raises; a non-positive multiplier is refused
   - [ ] not mutation-verified
-- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+- **Reviewer verdict:** APPROVED (round 1, `di-039-make-prep` @ `29fab99`). No derived-state
+  mutation, precedence order correct (multiplier, then manual, then blacklist), the deviation
+  exposed rather than buried, `renormalise()` preview-only, and both a non-positive multiplier and
+  an unknown player raise. Carried forward to Sprint 3: `OverriddenValue` carries no `vorp`, so
+  overriding `points` decouples the two — which is precisely the invariant DI-035's M1 depended
+  on, and the reason that fix could not be deferred.
+- **Evaluator verdict:** pending (round 1 in flight).
 
 ### [DI-039] `make prep` — the priced board and printable report
 
@@ -1411,7 +1455,21 @@ append to. Written to schema here, retroactively for the cards already built.
   in a 2QB league the target list came out as twelve quarterbacks and nothing else.
 - **Sprint 2 gate:** `make prep` produces the full board. **A human has not yet reviewed it** —
   that half of the gate is the user's, and it is why the report exists.
-- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+- **Reviewer verdict:** REJECTED (round 1, `di-039-make-prep` @ `29fab99`) — B1: mock-draft
+  keeper prices were rendered as this league's, and `config/keepers.yaml` was ignored entirely;
+  setting a manifest price to commissioner authority changed nothing and the report still printed
+  the mock's figure. M2: the priced-board band arithmetic discarded direction, so with keepers
+  loaded below the 75% rule the printed band excluded the true price on the wrong side. M4:
+  hardcoded `aliases={"Me": "Matt"}` duplicating `config/owners.yaml`, `my_slot=3`, and
+  `config.budget - 55` where the fixture's figure for that seat is $62 — the $55 was another
+  manager's spend. m1: effective buying power divided by teams-with-keepers, +$22/team the moment
+  one team keeps nobody. m2: the FLEX split was uniform rather than proportional, so the need
+  column summed to 78 against the 80 printed two lines below. Deviation (c) judged sound in
+  principle but broken in execution; deviation (d) sound on interactivity, partly rationalising on
+  content. **Closed in DI-048** — `_retention_prices` with a provenance section, a signed
+  scenario-named band, everything derived from config, league-wide divisor, and a shared
+  largest-remainder `allocate_flex`.
+- **Evaluator verdict:** pending (round 1 in flight).
 
 ---
 
@@ -1502,6 +1560,55 @@ append to. Written to schema here, retroactively for the cards already built.
   defect", but `domain/keepers.py` has named two players in prose since Sprint 1 to explain the
   collision hazard. New code avoids names entirely; the existing precedent is untouched. Whether
   prose exceptions are allowed needs settling before a future reviewer rejects them.
+
+### [DI-048] Close code review round 2 findings (DI-033 → DI-039)
+
+- **Sprint:** 2 · **Owner:** orchestrator · **Size:** L · **Branch:** `di-048-review-round2-fixes`
+  · **PR:** #15
+- **Review artefact:** `di-039-make-prep` @ `29fab99`. Reviewer independent of the author per §6:
+  three of the seven cards APPROVED, four REJECTED. 1 blocking, 5 major, 3 minor, and one of my
+  own recorded deviations judged not sound.
+- **Acceptance criteria:**
+  - [x] **B1** `make prep` no longer prints a *different draft's* money as this league's keeper
+        prices. `_retention_prices()` consults `config/keepers.yaml` first and falls back to the
+        mock only as a labelled fallback; a new `KEEPER PRICE PROVENANCE` section states on the
+        page whose numbers the reader is looking at. A manifest price set to commissioner
+        authority now wins, pinned end to end.
+  - [x] **M1** the DP chooses starters on `points - λ x vorp`, the objective it is optimising,
+        not on `points`. `RosterCandidate.starter_priority()` is used by both `_position_table`
+        and `_split_lineup`; dominance pruning compares both dimensions.
+  - [x] **M1 (oracle)** `random_pool` draws VORP independently of points, so the CBC oracle can
+        see the axis the defect lived on; seed sweep 12 → 30. That surfaced a *second* oracle
+        bug — the ILP permitted empty starting slots while eligible players benched. Brute force
+        confirmed the DP was right (a legal lineup is maximal) and the ILP was rewritten with
+        big-M maximality constraints. Second oracle defect found this project; both were the
+        oracle's, not the DP's.
+  - [x] **M2** the priced board's band carries its sign, and each column is named for the
+        scenario it prices.
+  - [x] **M3** §4.6's two missing aggregations built: per-price-bucket and league-wide
+        distribution with a per-pick z-score.
+  - [x] **M4** the user's seat and keeper spend are derived from `config/owners.yaml` and the
+        ledger. The hardcoded $55 was another manager's figure and the report contradicted its
+        own surplus board by $7; the derived figure is $62 and the two now agree.
+  - [x] **M5** the walk-away price is found by binary search over the delta rather than by
+        `max(positive)` over a sampled grid, which could not distinguish a real crossing from the
+        top of the grid — $58 reported against a true $117.
+  - [x] **m1** effective buying power divides by the league, not by the teams that happen to hold
+        keepers, which inflated every other team by $22 the moment one team kept nobody.
+  - [x] **m2** shared largest-remainder `quant/slots.py::allocate_flex`, used by both `prep.py`
+        and `inflation.py`. The need column summed to 78 against the 80 printed two lines below.
+  - [x] **m3** the candidate cap reserves its bottom `slots` places for the cheapest survivors,
+        so it can no longer turn a buyable board infeasible; where it does bite, the note says
+        the search covered only the capped list, and `prep.py` carries the optimizer's notes to
+        the page instead of printing a bare `infeasible`.
+  - [x] **m4** the `drops_out_above` docstring states what the function does.
+- **Deviation (a) WITHDRAWN.** I recorded §4.5's forward positional inflation as degenerate. The
+  reviewer showed the argument attacked a *value*-proportional allocation; §4.5 allocates by
+  need. Slot-proportional allocation gives genuinely distinct per-position figures (QB 0.78x,
+  RB 0.42x on the real board), so the deviation is withdrawn and
+  `inflation.py::forward_positional_inflation` implements the charter's formula.
+- **Reviewer verdict:** pending (round 2 not yet commissioned).
+- **Evaluator verdict:** pending.
 
 ---
 

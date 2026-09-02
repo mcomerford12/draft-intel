@@ -509,7 +509,11 @@ def _scenarios(board: ValueBoard, config: LeagueConfig, my_keeper_spend: int) ->
 
     for label, roster in rows:
         if roster.objective == float("-inf"):
+            # Carry the optimizer's own caveats to the page. Branching on the objective alone
+            # printed a bare "infeasible" and dropped every note behind it, so a board the
+            # optimizer had only *capped* read as one it had actually exhausted.
             out.append(f"  {label:34} {'--':>7} {'infeasible':>13}")
+            out.extend(f"      {note}" for note in roster.notes)
             continue
         shape: dict[str, int] = {}
         for player in roster.starters:
