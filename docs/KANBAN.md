@@ -1307,6 +1307,114 @@ append to. Written to schema here, retroactively for the cards already built.
 - **Reviewer verdict:** pending.
 - **Evaluator verdict:** pending.
 
+### [DI-033] Skew: market and edge, all aggregations
+
+- **Sprint:** 2 · **Owner:** quant · **Size:** M · **Branch:** `di-033-skew` · **PR:** #12
+- **Acceptance criteria:**
+  - [x] the two §4.6 measures kept separate and unambiguously labelled
+  - [x] market skew uses the *consensus* value from `quant.market`, never our own model's field
+  - [x] each pick judged against the inflation the room faced **before** it
+  - [x] aggregated per pick, per team, per position, with `$ spent per projected point`
+  - [x] `COMPETITIVE` only; a pick with no consensus value excluded rather than counted as zero
+- **Mutation-verified:** 12/12, including both directions of the before/after choice.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+### [DI-034] Opponent max-bid and affordability engine
+
+- **Sprint:** 2 · **Owner:** quant · **Size:** S · **Branch:** `di-034-affordability` · **PR:** #12
+- **Acceptance criteria:**
+  - [x] max bid read from `TeamState`, never recomputed
+  - [x] FLEX overflow counted collectively across RB/WR/TE, not once per position
+  - [x] aggression keyed on `draft_slot`, `None` below three picks, and `None` is not zero
+  - [x] `my_max_bid` returns the binding constraint alongside the number (§4.7a)
+  - [x] the user is never on their own threat list; an unmapped slot is labelled, not dropped
+- **Mutation-verified:** 16/17. The survivor is provably equivalent (the neutral multiplier
+  equals the formula at zero skew); the tempting wrong version — a zero *threat* rather than a
+  zero *skew* — is pinned by a test.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+### [DI-035] DP roster optimizer + CBC oracle equivalence test
+
+- **Sprint:** 2 · **Owner:** quant · **Size:** L · **Branch:** `di-035-optimizer` · **PR:** #13
+- **Acceptance criteria:**
+  - [x] exact DP as the production engine, per ADR-0003
+  - [x] PuLP/CBC retained as a test oracle, written from the §4.7b ILP independently
+  - [x] ADR-0004's objective in both engines, λ included
+  - [x] never returns an illegal lineup; never proposes a keeper (keepers are not candidates)
+  - [ ] **not mutation-verified.** DI-033 and DI-034 were; this and DI-036–039 were not, which
+        is the largest verification gap in the sprint and is stated rather than hidden.
+- **Three defects found during the card**, all of the "right number, wrong answer" shape:
+  dominance pruning unsound with a fixed slot count; forced players reserving a starting slot so
+  the DP optimised an objective it did not report; back-pointer reconstruction rebuilding rosters
+  holding the same player twice.
+- **The oracle was wrong before the DP was** — it emitted no starting-slot constraint for
+  positions absent from `starters`, so CBC scored lineups with two starting tight ends in a
+  league with no TE slot and called the DP wrong for refusing.
+- **Performance against §4.7b's 200ms budget, measured not claimed:** 14 slots ~450ms (over),
+  8 slots ~156ms, 4 slots ~45ms. The 14-slot case is the only state that cannot occur during
+  live bidding. Was 4.4s before the inner loop was vectorised.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+### [DI-036] Walk-away curves, precomputed per player
+
+- **Sprint:** 2 · **Owner:** quant · **Size:** M · **Branch:** `di-036-walkaway` · **PR:** #13
+- **Acceptance criteria:**
+  - [x] Δ objective and Δ starting points per price point (§4.7b's y-axis)
+  - [x] the excluded arm solved once for the whole curve
+  - [x] monotonicity checked, not assumed; infeasible points excluded from the check
+  - [x] walk-away price is the *highest* price still worth paying
+  - [x] the precompute ranks by VORP, not raw points
+  - [ ] not mutation-verified
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+### [DI-037] Manager tendency profiles (keyed on `competitive_seq`)
+
+- **Sprint:** 2 · **Owner:** quant · **Size:** M · **Branch:** `di-037-038-tendencies-overrides`
+  · **PR:** #14
+- **Acceptance criteria:**
+  - [x] positional bias, aggression slope, run-chasing, spend Gini
+  - [x] every figure fitted on `competitive_seq`; the whole profile identical under a 20-pick
+        `pick_no` offset, which is what Case A and Case B differ by
+  - [x] sample floors, with `None` distinguished from zero throughout
+  - [ ] not mutation-verified
+- **Charter item not built:** nomination behaviour. Sleeper's picks endpoint records who *won*
+  each player and carries no field anywhere for who nominated them, so any figure would be
+  invented. Reported through `Profile.unavailable` rather than omitted silently.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+### [DI-038] Value override plumbing
+
+- **Sprint:** 2 · **Owner:** quant · **Size:** M · **Branch:** `di-037-038-tendencies-overrides`
+  · **PR:** #14
+- **Acceptance criteria:**
+  - [x] per-player, positional multiplier, blacklist — §4.8's three kinds
+  - [x] the model's number retained alongside the user's, permanently
+  - [x] no implicit renormalisation; the deviation shown; `renormalise()` is a preview only
+  - [x] an override naming nobody raises; a non-positive multiplier is refused
+  - [ ] not mutation-verified
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+### [DI-039] `make prep` — the priced board and printable report
+
+- **Sprint:** 2 · **Owner:** quant · **Size:** L · **Branch:** `di-039-make-prep` · **PR:** #14
+- **Acceptance criteria:**
+  - [x] all seven §4.9 sections render against the real fixtures
+  - [x] tiers found from the board, never declared (§1 CRITICAL DATA RULE)
+  - [x] the config tripwire runs above the board
+  - [x] written to `reports/prep.txt`; `make prep` runs in ~90s
+  - [ ] not mutation-verified
+- **Two deviations, both stated in the report itself** rather than only in a docstring: §4.9
+  item 1's p25/p50/p75 labels are refused in favour of a sourced two-point band (the Monte Carlo
+  that would make percentiles real is Sprint 3), and item 6's interactive planner renders as
+  fixed allocations because a printed page cannot be interactive.
+- **A defect the report surfaced:** the walk-away precompute ranked by raw projected points, so
+  in a 2QB league the target list came out as twelve quarterbacks and nothing else.
+- **Sprint 2 gate:** `make prep` produces the full board. **A human has not yet reviewed it** —
+  that half of the gate is the user's, and it is why the report exists.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ### [DI-047] Close adversarial evaluation round 1 findings
 
 - **Sprint:** 2 · **Owner:** orchestrator · **Size:** M · **Branch:** `di-047-eval-round1-fixes`
