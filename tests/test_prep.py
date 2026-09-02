@@ -389,3 +389,37 @@ def test_the_board_reconciles_the_talent_it_prices_against_the_money_in_the_room
     assert live == pot - keepers
     assert keepers > 0, "the keepers cost real money; zero means the sum was not taken"
     assert abs(priced - live) <= 1, f"board prices ${priced} against ${live} of live money"
+
+
+def test_the_surplus_board_shows_both_value_bases_it_mixes(report: str) -> None:
+    """Section 3 printed `book 50` two lines above `rule implies $27` for the same player, and
+    the two came from different sources: `book` is this model's full-market valuation, which is
+    what §4.3 defines surplus against, while the 75% rule is written against Sleeper's auction
+    value and so is applied to the market *provider's* consensus.
+
+    Both are correct in their own terms and neither could be derived from the other by anyone
+    reading the page, which is the defect. Both bases are now printed and labelled.
+    """
+    section = report.split("3. KEEPER SURPLUS BOARD")[1].split("4. POSITIONAL")[0]
+    assert "this model's full-market value" in section
+    assert "market provider's consensus" in section
+
+    header = next(line for line in section.splitlines() if "surplus" in line and "paid" in line)
+    columns = header.split()
+    assert columns.index("book") < columns.index("mkt") < columns.index("paid")
+
+    rows = [
+        line.split()
+        for line in section.splitlines()
+        if line.startswith("  ") and len(line.split()) >= 7 and line.split()[-1].isdigit()
+    ]
+    assert rows, "no team rows parsed"
+    for row in rows:
+        book, mkt, paid, surplus = (
+            float(row[-5]),
+            float(row[-4]),
+            int(row[-3]),
+            int(row[-2]),
+        )
+        assert surplus == round(book - paid), "surplus is book less paid, on the book basis"
+        assert mkt > 0, "the consensus basis is populated, not a blank column"

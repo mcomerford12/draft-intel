@@ -1873,6 +1873,89 @@ append to. Written to schema here, retroactively for the cards already built.
   through.
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
+### [DI-050] Close adversarial evaluation round 2 findings (DI-033 → DI-039)
+
+- **Sprint:** 2 · **Owner:** orchestrator · **Size:** L · **Branch:** `di-050-eval-round2-fixes`
+- **Evaluation artefact:** `di-039-make-prep` @ `bf93f1d`, evaluated in an isolated worktree
+  while DI-048/DI-049 were in flight; the evaluator re-ran every finding against `e21fb32` and
+  marked which persisted. Three cards APPROVED (DI-033, DI-034, DI-038), four REJECTED.
+- **It also disproved my own withdrawn deviation independently**, reaching the same conclusion
+  about §4.5's forward positional inflation that DI-048 had already reversed — from a different
+  direction, which is worth more than agreement would have been.
+- **Acceptance criteria:**
+  - [x] **E1 — the DP returned lineups that field nobody.** The evaluator's reproducer no longer
+        fired at HEAD, so I wrote my own adversarial sweep with VORP decoupled from points:
+        **66 mismatches in 1,500 states, with the DP scoring HIGHER than brute force.** It was
+        returning an objective of 202 on a two-player roster with **no starters at all**, while a
+        FLEX slot sat open and both eligible players sat benched. The FLEX split is committed
+        before the players are known, so it can hand a slot to a position the roster then buys
+        nobody at; a benched player is worth `λ x vorp`, so that fiction can outscore every legal
+        lineup, and the DP maximises over splits. `_split_lineup` now reassigns spare FLEX room,
+        and the objective is scored from the reported lineup rather than the table cell that
+        found it.
+  - [x] **E1b — the precondition, stated and checked.** `λ x vorp <= points` for every candidate
+        is what makes the search exact: **0 mismatches in 1,500 states** inside it. It holds here
+        by construction but `Candidate` does not enforce it and DI-038 overrides `points` without
+        `vorp` — the same shape as the M1 precondition that was a defect — so `best_roster`
+        checks it per call and reports `NON-DOMINANT BENCH` rather than assuming it.
+  - [x] **E2 — the latency table timed the wrong thing.** §4.7b budgets the *curve*; the
+        docstring reported one `best_roster` solve, understating the real cost ~40x. Measured:
+        one 14-slot curve was **39.3s**, and ADR-0003's `top=25` precompute **16 minutes** per
+        settled pick. A shaped display grid cut the curve to **11.1s** and the precompute to
+        4m26s, with no loss of accuracy in the walk-away price, which comes from a binary search
+        over the full range — the M5 fix is what made a coarse grid safe. The real figures are
+        now in the table, including that **none of them meets 200ms** and why that is a question
+        about the precompute window rather than the lookup. Profiling says 91% is in
+        `_solve_split`'s combine, not `_position_table`, so the obvious next optimisation would
+        buy nothing; the real fix is DI-051.
+  - [x] **E3 — `prep.py` was 97% line-covered and ~8% mutation-covered.** Deleting the keeper
+        subtraction, ignoring which positions keepers occupy, and zeroing keeper spend all passed
+        the suite. The last re-priced all 140 players by 40% — top asset $26.60 → $37.32 — with
+        nothing failing. The board now prints its own money identity ($1,451 of talent against
+        $1,451 of live money) and all three are pinned against config and the picks feed instead
+        of against the report's own output.
+  - [x] **E4 — `test_the_curve_falls_as_the_price_rises` asserted on a flat line.** Every
+        alternative on its board cost $1, so all ten deltas came out at 100.0, and a constant
+        list is `sorted(reverse=True)`. Repriced onto a real quality ladder. Separately
+        `_is_monotone` had no test at all — replacing its body with `return True` survived, and
+        that flag is the tripwire `make prep` prints BROKEN off.
+  - [x] **E6 — DI-037's headline claim was untestable as written.** Its fixture gave one manager
+        eight *consecutive* picks, so `competitive_seq` was the list index plus a constant, and a
+        least-squares slope is invariant under shifting x — fitting on `enumerate()` produced the
+        identical number. An interleaved fixture separates them by exactly the interleave factor.
+  - [x] **E7 — my shipped string was false.** It said no field anywhere in the payload carries
+        nomination behaviour; `draft.metadata` carries five. Corrected, and recorded as
+        **api-findings Finding 11** — see below.
+  - [x] **E8 — section 3 mixed two value bases silently.** `book` is this model's full-market
+        valuation (what §4.3 measures surplus against); the 75% rule is written against Sleeper's
+        auction value, so `rule implies` is applied to the market *provider's* consensus. Both
+        are right in their own terms and neither was derivable from the other on the page. Both
+        columns are now shown and labelled.
+- **⚠️ ESCALATED, NOT RESOLVED — api-findings Finding 11.** The public draft object carries
+  `nominating_slot`, `nominated_player_id`, `offering_slot`, `offering_user_id` and
+  `highest_offer`. Three of those are things charter §2's ⛔ Hard Constraint states have no
+  public feed, and the entire hybrid manual-entry architecture is derived from that claim. No
+  code added and no architecture changed: it is an orchestrator decision, and it has a deadline,
+  because the history cannot be recovered after the fact.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending (round 3 not commissioned).
+
+### [DI-051] Solve the walk-away curve as one DP read at many budgets
+
+- **Sprint:** 3 · **Owner:** quant · **Size:** L · **Dep:** DI-050
+- **Why:** a curve is dozens of independent solves, and the whole knapsack is repeated for each
+  of the six FLEX splits at each of ~46 price points. Forcing a player at price X only shifts
+  that player's own position table along the budget axis; everything else is identical across
+  the curve. Solving once and reading the combined table at many budgets is the difference
+  between a 4m26s precompute and one that fits between picks.
+- **Measured starting point** (real 140-player pool, 14 slots / $185, after DI-050's grid fix):
+  curve 11.1s, of which **91% is inside `_solve_split`'s combine** and 8% in `_position_table`.
+  Caching position tables across price points — the obvious first move — is therefore not the
+  fix, and this card exists so nobody spends a day discovering that.
+- **Acceptance criteria:**
+  - [ ] the curve is exact against the current implementation on the real board, every point
+  - [ ] `top=25` precompute fits inside a 30s between-picks window at 8 open slots
+  - [ ] the 14-slot case is stated honestly if it still does not fit, rather than tuned around
+
 ---
 
 ## Ready — Sprint 2 (Intelligence Core)

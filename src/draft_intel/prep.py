@@ -300,12 +300,27 @@ def _inflation_section(keepers: KeeperBoard, unreliable: Mapping[str, float]) ->
 def _keeper_section(keepers: KeeperBoard, teams: int) -> list[str]:
     """§4.9 item 3: per team, with effective buying power."""
     out = [RULE, "3. KEEPER SURPLUS BOARD — effective buying power per team", RULE]
+    # Two different value bases meet in this section and used to be printed side by side with
+    # nothing saying so. `book` is OUR model's full-market valuation, which is what §4.3 defines
+    # surplus against. `rule $` below is `floor(0.75 x consensus)`, and the consensus is the
+    # market PROVIDER's number, because the league rule is written against Sleeper's auction
+    # value rather than against anything we compute. A reader could not reconcile a book of $50
+    # with a rule of $27 from anything on the page, and would reasonably assume one was wrong.
+    # Both columns are shown, so the arithmetic closes in both directions.
     out.append(
-        f"  {'owner':8} {'keepers':34} {'book':>6} {'paid':>6} {'surplus':>8} {'eff. power':>11}"
+        "  `book` is this model's full-market value (what §4.3 measures surplus against);\n"
+        "  `mkt` is the market provider's consensus, which is what the 75% rule is applied to.\n"
+        "  They are different numbers on purpose; the alerts below use `mkt`, the surplus"
+        " column uses `book`.\n"
+    )
+    out.append(
+        f"  {'owner':8} {'keepers':34} {'book':>6} {'mkt':>6} {'paid':>6} {'surplus':>8} "
+        f"{'eff. power':>11}"
     )
     rows: list[tuple[float, str]] = []
     for owner, lines in sorted(keepers.by_team().items()):
         book = sum(line.book_value for line in lines)
+        consensus = sum(line.market_value or 0 for line in lines)
         paid = sum(line.price_paid or 0 for line in lines)
         surplus = book - paid
         # Charter §4.6: two teams both showing $150 remaining are not equal if one captured $40
@@ -320,8 +335,8 @@ def _keeper_section(keepers: KeeperBoard, teams: int) -> list[str]:
         rows.append(
             (
                 surplus,
-                f"  {owner:8} {names[:34]:34} {book:>6.0f} {paid:>6} {surplus:>+8.0f} "
-                f"{power:>11.0f}",
+                f"  {owner:8} {names[:34]:34} {book:>6.0f} {consensus:>6.0f} {paid:>6} "
+                f"{surplus:>+8.0f} {power:>11.0f}",
             )
         )
     for _surplus, row in sorted(rows, reverse=True):

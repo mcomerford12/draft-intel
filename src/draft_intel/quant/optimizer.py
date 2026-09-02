@@ -86,24 +86,41 @@ optimal.
 
 ----
 
-**Measured latency, against §4.7b's 200ms budget.** On the real 140-player live pool:
+**Measured latency. §4.7b's 200ms budget is for the walk-away CURVE, not for one solve, and
+this table used to report only the solve.** That understated the real cost by roughly forty
+times and is corrected here. On the real 140-player live pool:
 
-=====================  ==========  ================================================
-open slots / budget    full solve  note
-=====================  ==========  ================================================
-14 slots / $185           ~450ms   over budget; only reachable before the first pick
-8 slots / $120            ~156ms   within budget
-4 slots / $60              ~45ms   within budget
-=====================  ==========  ================================================
+=====================  ==========  ==========  ==================  =====================
+open slots / budget    one solve   one curve   precompute (top=25) when this state exists
+=====================  ==========  ==========  ==================  =====================
+14 slots / $185            310ms      11.1s              4m 26s    before the first pick
+8 slots / $120              96ms       3.6s              1m 24s    mid-draft
+4 slots / $60               26ms       0.8s                 19s    late
+=====================  ==========  ==========  ==================  =====================
+
+**Not one of these meets 200ms, and the shortfall is structural rather than a tuning problem.**
+A curve is dozens of solves by construction. What ADR-0003 actually promises is that the *live*
+path is a dictionary lookup into a board precomputed between picks -- so the 200ms applies to
+the lookup, and the real question is whether the precompute fits in the gap between settled
+picks, which is 30-60 seconds in a live auction. At 4 open slots it does. At 8 it is marginal.
+At 14 it is not close.
+
+Two things were done here rather than claimed. :func:`~draft_intel.quant.walkaway._display_grid`
+cut the curve from every dollar to a shaped grid, taking the 14-slot curve from **39.3s to
+11.1s** with no loss of accuracy in the reported walk-away price, which comes from a binary
+search over the full range. And the numbers above are now the ones the charter asks about.
+
+Profiling says where the rest is: **91% of a curve is inside** :func:`_solve_split`'s combine,
+not in :func:`_position_table` (0.87s of 10.9s), so caching position tables across price points
+-- the obvious next move -- would buy almost nothing. The combine repeats the whole knapsack for
+each of the six FLEX splits at each of the ~46 price points, and the real win is to solve the
+curve as one DP read at many budgets rather than as many DPs. That is a rewrite, it is recorded
+as DI-051, and it is Sprint 3 work. Until then the honest mitigation is ``top``: the precompute
+cost is linear in it.
 
 The dictionary implementation this replaced took **4.4 seconds** for the 14-slot solve, with
 4.6 of them inside dictionary lookups rather than arithmetic. Vectorising the inner loop over
 the budget axis is what closed most of that gap.
-
-The 14-slot case is stated rather than explained away: it is genuinely over budget. It is also
-the state that exists only before the user has bought anybody, when nothing is on the block and
-there is no bid to answer. Every state that occurs during live bidding is inside the budget, and
-it gets faster as the night goes on. Reporting the numbers beats claiming the target.
 
 Dominance pruning removed **zero** candidates from that live pool, because auction price tracks
 projected points closely enough that almost nobody is both cheaper and better than somebody

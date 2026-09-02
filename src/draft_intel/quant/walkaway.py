@@ -157,7 +157,7 @@ def walkaway_curve(
 
     # The most this user can legally bid: every other open slot still needs its dollar.
     ceiling = budget - (slots - 1)
-    span = list(prices) if prices is not None else list(range(1, max(1, ceiling) + 1))
+    span = list(prices) if prices is not None else _display_grid(max(1, ceiling))
 
     without = best_roster(
         candidates,
@@ -220,6 +220,38 @@ def _delta(
     if roster.objective == float("-inf") or baseline == float("-inf"):
         return float("-inf")
     return roster.objective - baseline
+
+
+def _display_grid(ceiling: int) -> list[int]:
+    """Prices to *plot*. The walk-away number does not come from here.
+
+    Every dollar from $1 to the ceiling costs one solve each, and at 14 open slots on the real
+    140-player board that is 172 solves -- a **39 second** curve against §4.7b's 200ms, and
+    ADR-0003's 25-player precompute would be sixteen minutes per settled pick. The charter
+    budgets the curve, not one solve, so the docstring that timed ``best_roster`` alone was
+    measuring the wrong thing.
+
+    Nothing needs that resolution. The curve is monotone, so its shape is carried by a handful
+    of points, and the one number the user acts on -- the walk-away price -- is found by binary
+    search over the *whole* range regardless of what is plotted. Decoupling those two is exactly
+    what the M5 fix bought: before it, the reported price was capped by the sampled grid, so the
+    grid could not be made coarse without making the answer wrong.
+
+    Dense where the decisions are (every dollar to $10, where most of an auction happens), then
+    widening. Both ends are always present so the plotted curve spans the legal range.
+    """
+    steps = [(10, 1), (30, 2), (60, 5), (120, 10)]
+    grid, price = [], 1
+    for limit, step in steps:
+        while price <= min(limit, ceiling):
+            grid.append(price)
+            price += step
+    while price <= ceiling:
+        grid.append(price)
+        price += 20
+    if grid[-1] != ceiling:
+        grid.append(ceiling)
+    return grid
 
 
 def _find_crossing(delta_at: Callable[[int], float], *, ceiling: int) -> int | None:

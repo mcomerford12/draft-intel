@@ -9,6 +9,7 @@ from draft_intel.quant.optimizer import Candidate
 from draft_intel.quant.slots import FLEX
 from draft_intel.quant.walkaway import (
     CurvePoint,
+    _display_grid,
     _is_monotone,
     walkaway_board,
     walkaway_curve,
@@ -401,3 +402,38 @@ def test_the_maximum_legal_bid_never_goes_below_a_dollar():
     curve = walkaway_curve(board(), board()[0], budget=2, slots=6, starters=STARTERS)
     assert curve.max_legal_bid == 1, "budget 2 across 6 slots: the floor, not -3"
     assert all(point.price >= 1 for point in curve.points)
+
+
+def test_the_walk_away_price_is_exact_even_though_the_plotted_curve_is_sampled():
+    """§4.7b budgets the *curve*, and a curve priced at every dollar is 172 solves -- 39 seconds
+    at 14 open slots. The plotted grid is now shaped rather than dense, which is only safe
+    because the walk-away price comes from a binary search over the whole legal range and not
+    from the grid. Pinned against the dense curve so the two can never drift apart.
+    """
+    pool = falling_board()
+    sampled = walkaway_curve(
+        pool, pool[0], budget=20, slots=3, starters={"RB": 1}, bench_weight=0.2
+    )
+    dense = walkaway_curve(
+        pool,
+        pool[0],
+        budget=20,
+        slots=3,
+        starters={"RB": 1},
+        bench_weight=0.2,
+        prices=list(range(1, sampled.max_legal_bid + 1)),
+    )
+    assert sampled.walk_away_price == dense.walk_away_price
+    assert len(sampled.points) < len(dense.points), "or nothing was saved"
+
+
+def test_the_display_grid_is_dense_where_the_money_is_and_always_spans_the_range():
+    """Most auction decisions happen under $10, so that is where the resolution goes."""
+    grid = _display_grid(172)
+    assert grid[0] == 1 and grid[-1] == 172, "both ends of the legal range are plotted"
+    assert grid == sorted(set(grid)), "strictly increasing, no repeats"
+    assert grid[:10] == list(range(1, 11)), "every dollar through $10"
+    assert len(grid) < 172 / 4, "the whole point is that it is much smaller"
+    # A ceiling inside the dense band is plotted in full rather than truncated.
+    assert _display_grid(6) == [1, 2, 3, 4, 5, 6]
+    assert _display_grid(1) == [1]
