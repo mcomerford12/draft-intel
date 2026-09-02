@@ -22,8 +22,9 @@ from draft_intel.domain.identity import (
     build_identity,
     manifest_keys,
 )
-from draft_intel.domain.keepers import load_manifest, resolve_manifest, retention_price
+from draft_intel.domain.keepers import load_manifest, resolve_manifest
 from draft_intel.domain.ledger import fold
+from draft_intel.quant.keeper_board import keeper_board
 from draft_intel.quant.market import (
     AdpMarketValues,
     CsvMarketValues,
@@ -51,6 +52,18 @@ def _aliases(key: str = "aliases") -> dict[str, str]:
     merged = dict(data.get("aliases") or {})
     merged.update(data.get(key) or {} if key != "aliases" else {})
     return merged
+
+
+def _or_dash(figure: float | int | None) -> str:
+    """Render an unknown as a dash. A missing price is not a zero, and must never read as one.
+
+    ``-0`` is normalised to ``0``: it is what a small negative rounds to at zero decimals, and a
+    minus sign in a money column reads as a real deficit rather than as rounding.
+    """
+    if figure is None:
+        return "--"
+    rendered = f"{figure:.0f}"
+    return "0" if rendered == "-0" else rendered
 
 
 def _classifier(
@@ -331,18 +344,64 @@ def value() -> int:
             f"     see {CONFIG / 'auction_values.csv.example'} for the format."
         )
 
-    print()
-    print("  KEEPER RETENTION CHECK  floor(0.75 * market value), clamped to $1")
-    print(f"  {'owner':8} {'player':24} {'pos':4} {'market $':>9} {'rule $':>7} {'loaded':>7}")
-    keeper_rows = sorted(
-        ((owner, entry, market.get(pid)) for (owner, pid), entry in resolved.items()),
-        key=lambda row: (row[0], row[1].name),
+    # DI-031. Retention prices come from the picks feed here, which is what the mock actually
+    # loaded. On draft day they are read off the draft room and entered through the override
+    # layer; the manifest's `price` field is the third path. All three are observed fact, which
+    # is what makes them the `as_loaded` scenario rather than the rule-implied one.
+    loaded_prices = {
+        p["player_id"]: int(p["metadata"]["amount"])
+        for p in picks
+        if p["player_id"] in keeper_ids and (p.get("metadata") or {}).get("amount")
+    }
+    keepers = keeper_board(
+        board,
+        keeper_owners={pid: owner for owner, pid in resolved},
+        slots={
+            pid: slot for owner, pid in resolved if (slot := identity.slot_for(owner)) is not None
+        },
+        prices=loaded_prices,
+        market=market,
+        minimum_retention_price=manifest.league.minimum_retention_price,
     )
-    for owner, entry, value in keeper_rows:
-        rule = f"{retention_price(int(value)):>7}" if value is not None else f"{'--':>7}"
-        loaded = f"{entry.price:>7}" if entry.price is not None else f"{'unset':>7}"
-        shown = f"{value:>9.0f}" if value is not None else f"{'--':>9}"
-        print(f"  {owner:8} {entry.name[:24]:24} {entry.pos:4} {shown} {rule} {loaded}")
+
+    print()
+    print("=" * 78)
+    print("DI-031  KEEPER SURPLUS BOARD")
+    print("=" * 78)
+    print(
+        f"  {'owner':8} {'player':22} {'pos':4} {'book':>6} {'mkt':>6} "
+        f"{'rule':>6} {'loaded':>7} {'surplus':>8}"
+    )
+    for line in keepers.lines:
+        print(
+            f"  {line.owner:8} {line.name[:22]:22} {line.position:4} "
+            f"{line.book_value:>6.0f} {_or_dash(line.market_value):>6} "
+            f"{_or_dash(line.rule_price):>6} {_or_dash(line.price_paid):>7} "
+            f"{_or_dash(line.surplus):>8}"
+        )
+
+    print()
+    print(f"  {'scenario':26} {'ΣK':>6} {'live $':>8} {'surplus':>9} {'inflation':>10}")
+    for scenario in (keepers.as_loaded, keepers.under_rule):
+        if scenario.complete:
+            print(
+                f"  {scenario.label:26} {scenario.keeper_spend:>6} "
+                f"{scenario.total_live_money:>8} {scenario.keeper_surplus:>+9.0f} "
+                f"{scenario.keeper_inflation:>9.4f}x"
+            )
+        else:
+            print(
+                f"  {scenario.label:26} {scenario.keeper_spend:>6} "
+                f"{'--':>8} {'--':>9} {'--':>10}   "
+                f"({scenario.missing} keeper(s) unpriced; derived figures refuse)"
+            )
+    print(
+        "\n  Inflation above 1.00x means the remaining board should clear OVER book, which is\n"
+        "  what the 25% retention discount is meant to produce. Below 1.00x means the keepers\n"
+        "  were retained at or above their open-market worth and the board clears at a discount."
+    )
+    for alert in keepers.alerts():
+        print(f"  ALERT {alert}")
 
     print()
     print("  TOP 25 AVAILABLE  (baseline_value is the number to bid against)")
