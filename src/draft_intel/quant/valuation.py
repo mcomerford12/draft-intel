@@ -6,7 +6,7 @@ Charter §4.3 requires two distinct valuations and is explicit that they must no
 auction. The reference used to price the keepers themselves and to compute keeper surplus::
 
     VORP_i           = max(0, proj_points_i - replacement_points_full_market(i))
-    pool_full        = top 160 players by VORP
+    pool_full        = the 160 the replacement fixed point rosters, per position
     discretionary    = 2000 - 160 = 1840
     dollars_per_vorp = discretionary / sum(VORP over pool_full)
     market_value_i   = 1 + VORP_i * dollars_per_vorp
@@ -16,7 +16,7 @@ off the board and only ``2000 - sum(K_t)`` left in the room. **This is the numbe
 bids against.**::
 
     VORP_live_i        = max(0, proj_points_i - replacement_points_post_keeper(i))
-    pool_live          = top 140 available players by VORP_live
+    pool_live          = the 140 available the live fixed point rosters, per position
     total_live_money   = 2000 - sum(K_t)
     discretionary_live = total_live_money - 140
     dpv_live           = discretionary_live / sum(VORP_live over pool_live)
@@ -32,7 +32,7 @@ app must refuse to present prices." :func:`value_board` enforces that rather tha
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict
 
@@ -135,6 +135,28 @@ class ValueBoard(BaseModel):
         return [p for p in self.players if not p.is_keeper]
 
 
+def _pool_for(
+    players: Sequence[PlayerProjection],
+    vorp: Mapping[str, float],
+    rostered: Mapping[str, int],
+) -> set[str]:
+    """The priced pool implied by a baseline's own per-position roster.
+
+    ``rostered`` is what :func:`~draft_intel.quant.replacement.last_drafted_baseline` converged
+    on: how many players at each position the league actually buys. Taking the best ``n`` at
+    each position by VORP reproduces exactly that roster, so the pool and the replacement level
+    that prices it are the same set by construction rather than by coincidence.
+    """
+    by_position: dict[str, list[PlayerProjection]] = {}
+    for player in players:
+        by_position.setdefault(player.position, []).append(player)
+    chosen: set[str] = set()
+    for position, group in by_position.items():
+        group.sort(key=lambda p: vorp[p.player_id], reverse=True)
+        chosen.update(p.player_id for p in group[: rostered.get(position, 0)])
+    return chosen
+
+
 def value_board(
     players: Sequence[PlayerProjection],
     *,
@@ -178,19 +200,39 @@ def value_board(
         for p in players
     }
 
-    pool_full = {
-        p.player_id
-        for p in sorted(players, key=lambda p: full_vorp[p.player_id], reverse=True)[
-            :roster_spots_full
-        ]
-    }
+    # **The pool is the one the replacement level was solved for, position by position.**
+    #
+    # A flat "top 160 by VORP" is the obvious reading of §4.3 and it disagrees with the fixed
+    # point that produced the replacement levels it ranks by. `last_drafted_baseline` iterates
+    # to a per-position roster -- with K *pinned*, because a league that starts a kicker must
+    # buy ten of them whatever the value curve says -- and settles on 25 QB / 10 K. Ranking the
+    # same players flat by VORP gives 31 QB / 6 K, because kickers have almost no VORP and lose
+    # every tiebreak.
+    #
+    # So four kickers the league is obliged to buy fell outside the priced pool and rendered as
+    # `--`, while the `dollars_per_vorp` denominator summed VORP over a pool that was not the
+    # pool the replacement levels assumed. The money involved is small -- every affected player
+    # sits at VORP 0, about $6 of $2,000 -- but two halves of one valuation disagreeing about
+    # who is in the auction is not a rounding difference, and it stops being small the moment a
+    # roster setting changes.
     available = [p for p in players if p.player_id not in keeper_ids]
-    pool_live = {
-        p.player_id
-        for p in sorted(available, key=lambda p: live_vorp[p.player_id], reverse=True)[
-            :roster_spots_live
-        ]
-    }
+    pool_full = _pool_for(players, full_vorp, baselines.full_last_drafted.rostered)
+    pool_live = _pool_for(available, live_vorp, baselines.live_last_drafted.rostered)
+
+    # Having just made the pool follow the baseline's own roster, refuse to price a board where
+    # the two still disagree. `compute_baselines` guarantees the sum because `last_drafted_
+    # baseline` fills exactly `roster_spots`, but nothing in the type system does, and a silent
+    # divergence here is precisely the defect this construction removes.
+    for label, pool, expected in (
+        ("full", pool_full, roster_spots_full),
+        ("live", pool_live, roster_spots_live),
+    ):
+        if len(pool) != expected:
+            raise InvariantViolation(
+                f"the {label} priced pool holds {len(pool)} players but {expected} roster spots "
+                "are being priced; the baseline's rostered counts and the roster spots passed "
+                "in describe different auctions"
+            )
 
     total_live_money = total_budget - keeper_spend
     discretionary = total_budget - roster_spots_full

@@ -93,14 +93,51 @@ def resolve_player_id(name: str, position: str, players: dict[str, dict[str, Any
     )
 
 
+class DuplicateKeeper(Exception):
+    """The same player is listed as kept by two owners.
+
+    Impossible in a real league and cheap to type: this manifest is a hand-maintained file that
+    changes right up to draft day, and two owners can easily end up holding the same name.
+
+    It is raised rather than warned because of how it fails. Supply and demand read the manifest
+    through different collections -- ``keeper_ids`` is a *set*, so a duplicate collapses and only
+    19 players leave the pool, while demand seats all 20 entries. The board then prices 141
+    roster spots against 140 players' worth of removed demand, **every price on it shifts**, and
+    nothing else looks wrong: the count still reads 20, ``manifest_keys(require=20)`` is still
+    satisfied because the two entries have different slots, and the report renders normally.
+
+    This is the mirror of the keeper double-count the ledger already guards, and it is the same
+    class of defect: a plausible board, wrong since before the draft started.
+    """
+
+
 def resolve_manifest(
     manifest: Manifest, players: dict[str, dict[str, Any]]
 ) -> dict[tuple[str, str], KeeperEntry]:
-    """Resolve every keeper, returning a mapping of ``(owner, player_id)`` to the entry."""
+    """Resolve every keeper, returning a mapping of ``(owner, player_id)`` to the entry.
+
+    Raises:
+        DuplicateKeeper: if any player is listed by more than one owner. See the exception.
+        AmbiguousPlayer: if a name and position do not resolve to exactly one player.
+    """
     out: dict[tuple[str, str], KeeperEntry] = {}
+    owners_by_player: dict[str, list[str]] = {}
     for owner, entry in manifest.entries:
         pid = entry.player_id or resolve_player_id(entry.name, entry.pos, players)
         out[(owner, pid)] = entry.model_copy(update={"player_id": pid})
+        owners_by_player.setdefault(pid, []).append(owner)
+
+    shared = {pid: owners for pid, owners in owners_by_player.items() if len(owners) > 1}
+    if shared:
+        detail = "; ".join(
+            f"{pid} kept by {', '.join(owners)}" for pid, owners in sorted(shared.items())
+        )
+        raise DuplicateKeeper(
+            f"{len(shared)} player(s) listed as kept by more than one owner: {detail}. "
+            "A player can only be on one roster; supply would drop by fewer players than "
+            "demand drops slots, and every price on the board would shift with nothing to "
+            "show for it."
+        )
     return out
 
 

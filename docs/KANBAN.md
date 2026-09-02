@@ -2322,17 +2322,34 @@ append to. Written to schema here, retroactively for the cards already built.
 - **Sprint:** 2 · **Owner:** quant · **Size:** M
 - Found while evaluating DI-053/054, correctly reported as out of scope rather than folded in.
   Neither is a regression; both are real.
+- **Branch:** `di-059-pool-consistency` · **Both closed.**
 - **Acceptance criteria:**
-  - [ ] **The mirror of the keeper double-count is unguarded.** Two owners listing the same
+  - [x] **The mirror of the keeper double-count is unguarded.** Two owners listing the same
         player removes 20 slots from demand but only 19 players from supply (`roster_live` 141),
         `manifest_keys(require=20)` still passes, every price on the board shifts, and nothing
-        alerts. The manifest currently has no duplicates — verified — so this is latent, and the
-        manifest is a hand-typed file that changes before draft day.
-  - [ ] **The priced pool and the replacement fixed point disagree about who is in the pool.**
+        alerts. The manifest currently has no duplicates — verified — so this was latent, and
+        the manifest is a hand-typed file that changes before draft day. `resolve_manifest` now
+        raises `DuplicateKeeper`: a player on two rosters is impossible, and continuing produces
+        a board that is wrong everywhere and looks right.
+  - [x] **The priced pool and the replacement fixed point disagree about who is in the pool.**
         Top-160 by VORP is 31 QB / 6 K; the fixed point solved for 25 QB / 10 K. Four kickers the
         league must buy render as `--`. The effect is $6 of $2,000 and every affected player sits
         at VORP 0, so it is small — but two halves of the valuation disagreeing about pool
-        membership is the kind of thing that stops being small when a setting changes.
+        membership is the kind of thing that stops being small when a setting changes. The pool
+        is now derived from the baseline's own `rostered` counts, position by position, so the
+        two are one set by construction rather than by coincidence: both read 25 QB / 10 K, and
+        the map's K row goes from 6 startable against 10 needed to **10 against 10**.
+  - [x] the divergence cannot be quietly reintroduced — a pool whose size disagrees with the
+        roster spots being priced raises `InvariantViolation` rather than pricing two different
+        auctions against each other. `compute_baselines` guarantees the sum; nothing in the type
+        system did, and this card exists because of exactly that gap.
+  - [x] the money identity is unmoved: $1,451 of talent against $1,451 of live money, and the
+        top-of-board prices are unchanged, because every player this adds sits at VORP 0
+- **Mutation-verified 4/4**: pool reverts to a flat top-N, the disagreement guard removed,
+  duplicate keepers stop raising, and the live pool reading the *full* baseline's roster.
+- **Fixture note.** `hand_baselines` filled in `rostered={position: 1}` because nothing read it.
+  Making the pool follow it turned three tests red — correctly: they were passing roster spots
+  that their own baselines did not describe. Each now states the roster it means.
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
 ---

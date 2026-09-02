@@ -669,24 +669,37 @@ def test_real_board_shows_the_2qb_signature():
 # ======================================================================================
 
 
-def hand_baselines(*, full: dict[str, float], live: dict[str, float]) -> Baselines:
+def hand_baselines(
+    *,
+    full: dict[str, float],
+    live: dict[str, float],
+    full_rostered: dict[str, int] | None = None,
+    live_rostered: dict[str, int] | None = None,
+) -> Baselines:
     """Baselines with deliberately different full and live levels.
 
     On the real slate the two last-drafted baselines come out numerically identical, because
     removing 20 keepers from supply and 20 slots from demand very nearly cancel. That makes
     real data useless for proving the valuation reads the *live* baseline, so this constructs
     a case where they differ.
+
+    ``rostered`` used to be filled in as ``{position: 1}`` because nothing read it. DI-059 makes
+    the priced pool follow it -- so that the pool and the replacement level pricing it are the
+    same set by construction -- and it is now load-bearing: it must sum to the ``roster_spots``
+    the caller passes, or `value_board` refuses the board rather than pricing two different
+    auctions against each other. Each caller states the roster it means.
     """
     from draft_intel.quant.replacement import Baseline
 
-    def b(points: dict[str, float]) -> Baseline:
-        return Baseline(points=points, rostered={k: 1 for k in points}, pool_size=len(points))
+    def b(points: dict[str, float], rostered: dict[str, int] | None) -> Baseline:
+        counts = rostered if rostered is not None else {k: 1 for k in points}
+        return Baseline(points=points, rostered=counts, pool_size=sum(counts.values()))
 
     return Baselines(
-        full_starter=b(full),
-        full_last_drafted=b(full),
-        live_starter=b(live),
-        live_last_drafted=b(live),
+        full_starter=b(full, full_rostered),
+        full_last_drafted=b(full, full_rostered),
+        live_starter=b(live, live_rostered),
+        live_last_drafted=b(live, live_rostered),
     )
 
 
@@ -696,7 +709,12 @@ def test_live_valuation_reads_the_live_baseline_not_the_full_one():
     Invisible on real data because the two baselines coincide there, and invisible on the
     tiny fixture for the same reason. Pinned here with baselines that differ by construction.
     """
-    baselines = hand_baselines(full={"QB": 50.0, "RB": 50.0}, live={"QB": 90.0, "RB": 85.0})
+    baselines = hand_baselines(
+        full={"QB": 50.0, "RB": 50.0},
+        live={"QB": 90.0, "RB": 85.0},
+        full_rostered={"QB": 2, "RB": 2},
+        live_rostered={"QB": 2, "RB": 2},
+    )
     board = value_board(
         tiny(),
         baselines=baselines,
@@ -743,7 +761,12 @@ def test_the_sum_invariant_actually_fires_on_sane_inputs():
     the 3 pooled players prices at the $1 floor and the board totals $3 against $170 of live
     money.
     """
-    baselines = hand_baselines(full={"QB": 80.0, "RB": 70.0}, live={"QB": 999.0, "RB": 999.0})
+    baselines = hand_baselines(
+        full={"QB": 80.0, "RB": 70.0},
+        live={"QB": 999.0, "RB": 999.0},
+        full_rostered={"QB": 2, "RB": 2},
+        live_rostered={"QB": 1, "RB": 2},  # q1 is kept, so 3 available spots
+    )
     with pytest.raises(InvariantViolation, match="baseline_value"):
         value_board(
             tiny(),
@@ -788,7 +811,12 @@ def test_the_market_sum_invariant_fires_independently_of_the_baseline_one():
     baseline above every projection zeroes all full VORP, so the 4 pooled players price at the
     $1 floor and total $4 against the $200 budget, while the live side stays perfectly sane.
     """
-    baselines = hand_baselines(full={"QB": 999.0, "RB": 999.0}, live={"QB": 80.0, "RB": 70.0})
+    baselines = hand_baselines(
+        full={"QB": 999.0, "RB": 999.0},
+        live={"QB": 80.0, "RB": 70.0},
+        full_rostered={"QB": 2, "RB": 2},
+        live_rostered={"QB": 2, "RB": 2},  # no keepers here, so both pools are the full 4
+    )
     with pytest.raises(InvariantViolation, match="market_value"):
         value_board(
             tiny(),
@@ -818,3 +846,134 @@ def test_live_money_must_cover_the_minimum_bid_on_every_remaining_spot():
             roster_spots_full=4,
             roster_spots_live=3,
         )
+
+
+def real_board_and_baselines():
+    """The real board plus the baselines that priced it, so the two can be compared."""
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    league = json.loads((FIXTURES / "league.json").read_text())
+    players = json.loads((FIXTURES / "players_slim.json").read_text())
+    raw = json.loads((FIXTURES / "projections_slim.json").read_text())
+    picks = json.loads((FIXTURES / "picks.json").read_text())
+    projections, _ = build_projections(raw, league["scoring_settings"])
+    resolved = resolve_manifest(load_manifest(ROOT / "config" / "keepers.yaml"), players)
+    keeper_ids = frozenset(pid for _owner, pid in resolved)
+    demand = seat_keepers({}, starters=config.starters, teams=config.teams)
+    full, live = config.auction_pool, config.auction_pool - len(keeper_ids)
+    spend = sum(int(p["metadata"]["amount"]) for p in picks if p["player_id"] in keeper_ids)
+    baselines = compute_baselines(
+        projections,
+        keeper_ids=keeper_ids,
+        demand=demand,
+        roster_spots_full=full,
+        roster_spots_live=live,
+        kicker_slots=config.starters.get("K", 0) * config.teams,
+    )
+    board = value_board(
+        projections,
+        baselines=baselines,
+        keeper_ids=keeper_ids,
+        keeper_spend=spend,
+        total_budget=config.teams * config.budget,
+        roster_spots_full=full,
+        roster_spots_live=live,
+    )
+    return board, baselines
+
+
+# ============================== DI-059 — the pool and the baseline are one set
+
+
+def test_the_priced_pool_is_the_roster_the_replacement_level_solved_for():
+    """The two halves of the valuation used to disagree about who is in the auction.
+
+    `last_drafted_baseline` iterates to a per-position roster with K *pinned* — a league that
+    starts a kicker must buy ten of them whatever the value curve says — and settled on
+    25 QB / 10 K. `pool_full` ranked the same players flat by VORP and got 31 QB / 6 K, because
+    kickers have almost no VORP and lose every tiebreak.
+
+    So four kickers the league is obliged to buy fell outside the priced pool and rendered as
+    `--`, while `dollars_per_vorp` divided by a VORP sum taken over a pool the replacement level
+    had not assumed.
+    """
+    board, baselines = real_board_and_baselines()
+
+    for label, rostered, member in (
+        ("full", baselines.full_last_drafted.rostered, lambda p: p.in_pool_full),
+        ("live", baselines.live_last_drafted.rostered, lambda p: p.in_pool_live),
+    ):
+        counts: dict[str, int] = {}
+        for player in board.players:
+            if member(player):
+                counts[player.position] = counts.get(player.position, 0) + 1
+        assert counts == {k: v for k, v in rostered.items() if v}, f"{label} pool disagrees"
+
+
+def test_every_kicker_the_league_must_buy_is_priced():
+    """The user-visible symptom: a position the league is required to fill, rendering as `--`."""
+    board, _ = real_board_and_baselines()
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    required = config.starters.get("K", 0) * config.teams
+
+    priced = [p for p in board.players if p.position == "K" and p.in_pool_full]
+    assert len(priced) == required == 10
+    assert all(p.market_value > 0 for p in priced), "a player the league must buy needs a price"
+
+
+def test_a_pool_that_disagrees_with_its_roster_spots_is_refused_rather_than_priced():
+    """Having made the pool follow the baseline, a caller must not be able to reintroduce the
+    divergence quietly. `compute_baselines` guarantees the sum; nothing in the type system does.
+    """
+    baselines = hand_baselines(
+        full={"QB": 50.0, "RB": 50.0},
+        live={"QB": 50.0, "RB": 50.0},
+        full_rostered={"QB": 1, "RB": 1},  # 2 players...
+        live_rostered={"QB": 1, "RB": 1},
+    )
+    with pytest.raises(InvariantViolation, match="describe different auctions"):
+        value_board(
+            tiny(),
+            baselines=baselines,
+            keeper_ids=frozenset(),
+            keeper_spend=0,
+            total_budget=200,
+            roster_spots_full=4,  # ...against 4 spots
+            roster_spots_live=4,
+        )
+
+
+def test_a_player_kept_by_two_owners_is_refused():
+    """The mirror of the keeper double-count the ledger already guards.
+
+    Supply and demand read the manifest through different collections: `keeper_ids` is a set, so
+    a duplicate collapses and only 19 players leave the pool, while demand seats all 20 entries.
+    The board then prices 141 roster spots against 140 players' worth of removed demand — every
+    price shifts — and nothing else looks wrong. The count still reads 20 and
+    `manifest_keys(require=20)` is still satisfied, because the two entries have different slots.
+    """
+    import re
+
+    from draft_intel.domain.keepers import DuplicateKeeper
+
+    players = json.loads((FIXTURES / "players_slim.json").read_text())
+    lines = (ROOT / "config" / "keepers.yaml").read_text().splitlines()
+    rows = [i for i, line in enumerate(lines) if re.search(r'\{name: "', line)]
+    source = lines[rows[0]]
+    name_match = re.search(r'name: "([^"]+)"', source)
+    position_match = re.search(r"pos: (\w+)", source)
+    assert name_match and position_match, "manifest layout changed; this test edits a real row"
+    name, position = name_match.group(1), position_match.group(1)
+    target = next(i for i in rows if re.search(rf"pos: {position}", lines[i]) and i != rows[0])
+    lines[target] = re.sub(r'name: "[^"]+"', f'name: "{name}"', lines[target])
+
+    written = ROOT / "config" / "keepers.yaml"
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "keepers.yaml"
+        path.write_text("\n".join(lines))
+        with pytest.raises(DuplicateKeeper, match="more than one owner"):
+            resolve_manifest(load_manifest(path), players)
+
+    # And the real manifest, which is hand-maintained and changes before draft day, is clean.
+    assert len(resolve_manifest(load_manifest(written), players)) == 20
