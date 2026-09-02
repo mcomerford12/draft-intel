@@ -32,6 +32,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from draft_intel.config import LeagueConfig, assert_startable, load_league_config, validate
 from draft_intel.domain.identity import build_identity
 from draft_intel.domain.keepers import load_manifest, resolve_manifest
@@ -46,7 +48,7 @@ from draft_intel.quant.market import (
 from draft_intel.quant.optimizer import Candidate, best_roster
 from draft_intel.quant.replacement import compute_baselines
 from draft_intel.quant.scoring import build_projections
-from draft_intel.quant.slots import FLEX_ELIGIBLE, seat_keepers
+from draft_intel.quant.slots import allocate_flex, seat_keepers
 from draft_intel.quant.tiers import tier_sheet
 from draft_intel.quant.valuation import ValueBoard, value_board
 from draft_intel.quant.walkaway import walkaway_board
@@ -84,7 +86,13 @@ def build_report(root: Path, *, targets: int = 12) -> str:
     manifest = load_manifest(config_dir / "keepers.yaml")
     resolved = resolve_manifest(manifest, players_map)
     keeper_ids = frozenset(pid for _owner, pid in resolved)
-    identity = build_identity(mock_draft, aliases={"Me": "Matt"})
+    # owners.yaml, not a literal. `cli.py` already reads it through `_aliases("mock_aliases")`;
+    # duplicating the mapping here meant editing the config had no effect on this report.
+    aliases = yaml.safe_load((config_dir / "owners.yaml").read_text()) or {}
+    identity = build_identity(
+        mock_draft,
+        aliases={**(aliases.get("aliases") or {}), **(aliases.get("mock_aliases") or {})},
+    )
 
     positions_by_slot: dict[int, list[str]] = {}
     for (owner, _pid), entry in resolved.items():
@@ -127,30 +135,91 @@ def build_report(root: Path, *, targets: int = 12) -> str:
         projections,
         required=roster_full,
     )
+    prices, price_source = _retention_prices(resolved, picks, keeper_ids)
     keepers = keeper_board(
         board,
         keeper_owners={pid: owner for owner, pid in resolved},
         slots={
             pid: slot for owner, pid in resolved if (slot := identity.slot_for(owner)) is not None
         },
-        prices={
-            p["player_id"]: int(p["metadata"]["amount"])
-            for p in picks
-            if p["player_id"] in keeper_ids and (p.get("metadata") or {}).get("amount")
-        },
+        prices=prices,
         market=market,
         minimum_retention_price=manifest.league.minimum_retention_price,
     )
 
+    out += _price_provenance(price_source)
     out += _inflation_section(keepers, unreliable)
-    out += _keeper_section(keepers)
+    out += _keeper_section(keepers, config.teams)
     out += _positional_map(board, demand, roster_live)
     out += _priced_board(board, keepers)
     out += _tier_sheet(board)
-    out += _scenarios(board, config)
-    out += _targets(board, config, limit=targets)
-    out += _affordability_preview(config)
+    # Derived, never hardcoded. `user_team` is in the manifest and the slot follows from
+    # identity; an earlier version hardcoded slot 3 and a $55 keeper spend, and $55 was another
+    # manager's figure entirely -- the report contradicted its own section 3 by $7.
+    my_slot = identity.slot_for(manifest.user_team)
+    my_keeper_spend = sum(
+        price
+        for (owner, pid), _entry in resolved.items()
+        if owner == manifest.user_team and (price := prices.get(pid)) is not None
+    )
+    out += _scenarios(board, config, my_keeper_spend)
+    out += _targets(board, config, limit=targets, keeper_spend=my_keeper_spend)
+    out += _affordability_preview(config, my_slot, manifest.user_team)
     return "\n".join(out) + "\n"
+
+
+def _retention_prices(
+    resolved: Mapping[tuple[str, str], Any],
+    picks: Sequence[Mapping[str, Any]],
+    keeper_ids: frozenset[str],
+) -> tuple[dict[str, int], str]:
+    """Retention prices, from the manifest first and the mock's picks feed only as a fallback.
+
+    **The manifest is the authoritative source and was previously not consulted at all.** Every
+    price came from ``fixtures/picks.json`` -- a *mock draft* -- and was rendered as "prices as
+    loaded" with per-team paid columns and named per-keeper alerts, as though it described this
+    league. Setting a manifest price to ``commissioner`` authority changed nothing in the report.
+
+    ``config/keepers.yaml`` states the resolution order: ``sleeper_draft_room`` and
+    ``commissioner`` are authoritative, ``estimated`` is not, and *"every number downstream of an
+    estimated price is badged as estimated in the UI and in `make prep` output"*. Mock-draft
+    money is not even an estimate of this league's prices -- it is a different draft's results --
+    so the fallback is labelled explicitly rather than badged.
+
+    Returns ``(prices, provenance label)``.
+    """
+    from_manifest = {
+        pid: entry.price for (_owner, pid), entry in resolved.items() if entry.price is not None
+    }
+    if len(from_manifest) == len(keeper_ids):
+        return from_manifest, "config/keepers.yaml (authoritative)"
+
+    from_mock = {
+        p["player_id"]: int(p["metadata"]["amount"])
+        for p in picks
+        if p["player_id"] in keeper_ids and (p.get("metadata") or {}).get("amount")
+    }
+    merged = {**from_mock, **from_manifest}
+    if from_manifest:
+        return merged, (
+            f"MIXED: {len(from_manifest)} from config/keepers.yaml, the rest from the MOCK draft"
+        )
+    return merged, "the MOCK draft's picks feed -- NOT this league"
+
+
+def _price_provenance(source: str) -> list[str]:
+    out = [RULE, "KEEPER PRICE PROVENANCE — read this before section 2 or 3", RULE]
+    out.append(_line("retention prices from", source))
+    if "MOCK" in source:
+        out.append(
+            "\n  !! These are a DIFFERENT DRAFT'S RESULTS, not this league's retention prices.\n"
+            "     Every keeper price, surplus, alert and inflation figure below inherits that.\n"
+            "     They are not estimates of your prices -- they are somebody else's numbers,\n"
+            "     standing in until yours exist.\n"
+            "\n     Fix: fill in `price` and `price_source` in config/keepers.yaml. The manifest\n"
+            "     is consulted first and wins wherever it has a value."
+        )
+    return [*out, ""]
 
 
 # --------------------------------------------------------------------------- sections
@@ -228,7 +297,7 @@ def _inflation_section(keepers: KeeperBoard, unreliable: Mapping[str, float]) ->
     return [*out, ""]
 
 
-def _keeper_section(keepers: KeeperBoard) -> list[str]:
+def _keeper_section(keepers: KeeperBoard, teams: int) -> list[str]:
     """§4.9 item 3: per team, with effective buying power."""
     out = [RULE, "3. KEEPER SURPLUS BOARD — effective buying power per team", RULE]
     out.append(
@@ -241,7 +310,12 @@ def _keeper_section(keepers: KeeperBoard) -> list[str]:
         surplus = book - paid
         # Charter §4.6: two teams both showing $150 remaining are not equal if one captured $40
         # of keeper surplus and the other captured $6.
-        power = (keepers.as_loaded.total_budget // len(keepers.by_team())) - paid + surplus
+        #
+        # Divided by the league's team count, never by the number of teams that happen to hold
+        # keepers. Those differ the moment one team keeps nobody -- which the API's own
+        # `max_keepers: 1` makes entirely possible -- and dividing by the smaller number
+        # inflated every other team's buying power by $22.
+        power = (keepers.as_loaded.total_budget // teams) - paid + surplus
         names = ", ".join(line.name.split()[-1] for line in lines)
         rows.append(
             (
@@ -270,14 +344,17 @@ def _positional_map(board: ValueBoard, demand: Any, roster_live: int) -> list[st
     out.append(f"  {'pos':5} {'startable':>10} {'need':>6} {'ratio':>7} {'top $':>7} {'cliff':>7}")
     order = ["QB", "RB", "WR", "TE", "K"]
     remaining_base = demand.remaining_base
+    # §4.5: FLEX is allocated "proportionally to remaining positional demand", not split evenly.
+    # An even three-way split with a floor discarded 2 of the 20 remaining FLEX slots, so the
+    # need column summed to 78 while the line two rows below printed 80 -- the same page stating
+    # both numbers. Largest-remainder keeps the total exact.
+    flex_share = allocate_flex(demand.remaining_flex, remaining_base)
     for position in order:
         available = sorted(
             (p for p in board.available() if p.position == position and p.in_pool_live),
             key=lambda p: -p.baseline_value,
         )
-        need = remaining_base.get(position, 0)
-        if position in FLEX_ELIGIBLE:
-            need += demand.remaining_flex // len(FLEX_ELIGIBLE)
+        need = remaining_base.get(position, 0) + flex_share.get(position, 0)
         ratio = len(available) / need if need else float("inf")
         cliff = _cliff(available)
         top = available[0].baseline_value if available else 0.0
@@ -304,34 +381,40 @@ def _cliff(available: Sequence[Any]) -> str:
 def _priced_board(board: ValueBoard, keepers: KeeperBoard) -> list[str]:
     """§4.9 item 1: the priced board, with a sourced range rather than invented percentiles."""
     out = [RULE, "1. THE PRICED BOARD — top 30 available, by live auction value", RULE]
-    low_ratio = (
-        keepers.as_loaded.keeper_inflation
-        if keepers.as_loaded.complete
-        else keepers.under_rule.keeper_inflation
-        if keepers.under_rule.complete
-        else 1.0
-    )
-    high_ratio = keepers.under_rule.keeper_inflation if keepers.under_rule.complete else low_ratio
-    low_ratio, high_ratio = min(low_ratio, high_ratio), max(low_ratio, high_ratio)
-    out.append(
-        f"  Range = the two keeper-price scenarios, {low_ratio:.3f}x to {high_ratio:.3f}x.\n"
-        "  NOT p25/p50/p75: a percentile implies a sampling distribution, and the 500-run\n"
-        "  Monte Carlo that would produce one is Sprint 3. This is a two-point sensitivity\n"
-        "  with a stated cause, which is a different and more honest thing.\n"
-    )
+    # `base` below is priced under the AS-LOADED scenario, so the alternate price is
+    # `base x (under_rule / as_loaded)` -- a SIGNED ratio. An earlier version sorted the two
+    # inflations into low/high and then always rendered the band upward from `base`, which is
+    # correct only while the keepers happen to be loaded above the 75% rule. Flip that -- the
+    # charter's own keeper thesis, keepers retained BELOW market -- and the true alternate price
+    # fell outside the printed band, on the opposite side, under a byte-identical label.
+    priced_infl = keepers.as_loaded.keeper_inflation if keepers.as_loaded.complete else None
+    other_infl = keepers.under_rule.keeper_inflation if keepers.under_rule.complete else None
+    if priced_infl and other_infl:
+        scale = other_infl / priced_infl
+        direction = "above" if scale > 1 else "below"
+        out.append(
+            f"  Two points, not a distribution. `LIVE $` prices the AS-LOADED scenario\n"
+            f"  ({priced_infl:.3f}x); `rule $` prices the same player under the 75% rule\n"
+            f"  ({other_infl:.3f}x), which on this slate lands {direction} it by "
+            f"{abs(scale - 1) * 100:.0f}%.\n"
+            "  NOT p25/p50/p75: a percentile implies a sampling distribution, and the 500-run\n"
+            "  Monte Carlo that would produce one is Sprint 3. Labelling a two-point\n"
+            "  sensitivity as percentiles would be read as something it is not.\n"
+        )
+    else:
+        scale = 1.0
+        out.append(
+            "  Only one keeper-price scenario is complete, so no alternate price is shown.\n"
+        )
     out.append(
         f"  {'#':>3} {'player':24} {'pos':4} {'pts':>7} {'VORP':>7} "
-        f"{'low':>6} {'LIVE $':>7} {'high':>6} {'book $':>7}"
+        f"{'LIVE $':>7} {'rule $':>7} {'book $':>7}"
     )
-    # The live board is priced under the as-loaded scenario, so the band scales it by the ratio
-    # between the two scenarios rather than by either one alone.
-    scale = high_ratio / low_ratio if low_ratio else 1.0
     for index, player in enumerate(board.available()[:30], 1):
         base = player.baseline_value
-        low, high = min(base, base * scale), max(base, base * scale)
         out.append(
             f"  {index:>3} {player.name[:24]:24} {player.position:4} {player.points:>7.1f} "
-            f"{player.vorp_live:>7.1f} {low:>6.0f} {base:>7.2f} {high:>6.0f} "
+            f"{player.vorp_live:>7.1f} {base:>7.2f} {base * scale:>7.2f} "
             f"{player.market_value:>7.2f}"
         )
     return [*out, ""]
@@ -376,47 +459,83 @@ def _candidates(board: ValueBoard) -> list[Candidate]:
     ]
 
 
-def _scenarios(board: ValueBoard, config: LeagueConfig) -> list[str]:
-    """§4.9 item 6, rendered as fixed allocations because a printed page cannot be interactive."""
+def _scenarios(board: ValueBoard, config: LeagueConfig, my_keeper_spend: int) -> list[str]:
+    """§4.9 item 6, rendered as fixed allocations because a printed page cannot be interactive.
+
+    **What varies is the allocation across positions, not a single budget scalar.** An earlier
+    version varied only the keeper cost and printed three rows with the identical roster shape,
+    which is a budget-*level* sensitivity. §4.9's stated question is *"if I spend $75 on two QBs,
+    what does the rest of my roster look like?"* -- an allocation question. Pre-committing spend
+    at a position is what the optimizer's ``forced`` argument already does, so this is the wiring
+    §4.9 predicted rather than a new engine.
+    """
     out = [
         RULE,
-        "6. BUDGET SCENARIOS — the best roster reachable from each starting position",
+        "6. BUDGET SCENARIOS — pre-commit at a position, see what the rest of the roster becomes",
         RULE,
     ]
     candidates = _candidates(board)
     slots = config.draft_rounds - config.keepers_per_team
-    budget = config.budget
-    out.append(f"  {'scenario':34} {'spend':>7} {'starting pts':>13} {'shape':>28}")
-    for label, spent_on_keepers in (
-        ("keepers cost $30 (cheap studs)", 30),
-        ("keepers cost $55 (the mock)", 55),
-        ("keepers cost $80 (paid up)", 80),
+    budget = config.budget - my_keeper_spend
+    out.append(
+        f"  From ${budget} across {slots} slots, after your ${my_keeper_spend} of keepers.\n"
+    )
+    out.append(f"  {'scenario':34} {'spend':>7} {'starting pts':>13} {'starting shape':>28}")
+
+    baseline = best_roster(candidates, budget=budget, slots=slots, starters=dict(config.starters))
+    rows: list[tuple[str, Any]] = [("no pre-commitment", baseline)]
+    for label, position, count in (
+        ("two QBs at the top", "QB", 2),
+        ("two RBs at the top", "RB", 2),
+        ("an elite TE", "TE", 1),
     ):
-        left = budget - spent_on_keepers
-        roster = best_roster(candidates, budget=left, slots=slots, starters=dict(config.starters))
+        top = sorted((c for c in candidates if c.position == position), key=lambda c: -c.points)[
+            :count
+        ]
+        if len(top) < count:
+            continue
+        rows.append(
+            (
+                f"{label} (${sum(c.price for c in top)})",
+                best_roster(
+                    candidates,
+                    budget=budget,
+                    slots=slots,
+                    starters=dict(config.starters),
+                    forced=top,
+                ),
+            )
+        )
+
+    for label, roster in rows:
         if roster.objective == float("-inf"):
             out.append(f"  {label:34} {'--':>7} {'infeasible':>13}")
             continue
         shape: dict[str, int] = {}
         for player in roster.starters:
             shape[player.position] = shape.get(player.position, 0) + 1
+        delta = roster.starting_points - baseline.starting_points
         out.append(
             f"  {label:34} {roster.spent:>7} {roster.starting_points:>13.0f} "
             f"{' '.join(f'{k}{v}' for k, v in sorted(shape.items())):>28}"
+            + (f"  ({delta:+.0f})" if roster is not baseline else "")
         )
     out.append(
-        "\n  Same optimizer as the walk-away curve, so these are the same numbers the live tool\n"
-        "  will produce. Keeper cost is the only thing varied; everything else follows."
+        "\n  Same optimizer as the walk-away curve, so these are the numbers the live tool will\n"
+        "  produce. The bracketed figure is the cost in projected starting points of committing\n"
+        "  to that shape rather than letting the optimizer choose."
     )
     return [*out, ""]
 
 
-def _targets(board: ValueBoard, config: LeagueConfig, *, limit: int) -> list[str]:
+def _targets(
+    board: ValueBoard, config: LeagueConfig, *, limit: int, keeper_spend: int
+) -> list[str]:
     """§4.9 item 7: the target list, with walk-away prices."""
     out = [RULE, "7. TARGET LIST — walk-away price per player", RULE]
     candidates = _candidates(board)
     slots = config.draft_rounds - config.keepers_per_team
-    budget = config.budget - 55  # the mock's keeper spend for this seat
+    budget = config.budget - keeper_spend
     curves = walkaway_board(
         candidates,
         budget=budget,
@@ -445,14 +564,30 @@ def _targets(board: ValueBoard, config: LeagueConfig, *, limit: int) -> list[str
     return [*out, ""]
 
 
-def _affordability_preview(config: LeagueConfig) -> list[str]:
-    """A pre-draft look at §4.7c, before anybody has bid anything."""
+def _affordability_preview(config: LeagueConfig, my_slot: int | None, owner: str) -> list[str]:
+    """A pre-draft look at §4.7c, before anybody has bid anything.
+
+    ``my_slot`` is derived from the manifest's ``user_team`` through identity resolution, never
+    hardcoded. The literal it replaced happened to be correct today and was wrong by
+    construction -- and there is a real state, six managers still unjoined, where no slot
+    resolves at all. That is reported rather than guessed.
+    """
     from draft_intel.domain.ledger import fold
 
+    if my_slot is None:
+        return [
+            RULE,
+            "OPPONENT AFFORDABILITY — unavailable",
+            RULE,
+            _line("blocked", f"{owner!r} has no resolved draft slot; see DI-043"),
+            "",
+        ]
     state = fold(
         [], slots=range(1, config.teams + 1), budget=config.budget, total_slots=config.draft_rounds
     )
-    result = affordability(state, position="QB", my_slot=3, starters=config.starters, positions={})
+    result = affordability(
+        state, position="QB", my_slot=my_slot, starters=config.starters, positions={}
+    )
     return [
         RULE,
         "OPPONENT AFFORDABILITY — the shape before a dollar is spent",

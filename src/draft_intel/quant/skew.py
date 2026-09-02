@@ -29,6 +29,14 @@ against its own effect, which flatters an overpay and penalises a bargain. See
 
 Every input is filtered to ``COMPETITIVE`` picks, per §2: the ceremonial keeper picks were never
 competitive bids and treating them as auction results poisons skew silently.
+
+§4.6 asks for five aggregations and all five are here: per pick, per team, per position, **per
+price bucket** ("do managers overpay at the top of the board or on scraps") and a **league-wide
+distribution** with mean, median, standard deviation and a per-pick z-score, "so an
+outlier is instantly visible".
+The first three shipped alone in the first version of this module, on a card titled "all
+aggregations" with every criterion ticked and no deviation stated -- which is worse than the
+omission, because this project's whole convention is that a gap gets declared.
 """
 
 from __future__ import annotations
@@ -71,6 +79,14 @@ class PickSkew(BaseModel):
     """Our ``baseline_value`` scaled by the inflation the room faced *before* this pick."""
 
     inflation_at_pick: float
+
+    edge_z: float | None = None
+    """This pick's edge skew in standard deviations of the league-wide distribution.
+
+    §4.6's mechanism for making an outlier "instantly visible". ``None`` until the board is
+    assembled, and ``None`` for good when fewer than two picks exist or every pick has the
+    identical skew -- a z-score against zero spread is a division, not a signal.
+    """
 
     @property
     def market_skew(self) -> float | None:
@@ -126,8 +142,48 @@ class SkewAggregate(BaseModel):
         return round(self.spent / self.projected_points, 4)
 
 
+class Distribution(BaseModel):
+    """§4.6's league-wide distribution: mean, median, standard deviation.
+
+    Median alongside mean because they answer different questions and this metric is read under
+    time pressure: one bidding war at $80 over model moves the mean and leaves the median where
+    the room actually is.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    picks: int
+    mean: float
+    median: float
+    stdev: float | None
+    """``None`` for a single pick, or when every pick carries the identical skew."""
+
+    def z(self, value: float) -> float | None:
+        if not self.stdev:
+            return None
+        return round((value - self.mean) / self.stdev, 2)
+
+
+class PriceBucket(BaseModel):
+    """§4.6: do managers overpay at the top of the board or on scraps?"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    label: str
+    low: int
+    high: int | None
+    """``None`` on the open-ended top bucket."""
+
+    picks: int
+    spent: int
+    mean_edge_skew: float
+    mean_edge_skew_pct: float | None
+    """Mean skew as a share of value. The dollar figure alone makes the top of the board look
+    like where all the mistakes are, purely because that is where the dollars are."""
+
+
 class SkewBoard(BaseModel):
-    """Every competitive pick's skew, plus the §4.6 aggregations."""
+    """Every competitive pick's skew, plus all five §4.6 aggregations."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -135,7 +191,16 @@ class SkewBoard(BaseModel):
     overall: SkewAggregate
     by_team: dict[str, SkewAggregate]
     by_position: dict[str, SkewAggregate]
+    by_price_bucket: tuple[PriceBucket, ...]
+    distribution: Distribution
     market_source: str
+
+    def outliers(self, threshold: float = 2.0) -> list[PickSkew]:
+        """Picks more than ``threshold`` standard deviations from the league mean."""
+        return sorted(
+            (p for p in self.picks if p.edge_z is not None and abs(p.edge_z) >= threshold),
+            key=lambda p: -abs(p.edge_z or 0.0),
+        )
 
     def caveats(self) -> list[str]:
         """What a reader must know before trusting these numbers."""
@@ -246,6 +311,17 @@ def skew_board(
             out.setdefault(bucket, []).append(pick)
         return out
 
+    # The distribution has to be computed before the picks are finalised, because each pick
+    # carries its own z-score against it.
+    edges = [pick.edge_skew for pick in picks]
+    distribution = Distribution(
+        picks=len(edges),
+        mean=round(statistics.fmean(edges), 2) if edges else 0.0,
+        median=round(statistics.median(edges), 2) if edges else 0.0,
+        stdev=round(statistics.stdev(edges), 2) if len(edges) > 1 else None,
+    )
+    picks = [pick.model_copy(update={"edge_z": distribution.z(pick.edge_skew)}) for pick in picks]
+
     points = {pid: player.points for pid, player in board.items()}
 
     def with_points(label: str, group_picks: Sequence[PickSkew]) -> SkewAggregate:
@@ -268,5 +344,43 @@ def skew_board(
             position: with_points(position, group_picks)
             for position, group_picks in group("position").items()
         },
+        by_price_bucket=_price_buckets(picks),
+        distribution=distribution,
         market_source=market.source,
     )
+
+
+# §4.6 asks whether managers overpay "at the top of the board or on scraps", so the boundaries
+# are drawn where a bidder's behaviour plausibly changes -- the $1 dart, the mid-round fill, the
+# starter, the anchor -- rather than at even intervals. Priced in dollars actually paid, because
+# that is the quantity the question is about.
+PRICE_BUCKETS: tuple[tuple[str, int, int | None], ...] = (
+    ("$1 darts", 1, 1),
+    ("$2-9 fills", 2, 9),
+    ("$10-24 starters", 10, 24),
+    ("$25-49 anchors", 25, 49),
+    ("$50+ centrepieces", 50, None),
+)
+
+
+def _price_buckets(picks: Sequence[PickSkew]) -> tuple[PriceBucket, ...]:
+    out: list[PriceBucket] = []
+    for label, low, high in PRICE_BUCKETS:
+        inside = [
+            p for p in picks if p.price_paid >= low and (high is None or p.price_paid <= high)
+        ]
+        if not inside:
+            continue
+        pcts = [p.edge_skew_pct for p in inside if p.edge_skew_pct is not None]
+        out.append(
+            PriceBucket(
+                label=label,
+                low=low,
+                high=high,
+                picks=len(inside),
+                spent=sum(p.price_paid for p in inside),
+                mean_edge_skew=round(statistics.fmean([p.edge_skew for p in inside]), 2),
+                mean_edge_skew_pct=round(statistics.fmean(pcts), 1) if pcts else None,
+            )
+        )
+    return tuple(out)

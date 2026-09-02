@@ -81,7 +81,13 @@ class Opponent(BaseModel):
         return self.max_bid >= 1 and self.open_slots > 0
 
     def drops_out_above(self) -> int:
-        """The bid at which this team is out. One dollar under its max bid."""
+        """The highest bid this team can still make. One dollar more and they are out.
+
+        Returns ``max_bid`` itself, which is a bid they *can* make -- the name reads as the
+        threshold above which they drop out, and that is what it is. An earlier docstring said
+        "one dollar under its max bid", which the code has never done and which a future caller
+        would have implemented against.
+        """
         return self.max_bid
 
     @property

@@ -164,6 +164,66 @@ def test_forcing_a_player_in_puts_them_on_the_roster_at_the_stated_price():
     assert result.spent == 13, "the $8 hypothetical bid plus the best affordable partner"
 
 
+def test_starters_are_chosen_on_points_minus_lambda_vorp_not_on_points():
+    """The defect the CBC oracle was structurally blind to.
+
+    Two $1 running backs, one starting slot, λ=0.2. Starting the 100-point / 100-VORP player
+    and benching the 99-point / 0-VORP one scores 100. Starting the *lower* scorer and benching
+    the higher scores 99 + 0.2 x 100 = 119, because the bench term rewards the VORP that goes
+    with him.
+
+    The old justification -- "points >= vorp with λ < 1, so the ordering is never worth
+    inverting" -- does not follow, and the DP returned 100. It was safe only because
+    ``vorp = max(0, points - replacement)`` keeps the two monotone together within a position,
+    an unstated precondition that ``Candidate`` does not enforce and that DI-038's value
+    overrides are positioned to break.
+    """
+    pool = [player("a", "RB", 100.0, 1, vorp=100.0), player("b", "RB", 99.0, 1, vorp=0.0)]
+    result = best_roster(pool, budget=10, slots=2, starters={"RB": 1}, bench_weight=0.2)
+
+    assert result.objective == pytest.approx(119.0)
+    assert [p.player_id for p in result.starters] == ["b"]
+
+
+def test_a_player_who_would_rather_be_benched_still_starts_if_a_slot_is_open():
+    """The starting lineup is maximal, because a real manager must field one.
+
+    An empty QB slot with a quarterback on the bench is not a roster anybody can submit. The
+    optimizer models the legal lineup, not the paper-optimal one -- so a player whose λ x vorp
+    beats their points still occupies the slot.
+
+    Unreachable on real data, where vorp = max(0, points - replacement) makes λ x vorp < points
+    for everyone. Pinned because the oracle originally disagreed here and it took a brute-force
+    run to work out which of the two was modelling the actual league.
+    """
+    pool = [player("q", "QB", 10.0, 1, vorp=300.0), player("r", "RB", 50.0, 1, vorp=50.0)]
+    result = best_roster(pool, budget=10, slots=2, starters={"QB": 1, "RB": 1}, bench_weight=1.0)
+
+    assert [p.player_id for p in result.starters] == ["r", "q"]
+    assert result.objective == pytest.approx(60.0), "not 350: the QB slot cannot sit empty"
+
+
+def test_dominance_pruning_compares_vorp_as_well_as_points():
+    """A player who scores less but carries more VORP is the better bench player, so pruning on
+    points alone discards the roster the optimizer needs.
+
+    Two slots, so a player is dropped once **two** others beat them. Under a points-only rule
+    ``deep`` is beaten by both ``rich`` and ``second`` and is pruned away -- leaving a best
+    roster worth 100 instead of 600. The rule has to compare both dimensions, because the two
+    contributions a player can make are ``points`` if they start and ``λ x vorp`` if they do not.
+    """
+    pool = [
+        player("rich", "RB", 100.0, 1, vorp=0.0),
+        player("second", "RB", 99.0, 1, vorp=0.0),
+        player("deep", "RB", 90.0, 1, vorp=500.0),
+    ]
+
+    result = best_roster(pool, budget=10, slots=2, starters={"RB": 1}, bench_weight=1.0)
+
+    assert "deep" in {p.player_id for p in result.players}
+    assert result.objective == pytest.approx(600.0), "100 starting + 500 bench VORP"
+
+
 def test_a_forced_player_does_not_take_a_starting_slot_from_a_better_one():
     """The defect the earlier implementation had. Forcing a weak player used to reserve a
     starting slot for them, so a stronger available player was scored as bench -- the DP
@@ -284,48 +344,70 @@ def cbc_best_roster(
 ) -> float:
     """The charter's §4.7b ILP, written from the formulation rather than from the DP.
 
-    Binary ``take`` per player, binary ``start`` per player, with ``start <= take``. Base slots
-    and FLEX are separate constraints; a FLEX-eligible player may fill either. The objective is
-    ADR-0004's, λ included, because ADR-0003 obliges both engines to implement the same one.
+    Binary ``take`` per player; ``start_base`` and ``start_flex`` for the two ways a player can
+    reach the starting lineup, so a player cannot occupy both a base slot and FLEX.
 
-    Returns the objective only. Comparing objectives rather than rosters is deliberate: ties are
-    common on synthetic boards and two different optimal rosters are both correct answers, so
-    comparing membership would fail on agreement.
+    **The starting lineup is maximal**, and that constraint is the whole difficulty. A fantasy
+    manager must field a legal lineup: an empty QB slot with a quarterback on the bench is not a
+    roster anybody can submit. Without it the solver benches players whose ``λ x vorp`` exceeds
+    their ``points`` and leaves their slot empty, which scores better on paper and cannot happen
+    in the league. Encoded as ``Σ start_p >= min(slots_p, Σ take_p)``, linearised with a binary
+    switch per position because ``min`` is not linear.
+
+    On this project's real data the question never arises -- within a position
+    ``vorp = max(0, points - replacement)``, so ``λ x vorp < points`` for every player and
+    starting is always better. It arises here because the random pool deliberately decouples the
+    two, which is what makes the oracle able to see the starter-ordering bug at all.
+
+    Returns the objective only. Ties are common on synthetic boards and two different optimal
+    rosters are both correct answers, so comparing membership would fail on agreement.
     """
     problem = pulp.LpProblem("roster", pulp.LpMaximize)
-    take = {p.player_id: pulp.LpVariable(f"t_{p.player_id}", cat="Binary") for p in pool}
-    start = {p.player_id: pulp.LpVariable(f"s_{p.player_id}", cat="Binary") for p in pool}
-    flex = {
-        p.player_id: pulp.LpVariable(f"f_{p.player_id}", cat="Binary")
-        for p in pool
+    by_id = {p.player_id: p for p in pool}
+    big_m = len(pool) + 1
+
+    take = {pid: pulp.LpVariable(f"t_{pid}", cat="Binary") for pid in by_id}
+    start_base = {pid: pulp.LpVariable(f"b_{pid}", cat="Binary") for pid in by_id}
+    start_flex = {
+        pid: pulp.LpVariable(f"f_{pid}", cat="Binary")
+        for pid, p in by_id.items()
         if p.position in FLEX_ELIGIBLE
     }
-    by_id = {p.player_id: p for p in pool}
+
+    def started(pid: str) -> pulp.LpAffineExpression:
+        return start_base[pid] + start_flex.get(pid, 0)
 
     problem += pulp.lpSum(
-        by_id[pid].points * start[pid] + bench_weight * by_id[pid].vorp * (take[pid] - start[pid])
+        by_id[pid].points * started(pid)
+        + bench_weight * by_id[pid].vorp * (take[pid] - started(pid))
         for pid in take
     )
     problem += pulp.lpSum(by_id[pid].price * take[pid] for pid in take) <= budget
     problem += pulp.lpSum(take.values()) == slots
-
     for pid in take:
-        problem += start[pid] <= take[pid]
-        if pid in flex:
-            problem += flex[pid] <= start[pid]
+        problem += started(pid) <= take[pid]
 
     # Every position in the POOL needs a constraint, not every position in `starters`. A
     # position with no base slots has a limit of zero, and omitting it lets the solver start
-    # unlimited players there -- which is exactly how the first version of this oracle
-    # "disagreed" with the DP: it was scoring lineups with two starting tight ends in a league
-    # with no tight end slot, and reporting the DP as wrong for declining to do the same.
+    # unlimited players there.
     for position in {p.position for p in pool}:
-        members = [p.player_id for p in pool if p.position == position]
-        # A player starts either in their base slot or in FLEX, never both.
-        problem += pulp.lpSum(start[pid] - flex.get(pid, 0) for pid in members) <= starters.get(
-            position, 0
-        )
-    problem += pulp.lpSum(flex.values()) <= starters.get(FLEX, 0)
+        members = [pid for pid in by_id if by_id[pid].position == position]
+        room = starters.get(position, 0)
+        taken_here = pulp.lpSum(take[pid] for pid in members)
+        filled = pulp.lpSum(start_base[pid] for pid in members)
+        problem += filled <= room
+        # filled >= min(room, taken_here), via a switch that picks which bound binds.
+        switch = pulp.LpVariable(f"z_{position}", cat="Binary")
+        problem += filled >= room - big_m * (1 - switch)
+        problem += filled >= taken_here - big_m * switch
+
+    flex_room = starters.get(FLEX, 0)
+    flex_filled = pulp.lpSum(start_flex.values())
+    spare = pulp.lpSum(take[pid] - start_base[pid] for pid in start_flex)
+    problem += flex_filled <= flex_room
+    flex_switch = pulp.LpVariable("z_flex", cat="Binary")
+    problem += flex_filled >= flex_room - big_m * (1 - flex_switch)
+    problem += flex_filled >= spare - big_m * flex_switch
 
     problem.solve(pulp.PULP_CBC_CMD(msg=False))
     if pulp.LpStatus[problem.status] != "Optimal":
@@ -334,6 +416,19 @@ def cbc_best_roster(
 
 
 def random_pool(rng: random.Random, size: int) -> list[Candidate]:
+    """A random board with **VORP drawn independently of points**.
+
+    The first version of this helper left ``vorp`` defaulting to ``points``, which explored a
+    two-dimensional input space along its one-dimensional diagonal -- and the DP's starter
+    ordering can only be wrong when the two disagree. Twelve seeds passed against a DP that
+    sorted starters on ``points`` instead of ``points - λ x vorp``, and the oracle was
+    structurally incapable of noticing.
+
+    On real data ``vorp = max(0, points - replacement)`` does make VORP monotone in points
+    within a position, so the diagonal is where this project's own boards live. That is exactly
+    why it had to stop being where the oracle looks: ``Candidate`` does not enforce the
+    relationship, and DI-038 lets a user override ``points`` without touching ``vorp``.
+    """
     positions = ["QB", "RB", "WR", "TE", "K"]
     return [
         player(
@@ -341,12 +436,13 @@ def random_pool(rng: random.Random, size: int) -> list[Candidate]:
             rng.choice(positions),
             float(rng.randint(10, 300)),
             rng.randint(1, 25),
+            vorp=float(rng.randint(0, 300)),
         )
         for i in range(size)
     ]
 
 
-@pytest.mark.parametrize("seed", range(12))
+@pytest.mark.parametrize("seed", range(30))
 def test_the_dp_agrees_with_the_cbc_oracle(seed: int) -> None:
     """ADR-0003's correctness proof: the fast engine is exact, not merely fast.
 

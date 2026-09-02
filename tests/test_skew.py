@@ -360,3 +360,85 @@ def test_the_biggest_overpays_and_bargains_are_the_extremes_of_edge_skew():
 
     assert result.biggest_overpays(1)[0].player_id == "0"
     assert result.biggest_bargains(1)[0].player_id == "2"
+
+
+# ---------------------- review round 2: the two aggregations §4.6 asks for and DI-033 shipped
+# without
+
+
+def test_the_league_wide_distribution_carries_mean_median_and_sigma():
+    """§4.6 asks for all three. Median is not decoration: one bidding war at $80 over model
+    moves the mean and leaves the median where the room actually is, and this metric is read
+    under time pressure."""
+    board = par_board(10)
+    state = state_from(
+        (1, "0", 1, 11, False),
+        (2, "1", 1, 11, False),
+        (3, "2", 2, 11, False),
+        (4, "3", 2, 91, False),
+    )
+
+    result = at_par(state, board, MarketValues(source="none", values={}))
+
+    assert result.distribution.picks == 4
+    assert result.distribution.median < result.distribution.mean, "one outlier drags the mean"
+    assert result.distribution.stdev is not None
+
+
+def test_a_single_pick_has_no_spread_and_therefore_no_z_scores():
+    """A z-score against zero spread is a division, not a signal."""
+    result = at_par(
+        state_from((1, "0", 1, 11, False)), par_board(4), MarketValues(source="none", values={})
+    )
+    assert result.distribution.stdev is None
+    assert result.picks[0].edge_z is None
+    assert result.outliers() == []
+
+
+def test_every_pick_carries_a_z_score_so_an_outlier_is_instantly_visible():
+    """§4.6's stated purpose for the distribution, in its own words."""
+    board = par_board(12)
+    state = state_from(
+        *[(i, str(i), 1, 11, False) for i in range(6)],
+        (99, "6", 2, 61, False),
+    )
+
+    result = at_par(state, board, MarketValues(source="none", values={}))
+
+    outlier = next(p for p in result.picks if p.player_id == "6")
+    assert outlier.edge_z is not None and outlier.edge_z > 2
+    assert [p.player_id for p in result.outliers()] == ["6"]
+
+
+def test_price_buckets_separate_the_top_of_the_board_from_the_scraps():
+    """§4.6: "do managers overpay at the top of the board or on scraps"."""
+    board = par_board(10, baseline=11.0)
+    state = state_from(
+        (1, "0", 1, 1, False),
+        (2, "1", 1, 1, False),
+        (3, "2", 2, 55, False),
+    )
+
+    result = at_par(state, board, MarketValues(source="none", values={}))
+    buckets = {b.label: b for b in result.by_price_bucket}
+
+    assert buckets["$1 darts"].picks == 2
+    assert buckets["$50+ centrepieces"].picks == 1
+    assert buckets["$1 darts"].mean_edge_skew < buckets["$50+ centrepieces"].mean_edge_skew
+    assert "$10-24 starters" not in buckets, "empty buckets are omitted, not printed as zeroes"
+
+
+def test_the_bucket_percentage_stops_the_top_of_the_board_looking_like_every_mistake():
+    """A $5 overpay on a $50 player and a $5 overpay on a $2 player are the same dollars and
+    very different errors. The dollar figure alone makes the expensive end look uniquely bad
+    purely because that is where the dollars are."""
+    board = par_board(10, baseline=11.0)
+    state = state_from((1, "0", 1, 2, False), (2, "1", 2, 22, False))
+
+    result = at_par(state, board, MarketValues(source="none", values={}))
+    buckets = {b.label: b for b in result.by_price_bucket}
+
+    cheap, dear = buckets["$2-9 fills"], buckets["$10-24 starters"]
+    assert dear.mean_edge_skew > cheap.mean_edge_skew, "more dollars over at the top"
+    assert cheap.mean_edge_skew_pct is not None and dear.mean_edge_skew_pct is not None
+    assert cheap.mean_edge_skew_pct < dear.mean_edge_skew_pct

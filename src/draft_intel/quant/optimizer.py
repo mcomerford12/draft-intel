@@ -28,11 +28,28 @@ start depends on the whole roster — so positions do not decouple. Three steps 
 1. **Enumerate the FLEX split.** Two FLEX slots across RB/WR/TE is six distributions. For a
    fixed split every position has a known number of effective starting slots and the positions
    become independent.
-2. **Within a position, sort by points descending.** For any chosen set of players at a
-   position, the optimal assignment gives the starting slots to the highest scorers — a
-   starter contributes ``points`` and a bench player ``λ x vorp``, and ``points >= vorp`` with
-   ``λ < 1``, so the ordering is never worth inverting. Sorting first therefore means "the
-   first ``s`` taken are the starters" is not an assumption but a fact.
+2. **Within a position, sort by starter priority, ``points - λ x vorp``.** For a chosen set of
+   players at a position, the objective is::
+
+       Σ_starters points + λ Σ_bench vorp
+         = λ Σ_all vorp  +  Σ_starters (points - λ x vorp)
+
+   The first term does not depend on who starts, so the optimal assignment gives the starting
+   slots to the largest ``points - λ x vorp``. Sorting on that key makes "the first ``s`` taken
+   are the starters" a fact rather than an assumption.
+
+   **An earlier version sorted on ``points`` alone**, and justified it with "a starter
+   contributes ``points`` and a bench player ``λ x vorp``, and ``points >= vorp`` with
+   ``λ < 1``, so the ordering is never worth inverting." That argument is invalid: ``points >=
+   vorp`` does not imply the two orderings agree. Two running backs at $1 with λ=0.2, scoring
+   100 (VORP 100) and 99 (VORP 0), are worth 119 by starting the *lower* scorer and benching
+   the higher, and the points-sorted DP returned 100.
+
+   It happened to be safe on this project's own data, because ``vorp = max(0, points -
+   replacement)`` makes VORP monotone in points within a position. That precondition was
+   nowhere stated, nowhere tested, and ``Candidate`` does not enforce it -- ``points`` and
+   ``vorp`` are two free floats on a public API, and DI-038 lets a user override one without
+   the other. Sorting on the correct key removes the precondition instead of documenting it.
 3. **Knapsack the per-position tables together** over remaining slots and remaining dollars.
 
 **Dominance pruning is exact, not a heuristic.** A player who costs at least as much as another
@@ -103,6 +120,14 @@ class Candidate(BaseModel):
     def contribution(self, *, starting: bool, bench_weight: float) -> float:
         return self.points if starting else bench_weight * self.vorp
 
+    def starter_priority(self, bench_weight: float) -> float:
+        """``points - λ x vorp``: how much this player gains by starting rather than benching.
+
+        The correct key for choosing which of a position's players fill its starting slots.
+        See step 2 of the module docstring for why it is not ``points``.
+        """
+        return self.points - bench_weight * self.vorp
+
 
 class Roster(BaseModel):
     """The best legal roster reachable from here, and what it is worth."""
@@ -142,6 +167,12 @@ def _prune(
     players are each no more expensive and no less productive. Fewer than that and they may
     still be needed, because the ones ahead of them can all be bought at once.
 
+    **"No less productive" means both points and VORP**, not points alone. A player contributes
+    ``points`` if they start and ``λ x vorp`` if they do not, so one who scores less but carries
+    more VORP is the better bench player and cannot be pruned against. Comparing points alone
+    was sound only while ``vorp = max(0, points - replacement)`` kept the two monotone together
+    -- the same unstated precondition that made the starter ordering wrong, in the same place.
+
     Ties are broken on ``player_id`` so that exactly one of an identical pair survives the
     comparison, which is right because they are interchangeable.
     """
@@ -151,11 +182,16 @@ def _prune(
         for other in candidates:
             if other is candidate:
                 continue
-            if other.price > candidate.price or other.points < candidate.points:
+            if (
+                other.price > candidate.price
+                or other.points < candidate.points
+                or other.vorp < candidate.vorp
+            ):
                 continue
             if (
                 other.price == candidate.price
                 and other.points == candidate.points
+                and other.vorp == candidate.vorp
                 and other.player_id > candidate.player_id
             ):
                 continue
@@ -208,7 +244,10 @@ def _position_table(
     highest scorers among those taken are the starters -- true everywhere.
     """
     required = {c.player_id for c in mandatory}
-    ordered = sorted([*mandatory, *candidates], key=lambda c: (-c.points, c.price, c.player_id))
+    ordered = sorted(
+        [*mandatory, *candidates],
+        key=lambda c: (-c.starter_priority(bench_weight), c.price, c.player_id),
+    )
     shape = (max_take + 1, budget + 1)
 
     values = np.full(shape, NEG, dtype=np.float64)
@@ -464,7 +503,9 @@ def _solve_split(
         return None
 
     players = _unwind(tables, trail, slots, best_spend)
-    starters_chosen, bench = _split_lineup(players, base=base, split=split)
+    starters_chosen, bench = _split_lineup(
+        players, base=base, split=split, bench_weight=bench_weight
+    )
     return Roster(
         players=players,
         starters=starters_chosen,
@@ -500,13 +541,18 @@ def _unwind(
 
 
 def _split_lineup(
-    players: Sequence[Candidate], *, base: Mapping[str, int], split: Mapping[str, int]
+    players: Sequence[Candidate],
+    *,
+    base: Mapping[str, int],
+    split: Mapping[str, int],
+    bench_weight: float,
 ) -> tuple[tuple[Candidate, ...], tuple[Candidate, ...]]:
-    """Assign the chosen players to starting slots, best first, per the fixed FLEX split.
+    """Assign the chosen players to starting slots, per the fixed FLEX split.
 
-    The same rule the DP scored by, applied to its answer. If these two ever disagree the
-    reported objective is not the one that was optimised, which is the defect the earlier
-    forced-player handling had.
+    Ordered by ``starter_priority``, the same key the DP scored by. If these two ever disagree
+    the reported objective is not the one that was optimised, which is the defect the earlier
+    forced-player handling had -- and sorting here on ``points`` while the DP sorted on
+    ``points - λ x vorp`` would reintroduce it in a subtler form.
     """
     starters: list[Candidate] = []
     bench: list[Candidate] = []
@@ -514,7 +560,7 @@ def _split_lineup(
     for player in players:
         by_position.setdefault(player.position, []).append(player)
     for position, group in by_position.items():
-        group.sort(key=lambda c: (-c.points, c.price, c.player_id))
+        group.sort(key=lambda c: (-c.starter_priority(bench_weight), c.price, c.player_id))
         room = base.get(position, 0) + split.get(position, 0)
         starters.extend(group[:room])
         bench.extend(group[room:])

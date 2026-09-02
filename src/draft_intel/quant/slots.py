@@ -65,6 +65,27 @@ class SlotDemand(BaseModel):
         return sum(self.keeper_base.values()) + self.keeper_flex
 
 
+def allocate_flex(flex_slots: int, remaining_base: Mapping[str, int]) -> dict[str, int]:
+    """Split FLEX across the eligible positions in proportion to their remaining demand.
+
+    Charter §4.5: *"allocating FLEX proportionally to remaining positional demand"*. Largest
+    remainder, so the parts sum to ``flex_slots`` exactly -- flooring an even three-way split
+    threw two of twenty slots away and made a report disagree with its own total.
+    """
+    weights = {pos: remaining_base.get(pos, 0) for pos in sorted(FLEX_ELIGIBLE)}
+    total = sum(weights.values())
+    if total <= 0 or flex_slots <= 0:
+        return dict.fromkeys(weights, 0)
+
+    exact = {pos: flex_slots * weight / total for pos, weight in weights.items()}
+    share = {pos: int(value) for pos, value in exact.items()}
+    for pos, _remainder in sorted(
+        ((pos, exact[pos] - share[pos]) for pos in share), key=lambda kv: -kv[1]
+    )[: flex_slots - sum(share.values())]:
+        share[pos] += 1
+    return share
+
+
 def seat_keepers(
     keeper_positions_by_team: Mapping[int, Iterable[str]],
     *,

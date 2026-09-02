@@ -312,34 +312,96 @@ def test_no_picks_at_a_position_means_no_entry_at_all():
 # ------------------------------------ the charter's forward positional formula, pinned
 
 
-def test_the_charter_forward_positional_formula_returns_the_same_number_for_every_position():
-    """**This test documents a defect in the charter, deliberately.**
+def test_the_forward_formula_separates_positions_rather_than_repeating_one_number():
+    """**This test replaces one that asserted the opposite, and the old one was wrong.**
 
-    §4.5 asks for the overall inflation formula "restricted to positional need", with money
-    allocated proportionally to remaining positional demand. Money in the room is not labelled
-    by position, so the only split available from the model is proportional to positional
-    model value -- and then the value_pos term cancels:
+    The previous version claimed §4.5's forward formula was degenerate: allocate money in
+    proportion to each position's remaining model *value* and ``value_pos`` cancels, handing
+    every position the overall figure. The algebra held; the formula was not the charter's.
+    §4.5 says "restrict money and slots to positional **need**" and "allocating FLEX
+    proportionally to remaining positional **demand**" -- slots, not value. Under
+    slot-proportional allocation ``value_pos`` appears only in the denominator and nothing
+    cancels.
 
-        inflation_pos = (D x value_pos / Σ value) / value_pos = D / Σ value
-
-    Every position reports the overall figure. It is not a positional signal; it would read as
-    "no position is mispriced" in exactly the market where one is. Pinned here so the finding
-    lives in the test suite rather than in a comment somebody deletes.
+    Here: RB has 2 slots against $40 of value, QB has 2 slots against $8. Equal money, very
+    different value, so the ratios must differ by a wide margin.
     """
     pool = [
-        *[value(f"rb{i}", baseline=20.0, position="RB") for i in range(5)],
-        *[value(f"qb{i}", baseline=5.0, position="QB") for i in range(5)],
+        *[value(f"rb{i}", baseline=21.0, position="RB") for i in range(4)],
+        *[value(f"qb{i}", baseline=5.0, position="QB") for i in range(4)],
     ]
 
     forward = forward_positional_inflation(
-        pool, remaining_money=200, remaining_slots=10, positions=["RB", "QB", "WR"]
+        pool, remaining_money=100, remaining_base={"RB": 2, "QB": 2}, remaining_flex=0
     )
-    overall = market_inflation(pool, remaining_money=200, remaining_slots=10)
 
-    assert set(forward.values()) == {overall.inflation}, (
-        "if this ever produces distinct values per position the charter's formula has become "
-        "usable and realized_positional_inflation should be reconsidered"
+    assert forward["RB"].money == forward["QB"].money, "equal slots, equal money"
+    assert forward["RB"].value > forward["QB"].value
+    rb, qb = forward["RB"].inflation, forward["QB"].inflation
+    assert rb is not None and qb is not None
+    assert rb != qb
+    assert rb < qb, "more value to divide into"
+
+
+def test_the_forward_formula_matches_its_own_stated_arithmetic():
+    """$100 across 4 slots, two per position. RB pool value = 2 x (21 - 1) = 40.
+    money_RB = 100 x 2/4 = 50. inflation = (50 - 2) / 40 = 1.2."""
+    pool = [
+        *[value(f"rb{i}", baseline=21.0, position="RB") for i in range(4)],
+        *[value(f"qb{i}", baseline=5.0, position="QB") for i in range(4)],
+    ]
+    forward = forward_positional_inflation(
+        pool, remaining_money=100, remaining_base={"RB": 2, "QB": 2}, remaining_flex=0
     )
+    assert forward["RB"].value == 40.0
+    assert forward["RB"].money == 50.0
+    assert forward["RB"].inflation == pytest.approx(1.2)
+
+
+def test_flex_is_split_proportionally_to_remaining_demand_not_evenly():
+    """§4.5's own words. An even three-way split with a floor also throws slots away."""
+    pool = [value(f"p{i}", baseline=5.0, position="RB") for i in range(20)]
+    pool += [value(f"w{i}", baseline=5.0, position="WR") for i in range(20)]
+    pool += [value(f"t{i}", baseline=5.0, position="TE") for i in range(20)]
+
+    forward = forward_positional_inflation(
+        pool, remaining_money=200, remaining_base={"RB": 8, "WR": 8, "TE": 4}, remaining_flex=5
+    )
+
+    assert forward["RB"].slots + forward["WR"].slots + forward["TE"].slots == 25, (
+        "all five FLEX slots allocated, none floored away"
+    )
+    assert forward["TE"].slots < forward["RB"].slots, "allocated by demand, not evenly"
+
+
+def test_a_position_with_no_value_left_reports_none_rather_than_a_ratio():
+    """Not 1.0, which would read as "correctly priced" at a position where nothing is priced."""
+    pool = [value(f"k{i}", baseline=1.0, position="K") for i in range(4)]
+    forward = forward_positional_inflation(
+        pool, remaining_money=100, remaining_base={"K": 2}, remaining_flex=0
+    )
+    assert forward["K"].value == 0.0
+    assert forward["K"].inflation is None
+    assert "no value left to price" in forward["K"].describe()
+
+
+def test_a_position_with_almost_no_value_is_flagged_as_an_artifact():
+    """Kickers do this on every board: ten slots that must be filled by players worth nothing
+    over replacement, so a slot-proportional allocation divides real money by almost nothing.
+    That is a property of the allocation, not a finding about the kicker market."""
+    pool = [
+        *[value(f"rb{i}", baseline=41.0, position="RB") for i in range(10)],
+        *[value(f"k{i}", baseline=1.05, position="K") for i in range(10)],
+    ]
+
+    forward = forward_positional_inflation(
+        pool, remaining_money=400, remaining_base={"RB": 8, "K": 8}, remaining_flex=0
+    )
+
+    assert forward["RB"].reliable
+    assert forward["K"].reliable is False
+    assert forward["K"].inflation is not None and forward["K"].inflation > 10
+    assert "artifact" in forward["K"].describe()
 
 
 # ------------------------------------------------- the identity, on the real board

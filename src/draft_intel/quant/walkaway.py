@@ -25,11 +25,23 @@ rather than drawing a picture of a bug.
 delta is still positive. Not the crossing point of a fitted line and not the first
 non-positive price: the number the user needs is "the most I should pay", and that is a price
 they would actually bid.
+
+**The crossing is found by binary search over every dollar, not by scanning the sampled
+curve.** Reading ``max(price where delta > 0)`` off the sampled points confuses two entirely
+different situations: a genuine crossing, and a curve still positive at the top of whatever grid
+happened to be searched. It reported $58 for a player whose true walk-away price was $117,
+under a report line reading "the MOST you should pay" -- a $59 understatement on the number
+§4.7b puts on screen as one enormous digit. A coarse grid also understated by up to $2 inside
+its own range.
+
+Monotonicity is what makes the search exact, and it is asserted rather than assumed, so the two
+facts hold each other up: if the curve ever rises, :attr:`WalkAway.monotone` goes false and the
+binary search's premise is void at the same moment.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from itertools import pairwise
 
 from pydantic import BaseModel, ConfigDict
@@ -69,13 +81,30 @@ class WalkAway(BaseModel):
     points: list[CurvePoint]
 
     walk_away_price: int | None
-    """The highest price at which buying still improves the team. ``None`` if never worth it."""
+    """The highest price at which buying still improves the team. ``None`` if never worth it.
+
+    Found by binary search over every dollar up to the legal maximum bid, independently of which
+    prices the displayed curve happens to sample.
+    """
+
+    max_legal_bid: int
+    """``budget - (slots - 1)``: the most this user could bid without stranding a roster spot."""
 
     baseline_objective: float
     """The best team achievable without this player. Every delta is measured against it."""
 
     monotone: bool
     """False when the curve rises somewhere, which means the deltas cannot be trusted."""
+
+    @property
+    def worth_it_at_any_legal_price(self) -> bool:
+        """True when the delta is still positive at the maximum legal bid.
+
+        Distinct from "the curve did not cross": here it genuinely never crosses within what
+        the user can afford, so the binding constraint is the budget rather than the player's
+        value. The two read identically off a sampled curve and mean different things.
+        """
+        return self.walk_away_price is not None and self.walk_away_price >= self.max_legal_bid
 
     def delta_at(self, price: int) -> float | None:
         for point in self.points:
@@ -153,16 +182,55 @@ def walkaway_curve(
             )
         )
 
-    positive = [point.price for point in points if point.feasible and point.delta > 0]
     return WalkAway(
         player_id=player.player_id,
         name=player.name,
         position=player.position,
         points=points,
-        walk_away_price=max(positive) if positive else None,
+        walk_away_price=_find_crossing(
+            lambda price: _delta(
+                candidates, player, price, budget, slots, starters, bench_weight, baseline
+            ),
+            ceiling=max(1, ceiling),
+        ),
+        max_legal_bid=max(1, ceiling),
         baseline_objective=baseline,
         monotone=_is_monotone(points),
     )
+
+
+def _delta(
+    candidates: Sequence[Candidate],
+    player: Candidate,
+    price: int,
+    budget: int,
+    slots: int,
+    starters: dict[str, int],
+    bench_weight: float,
+    baseline: float,
+) -> float:
+    roster = _forced(candidates, player, price, budget, slots, starters, bench_weight)
+    if roster.objective == float("-inf") or baseline == float("-inf"):
+        return float("-inf")
+    return roster.objective - baseline
+
+
+def _find_crossing(delta_at: Callable[[int], float], *, ceiling: int) -> int | None:
+    """The highest price with a positive delta, by binary search over ``1..ceiling``.
+
+    Exact because the curve is monotone non-increasing, and costs about eight solves against
+    the ceiling's worth of a linear scan. Returns ``None`` when even $1 is not worth paying.
+    """
+    if delta_at(1) <= 0:
+        return None
+    low, high = 1, ceiling
+    while low < high:
+        middle = (low + high + 1) // 2
+        if delta_at(middle) > 0:
+            low = middle
+        else:
+            high = middle - 1
+    return low
 
 
 def _forced(

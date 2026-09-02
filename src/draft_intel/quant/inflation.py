@@ -29,49 +29,54 @@ cannot pass. See ADR-0001 and D3.
 
 ----
 
-**Per-position inflation, and where the charter's formula does not survive contact.**
+**Per-position inflation. Two figures, because §4.5 asks two questions.**
 
-§4.5 asks for the same ratio "restricted to positional need (allocating FLEX proportionally to
-remaining positional demand)", and describes the output as *"RB is inflating at 1.18x while QB
-has deflated to 0.91x"*. Those two sentences want different things, and the first one is
-degenerate.
+*Forward* (:func:`forward_positional_inflation`) is §4.5's formula, restricted to positional
+need: money and slots allocated by **demand**, FLEX split proportionally, and the ratio taken
+against the value still on the board at that position::
 
-The forward formula needs a per-position *money* figure. The money in the room is not labelled
-by position -- a manager holding $80 has not decided how much of it is RB money. Any split has
-to be assumed, and the only assumption available from the model itself is to allocate money in
-proportion to each position's remaining model value. Do that and::
+    slots_pos     = remaining base slots + this position's share of FLEX
+    money_pos     = remaining money x slots_pos / total remaining slots
+    value_pos     = Σ (baseline_value - 1) over the top `slots_pos` available at that position
+    inflation_pos = (money_pos - slots_pos) / value_pos
 
-    inflation_pos = money_pos / value_pos
-                  = (D x value_pos / Σ value) / value_pos
-                  = D / Σ value
-                  = the overall inflation, identically, for every position
+**An earlier version of this module claimed this formula was degenerate and refused to build
+it.** The argument was that allocating money in proportion to each position's remaining *model
+value* makes ``value_pos`` cancel, leaving the overall figure for every position. The algebra
+was right and it was about the wrong formula: §4.5 says *"restrict money and slots to positional
+**need**"* and *"allocating FLEX proportionally to remaining positional **demand**"*. Need and
+demand are slots, not value. Under slot-proportional allocation ``value_pos`` appears only in
+the denominator, nothing cancels, and the positions genuinely separate -- on this league's
+board, 0.78x at QB against 0.42x at RB.
 
-Every position reports the same number. It is not a positional signal at all; it is the overall
-figure wearing five hats, and it would read as "no position is mispriced" in exactly the market
-where one is.
+The forward figure has one real pathology and it is reported rather than printed: a position
+whose remaining value is near zero divides a real slot allocation by almost nothing. Kickers do
+this every time -- ten slots must be filled by players worth nothing over replacement, so the
+formula says the room "should" spend a hundred dollars there. That is a property of allocating
+money by slot count when slots are not equally valuable, and :attr:`PositionForward.reliable`
+carries it.
 
-So the positional figure here is **realized**: what the room has actually paid at a position
-against what the model says those same players were worth::
+*Realized* (:func:`realized_positional_inflation`) is what the room has actually paid at a
+position against what the model says those players were worth::
 
     realized_pos = Σ price_paid / Σ baseline_value   over COMPETITIVE picks at that position
 
-That is what "RB is inflating at 1.18x" means when a person says it, it is non-circular, and it
-is the number that makes money. It needs a sample before it means anything, so it reports
-``None`` below :data:`MIN_POSITION_SAMPLE` picks rather than extrapolating from two.
+Backward-looking, non-circular, and the thing §4.5's own example sentence describes when it
+says *"RB is inflating at 1.18x while QB has deflated to 0.91x"*. It needs a sample, so it
+reports ``None`` below :data:`MIN_POSITION_SAMPLE` picks rather than extrapolating from two.
 
-The degenerate forward version is not shipped. :func:`forward_positional_inflation` exists to
-*demonstrate* the degeneracy -- it is exercised by a test that asserts every position returns
-the overall figure -- so that the finding is pinned in code rather than living in a comment
-somebody deletes.
+They answer different questions -- what the room *should* pay for what is left, and what it
+*has* paid -- and the gap between them is itself a signal. Neither replaces the other.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict
 
 from draft_intel.models import DerivedState, PickClass
+from draft_intel.quant.slots import allocate_flex
 from draft_intel.quant.valuation import MIN_BID, PlayerValue
 
 # Below this many competitive picks at a position, a realized ratio is an anecdote. Two RBs
@@ -318,26 +323,103 @@ def inflation_curve(
     ]
 
 
+class PositionForward(BaseModel):
+    """§4.5's forward figure for one position: what the room should pay for what is left."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    position: str
+    slots: int
+    """Remaining base slots plus this position's proportional share of FLEX."""
+
+    money: float
+    """This position's share of the remaining money, allocated by slots."""
+
+    value: float
+    """``Σ (baseline_value - 1)`` over the top ``slots`` players still available here."""
+
+    pool_size: int
+    inflation: float | None
+    """``None`` when there is no value left to divide into -- not 1.0, which would read as
+    "correctly priced" at a position where nothing is priced at all."""
+
+    reliable: bool
+    """False when the remaining value is small enough that the ratio is an artifact.
+
+    Kickers trip this on every board: ten slots must be filled by players worth nothing over
+    replacement, so a slot-proportional money allocation divides a real hundred dollars by
+    almost nothing and reports an enormous number. That is a property of allocating money by
+    slot count when slots are not equally valuable, not a finding about the kicker market.
+    """
+
+    def describe(self) -> str:
+        if self.inflation is None:
+            return f"{self.position}: no value left to price"
+        flag = "" if self.reliable else "  (artifact: almost no value left at this position)"
+        direction = "should clear over" if self.inflation >= 1.0 else "should clear under"
+        return f"{self.position} {direction} book at {self.inflation:.2f}x{flag}"
+
+
+# Below this share of the *overall* remaining value, a position's forward ratio is dividing by
+# near-nothing and is reported as unreliable rather than as a signal.
+MIN_FORWARD_VALUE_SHARE = 0.02
+
+
 def forward_positional_inflation(
     available: Sequence[PlayerValue],
     *,
     remaining_money: int,
-    remaining_slots: int,
-    positions: Iterable[str],
-) -> dict[str, float]:
-    """The charter's §4.5 positional formula, which returns the overall figure for every position.
+    remaining_base: Mapping[str, int],
+    remaining_flex: int,
+) -> dict[str, PositionForward]:
+    """Charter §4.5's positional formula: money and slots restricted to positional need.
 
-    **Not a positional signal, and not shipped as one.** This exists so the degeneracy is pinned
-    by a test rather than described in a comment. Allocating remaining money in proportion to
-    each position's remaining model value gives::
+    Args:
+        available: Players still on the board.
+        remaining_money: ``Σ (budget - all_spend_t)`` across the league.
+        remaining_base: Remaining base starting slots per position, keepers already removed.
+        remaining_flex: Remaining FLEX slots, split proportionally across RB/WR/TE.
 
-        inflation_pos = (D x value_pos / Σ value) / value_pos = D / Σ value
-
-    which is the overall inflation, identically, for every position. Use
-    :func:`realized_positional_inflation` for the figure the charter's own example sentence
-    describes.
+    Money is allocated **by slots**, which is what §4.5's "restrict money and slots to positional
+    need" says and is the reason the figure is not degenerate: ``value_pos`` appears only in the
+    denominator. Allocating by *value* instead would cancel it and hand every position the
+    overall number -- see the module docstring for why an earlier version got this wrong.
     """
-    overall = market_inflation(
-        available, remaining_money=remaining_money, remaining_slots=remaining_slots
-    )
-    return dict.fromkeys(positions, overall.inflation)
+    share = allocate_flex(remaining_flex, remaining_base)
+    slots = {
+        position: count + share.get(position, 0)
+        for position, count in remaining_base.items()
+        if count + share.get(position, 0) > 0
+    }
+    total_slots = sum(slots.values())
+    if total_slots <= 0:
+        return {}
+
+    by_position: dict[str, list[PlayerValue]] = {}
+    for player in available:
+        by_position.setdefault(player.position, []).append(player)
+
+    values: dict[str, tuple[float, int]] = {}
+    for position, count in slots.items():
+        pool = sorted(by_position.get(position, []), key=lambda p: p.baseline_value, reverse=True)[
+            :count
+        ]
+        values[position] = (sum(p.baseline_value - MIN_BID for p in pool), len(pool))
+
+    overall_value = sum(value for value, _size in values.values())
+    out: dict[str, PositionForward] = {}
+    for position, count in sorted(slots.items()):
+        value, pool_size = values[position]
+        money = remaining_money * count / total_slots
+        out[position] = PositionForward(
+            position=position,
+            slots=count,
+            money=round(money, 2),
+            value=round(value, 2),
+            pool_size=pool_size,
+            inflation=round((money - count) / value, 4) if value > 0 else None,
+            reliable=(
+                value > 0 and overall_value > 0 and value / overall_value >= MIN_FORWARD_VALUE_SHARE
+            ),
+        )
+    return out

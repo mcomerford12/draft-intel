@@ -241,3 +241,78 @@ def test_the_precompute_ranks_by_vorp_not_raw_points():
         pool, budget=10, slots=2, starters={"QB": 1, "RB": 1}, top=1, prices=[1]
     )
     assert [c.player_id for c in curves] == ["rb"]
+
+
+# ------------------------- review round 2: the crossing must not be the grid's edge
+
+
+def test_the_walk_away_price_is_independent_of_which_prices_the_curve_samples():
+    """The defect: `max(price where delta > 0)` over the *sampled* points cannot tell a genuine
+    crossing from a curve still positive at the top of whatever grid was searched.
+
+    On the real board it reported $58 against a true $117 -- a $59 understatement on the number
+    §4.7b displays as one enormous digit, under a report line reading "the MOST you should pay".
+    A coarse grid also understated by up to $2 inside its own range.
+    """
+    pool = [player("star", "RB", 500.0, 1), *[player(f"r{i}", "RB", 10.0, 1) for i in range(5)]]
+
+    coarse = walkaway_curve(
+        pool, pool[0], budget=60, slots=3, starters=STARTERS, bench_weight=0.0, prices=[1, 5]
+    )
+    fine = walkaway_curve(pool, pool[0], budget=60, slots=3, starters=STARTERS, bench_weight=0.0)
+
+    assert coarse.walk_away_price == fine.walk_away_price
+    assert coarse.walk_away_price is not None
+    assert coarse.walk_away_price > max(p.price for p in coarse.points), (
+        "the answer is not bounded by the sampled grid"
+    )
+
+
+def test_a_player_worth_buying_at_any_affordable_price_says_so_distinctly():
+    """ "The curve never crossed" and "the budget ran out first" read identically off a sampled
+    curve and mean different things: one is about the player, the other about the wallet."""
+    pool = [player("star", "RB", 5000.0, 1), *[player(f"r{i}", "RB", 1.0, 1) for i in range(5)]]
+    curve = walkaway_curve(pool, pool[0], budget=20, slots=3, starters=STARTERS, bench_weight=0.0)
+
+    assert curve.max_legal_bid == 18
+    assert curve.walk_away_price == 18
+    assert curve.worth_it_at_any_legal_price
+
+
+def test_a_player_with_a_real_crossing_is_not_flagged_as_budget_bound():
+    """λ must be non-zero for a crossing to exist at all: under λ=0 the money saved by walking
+    away buys nothing, so the delta is flat and the budget is always the binding constraint.
+    That is ADR-0004's complaint, and it is why this fixture prices the alternatives."""
+    pool = [player("star", "RB", 200.0, 1), *[player(f"r{i}", "RB", 150.0, 8) for i in range(6)]]
+    curve = walkaway_curve(pool, pool[0], budget=40, slots=3, starters=STARTERS, bench_weight=1.0)
+
+    assert curve.walk_away_price is not None
+    assert curve.walk_away_price < curve.max_legal_bid
+    assert curve.worth_it_at_any_legal_price is False
+
+
+def test_the_binary_search_finds_the_same_answer_as_an_exhaustive_scan():
+    """Exactness rests on monotonicity, which is asserted separately -- so check the two agree
+    on a board where the crossing is somewhere in the middle."""
+    pool = [player("star", "RB", 300.0, 1), *[player(f"r{i}", "RB", 120.0, 4) for i in range(6)]]
+    curve = walkaway_curve(pool, pool[0], budget=40, slots=3, starters=STARTERS, bench_weight=0.2)
+    exhaustive = [
+        price
+        for price in range(1, curve.max_legal_bid + 1)
+        if (
+            walkaway_curve(
+                pool,
+                pool[0],
+                budget=40,
+                slots=3,
+                starters=STARTERS,
+                bench_weight=0.2,
+                prices=[price],
+            )
+            .points[0]
+            .delta
+            > 0
+        )
+    ]
+    assert curve.monotone
+    assert curve.walk_away_price == (max(exhaustive) if exhaustive else None)
