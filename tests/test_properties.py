@@ -101,22 +101,36 @@ def test_money_conservation_without_overrides(events):
     assert state.override_delta == 0
 
 
-@given(event_logs(), st.lists(st.tuples(st.integers(1, 10), st.integers(-50, 50)), max_size=6))
+@given(event_logs(), st.lists(st.tuples(st.integers(1, 13), st.integers(-50, 50)), max_size=6))
 @settings(max_examples=200, deadline=None)
 def test_ledger_reconciles_exactly_with_overrides(events, corrections):
     """With overrides the pot moves by exactly the sum of the corrections - no more, no less.
 
     The charter deliberately relaxes conservation here rather than renormalising silently.
     What must hold is that the discrepancy is exactly accountable.
+
+    **Slots are drawn past the end of the league on purpose.** ``Slot`` validates 1..32 while
+    this league has 10, so a mistyped correction for slot 11 is a well-formed event naming a team
+    that does not exist. It is alerted and deliberately *not* applied -- and drawing exactly
+    1..10, as this test used to, meant a ledger that silently applied it would reconcile just as
+    happily. The accounting below now has to distinguish the two.
     """
     extra = [BudgetAdjustment(slot=s, delta=d) for s, d in corrections]
     log = _seq([*events, *extra])
     state = fold(log, slots=SLOTS)
     spend, _ = expected_spend(log)
-    total = sum(d for _, d in corrections)
+    applied = sum(d for s, d in corrections if s in SLOTS)
+    stranded = [(s, d) for s, d in corrections if s not in SLOTS]
+
     assert state.total_spent == sum(spend.values())  # spend is right, not just self-consistent
-    assert state.override_delta == total
-    assert state.total_spent + state.total_remaining == 10 * 200 + total
+    assert state.override_delta == applied, (
+        "a correction for a team that does not exist is not money"
+    )
+    assert state.total_spent + state.total_remaining == 10 * 200 + applied
+    for slot, _delta in stranded:
+        assert any(f"slot {slot} is not one of" in alert for alert in state.alerts), (
+            "a mistyped slot must be reported, not absorbed"
+        )
 
 
 @given(event_logs())
@@ -152,23 +166,43 @@ def test_budget_corrections_commute(corrections):
 
 @given(
     st.integers(1, 10),
+    st.integers(1, 10),
     st.integers(1, 200).map(str),
     st.integers(1, 60),
     st.integers(1, 60),
     st.booleans(),
 )
-@settings(max_examples=200, deadline=None)
-def test_manual_keeper_counted_exactly_once(slot, player_id, manual_amt, pick_amt, manual_first):
-    """For any interleaving, a keeper is counted once - never twice, never zero times."""
-    pick = PickSnapshot(pick_no=1, player_id=player_id, slot=slot, amount=pick_amt, is_keeper=True)
-    manual = ManualKeeper(slot=slot, player_id=player_id, amount=manual_amt)
+@settings(max_examples=300, deadline=None)
+def test_manual_keeper_counted_exactly_once(
+    manual_slot, pick_slot, player_id, manual_amt, pick_amt, manual_first
+):
+    """For any interleaving, a keeper is counted once - never twice, never zero times.
+
+    **The two slots are drawn independently.** An earlier version passed one drawn ``slot`` to
+    both the manual entry and the pick, so the case this property most needs to cover was never
+    generated: the operator types the keeper against the wrong team. Supersession keys on the
+    player, and had it keyed on ``(slot, player_id)`` the two entries would not have matched --
+    the player would be counted once on each team, the money booked twice, and this test would
+    have gone on passing because it only ever drew them equal.
+    """
+    pick = PickSnapshot(
+        pick_no=1, player_id=player_id, slot=pick_slot, amount=pick_amt, is_keeper=True
+    )
+    manual = ManualKeeper(slot=manual_slot, player_id=player_id, amount=manual_amt)
     observed = PickObserved(pick=pick)
     order = [manual, observed] if manual_first else [observed, manual]
     state = fold(_seq(order), slots=SLOTS)
-    team = state.teams[slot]
-    assert team.filled_slots == 1
-    assert team.spent == pick_amt  # the real pick always wins
-    assert len(team.keepers) == 1
+
+    # Counted once across the WHOLE league, not merely once on the team we happened to look at.
+    assert sum(t.filled_slots for t in state.teams.values()) == 1
+    assert state.total_spent == pick_amt  # the real pick always wins, at its own price
+    assert sum(len(t.keepers) for t in state.teams.values()) == 1
+
+    landed = state.teams[pick_slot]
+    assert landed.filled_slots == 1 and landed.spent == pick_amt
+    if manual_slot != pick_slot:
+        assert state.teams[manual_slot].filled_slots == 0, "the wrong team keeps nothing"
+        assert any("SLOT MISMATCH" in alert for alert in state.alerts)
 
 
 @example(

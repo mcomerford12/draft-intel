@@ -2048,6 +2048,38 @@ append to. Written to schema here, retroactively for the cards already built.
   these are weak tests rather than holes. Not closed here; carried as **DI-054**.
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
+### [DI-054] Close DI-EVAL-2 M2 — three tests that could not fail
+
+- **Sprint:** 1 · **Owner:** test-engineer · **Size:** S · **Branch:** `di-054-weak-tests`
+- **Why it is a card and not a footnote:** DI-EVAL-2 filed these as "a test-quality failure
+  rather than a coverage hole", which is right and is also exactly how a weak test survives —
+  the behaviour is correct today, so nothing is red, and the test stays blind until the day the
+  behaviour changes. Each one below is now mutation-verified against the defect it was supposed
+  to be watching for.
+- **Acceptance criteria:**
+  - [x] **Item 1 was already closed and is recorded as such, not claimed.**
+        `test_max_bid_never_strands_a_team` has carried its precondition
+        (`elif team.remaining >= team.open_slots`) plus a companion
+        `test_broke_team_reports_zero_max_bid_and_alerts` since an earlier round. Re-verified at
+        HEAD rather than taken from the finding.
+  - [x] **`test_manual_keeper_counted_exactly_once` drew one slot and passed it to both sides.**
+        So the case the property most needs — the operator types a keeper against the wrong team
+        — was never generated. The two slots are drawn independently now, the count is asserted
+        across the *whole league* rather than on the one team we happened to look at, and the
+        `SLOT MISMATCH` alert is required. Behaviour was already correct: supersession keys on
+        the player, the pick wins at its own price, and it is commutative.
+  - [x] **`test_ledger_reconciles_exactly_with_overrides` drew `st.integers(1, 10)`** — exactly
+        the in-league range, so a mistyped correction for a team that does not exist was never
+        drawn. `Slot` validates 1..32 while this league has 10, so slot 11 is a well-formed event
+        naming nobody; it is alerted and deliberately not applied. Drawing 1..13 now, and the
+        accounting distinguishes applied from stranded.
+- **Mutation-verified 3/3**, each against the specific blindness:
+  - supersession keyed on `(slot, player_id)` again → **CAUGHT** (was the double-count that
+    put a player on two rosters and charged the money twice)
+  - orphan slots stop being reported → **CAUGHT**
+  - `override_delta` counts adjustments for teams that do not exist → **CAUGHT**
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
 ---
 
 ## Ready — Sprint 2 (Intelligence Core)
