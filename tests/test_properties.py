@@ -128,6 +128,17 @@ def test_ledger_reconciles_exactly_with_overrides(events, corrections):
         "a correction for a team that does not exist is not money"
     )
     assert state.total_spent + state.total_remaining == 10 * 200 + applied
+
+    # **Per team, not only in total.** Every assertion above is an aggregate, so crediting each
+    # correction to the wrong team satisfied all of them: the sums are identical whichever team
+    # holds the money. That is the same wrong-team-but-reconciling shape the payload cross-check
+    # exists to catch, sitting in the test written to guard corrections.
+    per_team = dict.fromkeys(SLOTS, 0)
+    for slot, delta in corrections:
+        if slot in SLOTS:
+            per_team[slot] += delta
+    for slot, team in state.teams.items():
+        assert team.budget == 200 + per_team[slot], f"slot {slot} holds another team's correction"
     for slot, _delta in stranded:
         assert any(f"slot {slot} is not one of" in alert for alert in state.alerts), (
             "a mistyped slot must be reported, not absorbed"
@@ -137,10 +148,16 @@ def test_ledger_reconciles_exactly_with_overrides(events, corrections):
 @given(event_logs())
 @settings(max_examples=100, deadline=None)
 def test_max_bid_never_strands_a_team(events):
+    """One-sided until DI-056: it bounded `max_bid` from above and never from below, so
+    `return 0` satisfied it for every team in every generated log. A max bid of zero says "this
+    team is out", and saying that about a team with money still in hand takes them off the
+    affordability ladder — the display whose entire job is telling the user who they are actually
+    bidding against."""
     state = fold(events, slots=SLOTS)
     for team in state.teams.values():
         if team.open_slots > 0 and team.remaining >= team.open_slots:
             assert team.max_bid + (team.open_slots - 1) <= team.remaining
+            assert team.max_bid >= 1, "a team that can cover every open slot can bid on this one"
 
 
 @given(event_logs(), st.integers(1, 10), st.integers(-40, 40))
@@ -172,10 +189,11 @@ def test_budget_corrections_commute(corrections):
     st.integers(1, 60),
     st.integers(1, 60),
     st.booleans(),
+    st.booleans(),
 )
 @settings(max_examples=300, deadline=None)
 def test_manual_keeper_counted_exactly_once(
-    manual_slot, pick_slot, player_id, manual_amt, pick_amt, manual_first
+    manual_slot, pick_slot, player_id, manual_amt, pick_amt, manual_first, pick_is_keeper
 ):
     """For any interleaving, a keeper is counted once - never twice, never zero times.
 
@@ -185,9 +203,15 @@ def test_manual_keeper_counted_exactly_once(
     player, and had it keyed on ``(slot, player_id)`` the two entries would not have matched --
     the player would be counted once on each team, the money booked twice, and this test would
     have gone on passing because it only ever drew them equal.
+
+    **``is_keeper`` is drawn too.** It was hardcoded ``True`` -- the one value api-findings
+    Finding 5 says never appears on a real ceremonial keeper, since all twenty in the fixture
+    carry ``false``. So the branch that actually fires on this league's data was the branch the
+    property never generated, and supersession firing *only* for ``is_keeper`` picks survived
+    the whole file.
     """
     pick = PickSnapshot(
-        pick_no=1, player_id=player_id, slot=pick_slot, amount=pick_amt, is_keeper=True
+        pick_no=1, player_id=player_id, slot=pick_slot, amount=pick_amt, is_keeper=pick_is_keeper
     )
     manual = ManualKeeper(slot=manual_slot, player_id=player_id, amount=manual_amt)
     observed = PickObserved(pick=pick)
@@ -195,15 +219,27 @@ def test_manual_keeper_counted_exactly_once(
     state = fold(_seq(order), slots=SLOTS)
 
     # Counted once across the WHOLE league, not merely once on the team we happened to look at.
+    # "Once" is about the roster spot and the money, which hold however the pick is classified;
+    # whether the entry is a *keeper* follows the feed, and is asserted below.
     assert sum(t.filled_slots for t in state.teams.values()) == 1
     assert state.total_spent == pick_amt  # the real pick always wins, at its own price
-    assert sum(len(t.keepers) for t in state.teams.values()) == 1
 
     landed = state.teams[pick_slot]
     assert landed.filled_slots == 1 and landed.spent == pick_amt
     if manual_slot != pick_slot:
         assert state.teams[manual_slot].filled_slots == 0, "the wrong team keeps nothing"
         assert any("SLOT MISMATCH" in alert for alert in state.alerts)
+
+    # The feed is authoritative for the pick, so a competitive pick supersedes a manual keeper
+    # and the entry stops counting as one. That moves money out of `keeper_spend()` and drops
+    # the N/20 readout, so it is a divergence the operator has to see -- exactly like the slot
+    # and amount mismatches beside it, which have alerted since Sprint 1 while this one did not.
+    if pick_is_keeper:
+        assert len(landed.keepers) == 1
+        assert state.keeper_spend() == pick_amt
+    else:
+        assert len(landed.keepers) == 0
+        assert any("KEEPER MISMATCH" in alert for alert in state.alerts)
 
 
 @given(st.integers(1, 10), st.integers(1, 200).map(str), st.integers(1, 60))

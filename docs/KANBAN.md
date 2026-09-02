@@ -2248,17 +2248,35 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ### [DI-056] The next layer of DI-054's finding
 
-- **Sprint:** 1 · **Owner:** test-engineer · **Size:** S · **Dep:** DI-054
+- **Sprint:** 1 · **Owner:** test-engineer · **Size:** S · **Dep:** DI-054 · **Branch:**
+  `di-056-property-blind-spots`
 - Three minors from DI-054's review, each an escape the *file* allows and the wider suite still
-  closes — so none is a hole, and all three are the same shape as the finding DI-054 fixed:
-  - [ ] `test_properties.py::test_max_bid_never_strands_a_team` has no lower bound; `max_bid → 0`
-        survives that file, caught only by the gate twin's `assert team.max_bid >= 1`
-  - [ ] `test_manual_keeper_counted_exactly_once` hardcodes `is_keeper=True` — the one value
-        api-findings Finding 5 says never appears on a real ceremonial keeper. A mutation
-        superseding only `is_keeper` picks survives the file and reproduces the §2 double-count.
-  - [ ] `test_ledger_reconciles_exactly_with_overrides` asserts only aggregates, so crediting
-        every correction to the wrong team survives it — the same wrong-team-but-reconciling
-        class DI-053's cross-check exists to catch
+  closes — so none was a hole, and all three are the same shape as the finding DI-054 fixed. All
+  three re-confirmed as escaping before being closed:
+  - [x] `test_properties.py::test_max_bid_never_strands_a_team` bounded `max_bid` from above and
+        never from below, so `return 0` satisfied it for every team in every generated log. A max
+        bid of zero says "this team is out", and saying that about a team with money in hand
+        takes them off the affordability ladder — the display whose whole job is telling the user
+        who they are actually bidding against.
+  - [x] `test_manual_keeper_counted_exactly_once` hardcoded `is_keeper=True` — the one value
+        api-findings Finding 5 says never appears on a real ceremonial keeper, since all twenty
+        in the fixture carry `false`. The branch that fires on this league's data was the branch
+        the property never generated, and supersession firing *only* for `is_keeper` picks
+        survived the file.
+  - [x] `test_ledger_reconciles_exactly_with_overrides` asserted only aggregates, so crediting
+        every correction to the wrong team satisfied all of them — the sums are identical
+        whichever team holds the money. Now asserted per team. Same wrong-team-but-reconciling
+        class DI-053's cross-check exists to catch, sitting inside the test written to guard
+        corrections.
+- **A real defect fell out of the second one.** Drawing `is_keeper` surfaced the third way a
+  manual entry and its pick can disagree, and the only one that was silent: entering a keeper
+  says "this is a retention, not a bid", and a pick arriving with `is_keeper` false says the
+  opposite. The pick wins — correctly, the feed is authoritative — but that quietly moves the
+  money out of `keeper_spend()`, drops the N/20 readout by one, and lets a retention price into
+  the competitive series as though somebody had bid it. `SLOT MISMATCH` and `AMOUNT MISMATCH`
+  have alerted since Sprint 1; `KEEPER MISMATCH` now joins them.
+- **Mutation-verified 4/4 against `test_properties.py` alone**, which is the point: each was
+  previously caught only by `test_replay_gate.py`, a different file testing a different thing.
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
 ### [DI-057] Arm the keeper classifier, with its toggle and confirmation loop

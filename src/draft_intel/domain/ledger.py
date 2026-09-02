@@ -250,6 +250,18 @@ def fold(
                 f"AMOUNT MISMATCH slot {actual.slot} / {entry.player_id}: "
                 f"manual ${entry.amount} vs pick ${actual.amount} - the pick wins"
             )
+        # The third way a manual entry and its pick can disagree, and the only one that was
+        # silent. Entering a keeper says "this is a retention, not a bid"; a pick arriving with
+        # `is_keeper` false says the opposite, and the pick wins -- which quietly moves the
+        # money out of `keeper_spend()`, drops the N/20 readout by one, and lets a retention
+        # price into the competitive series as though somebody had bid it. The slot and amount
+        # divergences beside it have alerted since Sprint 1; this one had nothing.
+        if not actual.is_keeper:
+            alerts.append(
+                f"KEEPER MISMATCH slot {actual.slot} / {entry.player_id}: entered manually as a "
+                f"keeper, but the feed reports pick {actual.pick_no} as a competitive bid - the "
+                "pick wins, so this is no longer counted as a keeper"
+            )
 
     # A player may sit on exactly one roster. Nothing detected this before.
     owners: dict[str, list[int]] = {}
