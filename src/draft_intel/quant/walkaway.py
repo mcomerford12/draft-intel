@@ -42,6 +42,7 @@ binary search's premise is void at the same moment.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from functools import cached_property
 from itertools import pairwise
 
 from pydantic import BaseModel, ConfigDict
@@ -315,6 +316,52 @@ def _is_monotone(points: Sequence[CurvePoint]) -> bool:
     return all(later.delta <= earlier.delta + 1e-9 for earlier, later in pairwise(feasible))
 
 
+class WalkAwayBoard(BaseModel):
+    """A precomputed set of curves, keyed for **O(1) lookup on the live path**.
+
+    ADR-0006's amended Sprint 2 gate is explicit about the shape of the promise: the answer to
+    "should I bid?" during a nomination is a dictionary lookup, never a solve. A curve is dozens
+    of optimizer solves by construction, so any design that computes one while the clock runs has
+    already lost. :func:`walkaway_board` returned a plain list, which a caller could only scan --
+    linear, and with nothing stopping them calling :func:`walkaway_curve` live instead.
+
+    **The board carries the state it was computed against, and says when it is stale.** A curve
+    is only valid for the budget and open-slot count that produced it; the moment the user buys
+    anybody, every number in it is wrong. That is precisely the failure this project keeps
+    finding -- a plausible figure that has been wrong since 7:40pm -- so staleness is a question
+    the board can answer rather than an assumption the caller makes.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    budget: int
+    slots: int
+    curves: tuple[WalkAway, ...]
+
+    @cached_property
+    def _by_player(self) -> dict[str, WalkAway]:
+        return {curve.player_id: curve for curve in self.curves}
+
+    def get(self, player_id: str) -> WalkAway | None:
+        """The precomputed curve, or ``None`` when this player is outside the board.
+
+        ``None`` means "not precomputed", not "not worth bidding on". The caller decides whether
+        to solve for them or say so; what it must not do is read the absence as a zero.
+        """
+        return self._by_player.get(player_id)
+
+    def covers(self, player_id: str) -> bool:
+        return player_id in self._by_player
+
+    def is_current_for(self, *, budget: int, slots: int) -> bool:
+        """Whether this board still describes the user's position.
+
+        False the instant they buy someone. Every price on a stale board is an answer to a
+        question about a roster they no longer have.
+        """
+        return self.budget == budget and self.slots == slots
+
+
 def walkaway_board(
     candidates: Sequence[Candidate],
     *,
@@ -324,7 +371,7 @@ def walkaway_board(
     bench_weight: float = DEFAULT_BENCH_WEIGHT,
     top: int = 25,
     prices: Sequence[int] | None = None,
-) -> list[WalkAway]:
+) -> WalkAwayBoard:
     """Precompute curves for the most valuable players, per ADR-0003.
 
     ADR-0003 requires walk-away prices to be precomputed after each settled pick so the live
@@ -339,7 +386,7 @@ def walkaway_board(
     right axis for "who is worth bidding on" rather than "who scores most".
     """
     ranked = sorted(candidates, key=lambda c: (-c.vorp, -c.points))[:top]
-    return [
+    curves = [
         walkaway_curve(
             candidates,
             player,
@@ -351,3 +398,4 @@ def walkaway_board(
         )
         for player in ranked
     ]
+    return WalkAwayBoard(budget=budget, slots=slots, curves=tuple(curves))

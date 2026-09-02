@@ -147,7 +147,11 @@ def build_report(root: Path, *, targets: int = 12) -> str:
         minimum_retention_price=manifest.league.minimum_retention_price,
     )
 
-    out += _price_provenance(price_source)
+    out += _price_provenance(
+        price_source,
+        resolved_count=sum(1 for _o, pid in resolved if identity.slot_for(_o) is not None),
+        expected_count=config.teams * config.keepers_per_team,
+    )
     out += _inflation_section(keepers, unreliable)
     out += _keeper_section(keepers, config.teams)
     out += _positional_map(board, demand, roster_live)
@@ -207,9 +211,21 @@ def _retention_prices(
     return merged, "the MOCK draft's picks feed -- NOT this league"
 
 
-def _price_provenance(source: str) -> list[str]:
+def _price_provenance(source: str, *, resolved_count: int, expected_count: int) -> list[str]:
     out = [RULE, "KEEPER PRICE PROVENANCE — read this before section 2 or 3", RULE]
     out.append(_line("retention prices from", source))
+    # ADR-0006 clause 1: the gate says "priced against the real keeper manifest", and this line
+    # is what stops that quietly becoming "priced against as much of it as happened to resolve".
+    # The board is built from the manifest either way; what changes with an unresolved keeper is
+    # that the tool cannot tell which team holds them, which silently moves both the demand and
+    # the surplus for that seat.
+    out.append(
+        _line(
+            "keepers resolved",
+            f"{resolved_count} of {expected_count}"
+            + ("" if resolved_count == expected_count else "  <-- INCOMPLETE, see DI-043"),
+        )
+    )
     if "MOCK" in source:
         out.append(
             "\n  !! These are a DIFFERENT DRAFT'S RESULTS, not this league's retention prices.\n"
@@ -577,14 +593,14 @@ def _targets(
         "  not a recommendation to pay it. Moving the bench weight moves every number here.\n"
     )
     out.append(f"  {'player':24} {'pos':4} {'live $':>7} {'walk away':>10} {'monotone':>9}")
-    for curve in curves:
+    for curve in curves.curves:
         price = "never" if curve.walk_away_price is None else f"${curve.walk_away_price}"
         board_price = next((c.price for c in candidates if c.player_id == curve.player_id), 0)
         out.append(
             f"  {curve.name[:24]:24} {curve.position:4} {board_price:>7} {price:>10} "
             f"{'ok' if curve.monotone else 'BROKEN':>9}"
         )
-    if any(not curve.monotone for curve in curves):
+    if any(not curve.monotone for curve in curves.curves):
         out.append(
             "\n  !! A non-monotone curve means the optimizer is not returning optima and the\n"
             "     walk-away numbers above cannot be trusted. This is a bug, not a market signal."

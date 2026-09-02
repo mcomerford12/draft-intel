@@ -423,3 +423,33 @@ def test_the_surplus_board_shows_both_value_bases_it_mixes(report: str) -> None:
         )
         assert surplus == round(book - paid), "surplus is book less paid, on the book basis"
         assert mkt > 0, "the consensus basis is populated, not a blank column"
+
+
+def test_the_page_states_how_many_keepers_actually_resolved(report: str) -> None:
+    """ADR-0006 clause 1. The gate says "priced against the real keeper manifest"; this line is
+    what stops that quietly becoming "priced against as much of it as happened to resolve".
+
+    The board is built from the manifest either way. What changes with an unresolved keeper is
+    that the tool cannot tell which team holds them — which silently moves both the demand and
+    the surplus for that seat, with the page looking identical.
+    """
+    from draft_intel.config import load_league_config
+
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    expected = config.teams * config.keepers_per_team
+
+    line = next(line for line in report.splitlines() if "keepers resolved" in line)
+    resolved, of_total = (int(word) for word in line.split() if word.isdigit())
+    assert of_total == expected, "the denominator is the league's own keeper count"
+    assert resolved == expected, "against the fixture all twenty resolve"
+    assert "INCOMPLETE" not in line
+
+    # On the fixture the two numbers are equal, so the assertions above pass just as happily
+    # against a line that prints the expected count twice and never looks at what resolved.
+    # That mutation escaped. The incomplete case is what the line exists for -- it is the live
+    # league's state today, at 10 of 20 -- so it is exercised directly.
+    from draft_intel.prep import _price_provenance
+
+    short = "\n".join(_price_provenance("somewhere", resolved_count=10, expected_count=20))
+    assert "10 of 20" in short
+    assert "INCOMPLETE" in short and "DI-043" in short

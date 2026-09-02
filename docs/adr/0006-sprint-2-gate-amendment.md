@@ -1,8 +1,8 @@
 # ADR-0006: Sprint 2 gate amendment
 
-- **Status:** **Proposed — awaiting the orchestrator's decision. Nothing has been changed.**
+- **Status:** **Accepted 2026-09-02.** Applied to the Sprint 2 gate in `docs/KANBAN.md`.
 - **Date:** 2026-09-02
-- **Deciders:** user (pending) · drafted by the implementer at the user's request
+- **Deciders:** user (orchestrator) · drafted by the implementer at the user's request
 
 ## Context
 
@@ -15,15 +15,18 @@ The Sprint 2 gate, as written in `docs/KANBAN.md`:
 
 The draft is **2026-09-05 19:00 MDT — three days away**. All fourteen Sprint 2 cards are built
 and `make ci` is green at 540 tests and 97% coverage. The gate is nonetheless not met, and two of
-its five clauses will not be met by Saturday. This ADR proposes amending three of them and leaving
-two untouched.
+its five clauses will not be met by Saturday. This ADR amends three of them and leaves two
+untouched.
+
+*(Accepted as drafted, all three amendments, with both untouched clauses standing. The
+consequences below are now obligations, not predictions.)*
 
 The charter's §9 lists what is settled and not up for debate: league settings, floor rounding on
 keepers, the keeper slate, the local-first stack, the valuation methodology, and the
 review/evaluator independence rules. **The sprint gates are not on that list**, and the gate's own
 final sentence anticipates this decision by naming its cut candidate. Amending it is therefore in
-scope — but it is the orchestrator's call, not the implementer's, which is why this is a proposal
-and not a commit to the board.
+scope — but it was the orchestrator's call, not the implementer's, so it was drafted as a
+proposal and applied only on their acceptance.
 
 ### Where each clause actually stands
 
@@ -39,7 +42,7 @@ and not a commit to the board.
 
 ### Amendment 1 — clause 4 is restated as the thing ADR-0003 actually promises
 
-**Proposed:** *the live walk-away lookup is O(1) against a board precomputed between settled
+**Decided:** *the live walk-away lookup is O(1) against a board precomputed between settled
 picks; the precompute completes inside 30 seconds at 8 or fewer open slots, and its cost at more
 open slots is stated on the page rather than hidden.*
 
@@ -67,7 +70,7 @@ timed on the real pool at each stage and the figures are published, not asserted
 
 ### Amendment 2 — clause 5 is cut, on the terms the gate itself set
 
-**Proposed:** *the 500-run Monte Carlo and the p<0.01 bot gate are cut from Sprint 2 and moved to
+**Decided:** *the 500-run Monte Carlo and the p<0.01 bot gate are cut from Sprint 2 and moved to
 Sprint 5 (stretch).*
 
 The gate names these as "cut item #1 if the schedule slips". The schedule has slipped. Taking the
@@ -88,7 +91,7 @@ Two consequences worth stating plainly rather than burying:
 
 ### Amendment 3 — clause 1 is qualified, not weakened
 
-**Proposed:** *`make prep` produces the priced board against the real keeper manifest and the real
+**Decided:** *`make prep` produces the priced board against the real keeper manifest and the real
 projections; running against the live league additionally requires DI-043, which is outside this
 sprint's control.*
 
@@ -101,14 +104,13 @@ open on somebody else's Sleeper signup is not a useful gate; naming the dependen
 
 **Clause 2 (money conservation) and clause 3 (a human has reviewed it) stand exactly as written.**
 
-Clause 3 in particular should not be softened, and I want to be explicit that I am not proposing
-to. §4.9's entire premise is that *"a valuation model you first see three minutes before the
+Clause 3 in particular is not softened, and the proposal was explicit that it would not be. §4.9's entire premise is that *"a valuation model you first see three minutes before the
 auction is one you cannot sanity-check."* Two review rounds and two adversarial evaluation rounds
 have found real defects in this board — including prices sourced from the wrong draft entirely —
 and none of that is a substitute for the person who knows this league reading it and disagreeing.
 It is the one clause whose absence would make the rest ceremonial.
 
-### Also proposed: what "Sprint 2 complete" then requires
+### What "Sprint 2 complete" now requires
 
 Under the amended gate, Sprint 2 closes when:
 
@@ -135,10 +137,21 @@ way every component test agrees with, nothing here will catch it before 7pm Satu
 read of the board is now the *only* whole-model review, which raises the stakes on clause 3
 considerably.
 
-**Newly obliged to test.** That the live walk-away path performs no solve; that the precompute is
-timed on the real pool and its cost published per stage; and that `make prep` states its own
-keeper-resolution status, so "priced against the real manifest" cannot quietly become "priced
-against as much of it as resolved".
+**Newly obliged to test — done, and mutation-verified 4/4.** That the live walk-away path performs
+no solve *and* reads an index rather than walking the board; that a board says when the user's
+position has moved past it, because every curve on a stale board answers a question about a roster
+they no longer have; and that `make prep` states its own keeper-resolution status, so "priced
+against the real manifest" cannot quietly become "priced against as much of it as resolved".
+
+**Two of those tests were wrong on the first attempt, and the record is worth keeping.** Forbidding
+a *solve* does not guarantee a *lookup* — a linear scan calls no optimizer either — so the first
+version was timed instead, on the reasoning that cost is the only observable difference. The scan
+does 4,000 lookups over a 4,000-curve board in 0.24s, under the 0.5s bound, and passed against the
+defect. Chasing it with a bigger board trades a real assertion for a guess about machine speed, so
+the index is now asserted directly: empty it, and a lookup that reads it must miss. Separately, the
+keeper-resolution test asserted `resolved == expected` on a fixture where all twenty resolve, which
+a line printing the expected count twice satisfies just as well; the incomplete case — the live
+league's own state, at 10 of 20 — is now exercised directly.
 
 **Not changed by this ADR.** The charter's §6 independence rules, the valuation methodology, the
 keeper slate, and both remaining gate clauses. This ADR narrows what Sprint 2 promises; it does

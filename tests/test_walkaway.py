@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from draft_intel.quant import walkaway
-from draft_intel.quant.optimizer import Candidate
+from draft_intel.quant.optimizer import Candidate, Roster
 from draft_intel.quant.slots import FLEX
 from draft_intel.quant.walkaway import (
     CurvePoint,
@@ -244,7 +244,9 @@ def test_the_bench_weight_moves_the_walk_away_number():
 def test_the_board_precomputes_curves_for_the_most_valuable_players_only():
     """ADR-0003 wants the live path to be a lookup. A curve costs two solves per price point,
     so covering every player at every dollar does not fit between two picks."""
-    curves = walkaway_board(board(), budget=12, slots=3, starters=STARTERS, top=3, prices=[1, 2])
+    curves = walkaway_board(
+        board(), budget=12, slots=3, starters=STARTERS, top=3, prices=[1, 2]
+    ).curves
     assert len(curves) == 3
     assert curves[0].player_id == "star", "ranked by projected points"
     assert all(len(c.points) == 2 for c in curves)
@@ -253,7 +255,9 @@ def test_the_board_precomputes_curves_for_the_most_valuable_players_only():
 def test_a_precomputed_board_is_keyed_so_the_live_path_is_a_lookup():
     curves = {
         c.player_id: c
-        for c in walkaway_board(board(), budget=12, slots=3, starters=STARTERS, top=2, prices=[1])
+        for c in walkaway_board(
+            board(), budget=12, slots=3, starters=STARTERS, top=2, prices=[1]
+        ).curves
     }
     assert curves["star"].delta_at(1) is not None
     assert curves["star"].delta_at(999) is None
@@ -299,7 +303,7 @@ def test_the_precompute_ranks_by_vorp_not_raw_points():
     curves = walkaway_board(
         pool, budget=10, slots=2, starters={"QB": 1, "RB": 1}, top=1, prices=[1]
     )
-    assert [c.player_id for c in curves] == ["rb"]
+    assert [c.player_id for c in curves.curves] == ["rb"]
 
 
 # ------------------------- review round 2: the crossing must not be the grid's edge
@@ -437,3 +441,73 @@ def test_the_display_grid_is_dense_where_the_money_is_and_always_spans_the_range
     # A ceiling inside the dense band is plotted in full rather than truncated.
     assert _display_grid(6) == [1, 2, 3, 4, 5, 6]
     assert _display_grid(1) == [1]
+
+
+# ------------------- ADR-0006: the amended gate's clause 4, tested rather than asserted
+
+
+def test_the_live_lookup_is_a_dictionary_hit_and_never_a_solve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0006 replaced "walk-away recompute p99 < 200ms" with what ADR-0003 actually promises:
+    the live path is a lookup against a board precomputed between settled picks.
+
+    A curve is dozens of optimizer solves by construction, so any design that computes one while
+    the nomination clock runs has already lost. This pins the promise the amended clause makes —
+    `get` must not touch the optimizer at all.
+    """
+    pool = falling_board()
+    precomputed = walkaway_board(pool, budget=20, slots=3, starters={"RB": 1}, top=2)
+
+    calls: list[int] = []
+
+    def refuse(*_args: object, **_kwargs: object) -> Roster:
+        calls.append(1)
+        raise AssertionError("the live lookup path must never call the optimizer")
+
+    monkeypatch.setattr(walkaway, "best_roster", refuse)
+    hit = precomputed.get(pool[0].player_id)
+    miss = precomputed.get("nobody")
+    assert precomputed.covers(pool[0].player_id)
+    assert not precomputed.covers("nobody")
+
+    assert calls == [], "the live path solved; that is the whole thing clause 4 forbids"
+    assert hit is not None and hit.walk_away_price is not None
+    assert miss is None, "outside the board is None — not precomputed, not 'worth nothing'"
+
+
+def test_the_lookup_reads_the_index_rather_than_walking_the_board():
+    """The companion to the test above, and the half it cannot see. Forbidding a *solve* is not
+    the same as guaranteeing a *lookup*: a linear scan calls no optimizer either and returns the
+    identical object, so swapping the mapping for `next(c for c in self.curves ...)` escaped.
+
+    **Timing it was the wrong instrument.** A first attempt asserted 4,000 lookups over a 4,000
+    curve board finished inside half a second; the scan does it in 0.24s, so the test passed
+    against the defect. Chasing that with a bigger board or a tighter bound trades a real
+    assertion for a machine-speed guess.
+
+    So the index is asserted directly instead: empty it, and a lookup that reads it must miss.
+    A scan ignores it and finds the curve anyway, which is exactly the difference that matters.
+    """
+    pool = falling_board()
+    precomputed = walkaway_board(pool, budget=20, slots=3, starters={"RB": 1}, top=2)
+    target = pool[0].player_id
+
+    assert precomputed.get(target) is not None
+    precomputed._by_player.clear()
+
+    assert precomputed.get(target) is None, "the lookup walked the list instead of the index"
+    assert not precomputed.covers(target)
+
+
+def test_a_board_knows_when_the_users_position_has_moved_past_it():
+    """Every curve is an answer about one budget and one open-slot count. The moment the user
+    buys somebody, all of them describe a roster they no longer have — and a stale walk-away
+    price is exactly the plausible-but-wrong figure this project keeps finding."""
+    pool = falling_board()
+    precomputed = walkaway_board(pool, budget=20, slots=3, starters={"RB": 1}, top=1)
+
+    assert precomputed.is_current_for(budget=20, slots=3)
+    assert not precomputed.is_current_for(budget=14, slots=2), "they bought someone for $6"
+    assert not precomputed.is_current_for(budget=20, slots=2)
+    assert not precomputed.is_current_for(budget=19, slots=3)

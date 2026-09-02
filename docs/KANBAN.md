@@ -2393,10 +2393,31 @@ Cards are ordered by dependency. Each gets its own branch and PR.
 | DI-038 | Value override plumbing: per-player, positional multiplier, blacklist | quant | M | 030 |
 | DI-039 | `make prep` — the priced board and printable report | quant | L | 031,036 |
 
-**Sprint 2 gate:** `make prep` produces the full estimated priced board against the real keeper
-manifest and **a human has reviewed it**. Money-conservation invariants hold. Walk-away recompute
-p99 < 200ms. The 500-run Monte Carlo and the p<0.01 bot gate are retained per the full-charter
-decision, and are cut item #1 if the schedule slips.
+**Sprint 2 gate** — amended by **ADR-0006**, accepted 2026-09-02. Three clauses restated or cut,
+two standing exactly as written. The original text is quoted in the ADR; this is what the sprint
+is now held to.
+
+1. **`make prep` produces the priced board** against the real keeper manifest, the real
+   projections and the real scoring settings. Running it against the *live league* additionally
+   requires DI-043 — five managers have not joined — which is outside this sprint's control and is
+   named as a dependency rather than held as a gate.
+2. **Money-conservation invariants hold.** *(Unamended.)*
+3. **A human has reviewed the board.** *(Unamended, and deliberately not softened.)* §4.9's premise
+   is that a model first seen three minutes before the auction cannot be sanity-checked. Two review
+   rounds and two adversarial evaluations found real defects here, including prices sourced from
+   another draft entirely — none of which substitutes for the person who knows this league reading
+   it and disagreeing. Under the amendment this is now the **only** whole-model review, so its
+   stakes went up, not down.
+4. **The live walk-away lookup is O(1)** against a board precomputed between settled picks; the
+   precompute completes inside 30 seconds at 8 or fewer open slots, and its cost at more open slots
+   is stated on the page rather than hidden. *(Replaces "walk-away recompute p99 < 200ms", which
+   measured the wrong thing: a curve is dozens of solves by construction, and ADR-0003 already
+   promises a lookup rather than a solve on the live path.)*
+5. ~~500-run Monte Carlo and the p<0.01 bot gate.~~ **Cut to Sprint 5**, on the terms this gate
+   itself set — "cut item #1 if the schedule slips". **The cost is real and is recorded rather than
+   buried:** this was the only planned check on the valuation *as a whole*. Every remaining test
+   checks a component; nothing now asks whether the model actually wins drafts, which is the only
+   question that catches a model that is internally consistent and collectively wrong.
 
 ## Backlog — Sprints 3–5
 
@@ -2407,4 +2428,6 @@ Epic level only until Sprint 2 closes.
   with `N/20` readout · λ slider · keyboard map · charts
 - **Sprint 4 — Hardening:** chaos suite · offline mode · snapshot/restore · `RUNBOOK.md` ·
   `DRAFT_DAY_CHEATSHEET.md` · 60-minute rehearsal run as both Case A and Case B
-- **Sprint 5 — Stretch:** nomination advisor · post-draft report · opponent bid modelling
+- **Sprint 5 — Stretch:** nomination advisor · post-draft report · opponent bid modelling ·
+  **mock auction simulator (10 bots, 5 strategies), the 500-run Monte Carlo, and the p<0.01 bot
+  gate** — cut from the Sprint 2 gate by ADR-0006. Nothing in the tree simulates a draft today.
