@@ -82,6 +82,16 @@ class LeagueConfig:
     roster_size: int = 16
     """Total roster capacity. Anything above ``draft_rounds`` is waiver space, not auction."""
 
+    draft_rounds_api_known_stale: int | None = 15
+    """The value ``draft.settings.rounds`` is *known* to be wrong with, and why it may warn.
+
+    Finding 1 diagnosed the draft object as holding stale defaults; ``rounds`` is 15 in a
+    16-round league. That one discrepancy is understood, so it warns. Any *other* value is
+    unexplained, and an unexplained number in the field that scales every price blocks rather
+    than joining a list of routine warnings it is indistinguishable from. Set to ``None`` to
+    treat every disagreement as undiagnosed.
+    """
+
     keepers_per_team: int = 2
     starters: dict[str, int] = field(
         default_factory=lambda: {"QB": 2, "RB": 2, "WR": 2, "TE": 1, "FLEX": 2, "K": 1}
@@ -110,6 +120,11 @@ def load_league_config(path: str | Path = "config/league.yaml") -> LeagueConfig:
         teams=int(data["teams"]),
         budget=int(data["budget"]),
         draft_rounds=int(data["draft_rounds"]),
+        draft_rounds_api_known_stale=(
+            None
+            if data.get("draft_rounds_api_known_stale") is None
+            else int(data["draft_rounds_api_known_stale"])
+        ),
         roster_size=int(data["roster_size"]),
         keepers_per_team=int(data["keepers_per_team"]),
         bench=int(data["bench"]),
@@ -215,6 +230,25 @@ def _check_draft_rounds(
                 config.draft_rounds,
                 draft_rounds,
                 "draft.settings.rounds, corroborated by roster_positions",
+            )
+        ]
+    if draft_rounds != config.draft_rounds_api_known_stale:
+        # Neither our value nor the one we diagnosed as stale. We have no account of this
+        # number, and "it is probably stale too" is a guess about the field that scales every
+        # price. An undiagnosed `rounds` of 14 against a configured 16 is indistinguishable, in
+        # a warning, from the known-stale 15 -- and it would price a 160-spot pool for a
+        # 140-pick draft, moving the top of the board by roughly 30% with all three §4.3
+        # invariants still passing, because they are self-consistent against whatever pool they
+        # are handed. So an unexplained value blocks, and the fix is one line of config: either
+        # correct `draft_rounds` or record the new number as diagnosed-stale.
+        return [
+            ConfigIssue(
+                Severity.BLOCKING,
+                "draft_rounds",
+                f"{config.draft_rounds}, or the diagnosed-stale "
+                f"{config.draft_rounds_api_known_stale}",
+                draft_rounds,
+                "draft.settings.rounds (undiagnosed)",
             )
         ]
     return [

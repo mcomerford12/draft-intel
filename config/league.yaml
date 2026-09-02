@@ -47,6 +47,14 @@ budget: 200
 # Players each team buys at auction. Scales every price. Conditionally blocking (above).
 draft_rounds: 16
 
+# The ONE value draft.settings.rounds is known to be wrong with. Finding 1 diagnosed the draft
+# object as holding stale defaults from before roster settings were finalised, and 15 is what it
+# holds. That discrepancy is understood, so it warns. Any OTHER value there is unexplained and
+# BLOCKS -- an undiagnosed 14 against our 16 looks exactly like the known-stale 15 in a warning,
+# and would price a 160-spot pool for a 140-pick draft while every 4.3 invariant still passed.
+# When DI-004 lands and the commissioner re-saves, set this to null.
+draft_rounds_api_known_stale: 15
+
 # Total roster capacity per team. Anything above draft_rounds is waiver space and costs
 # nothing at auction. WARNING only -- but a roster_size BELOW draft_rounds is incoherent
 # (you cannot seat what you drafted) and blocks.

@@ -201,6 +201,244 @@ failure; ruff, mypy --strict, 55 tests, 97% coverage all as claimed.
 
 ## In Eval
 
+### [DI-EVAL-4] Sprint 2 gate — adversarial evaluation of DI-045 and DI-027
+
+- **Artifact:** `di-027-market-value-provider` @ `c9eb210`, exported read-only with
+  `git archive` and run in isolation. **Verdict: REJECTED.** 2 blocking, 4 major, 6 minor.
+- **Environment note, recorded because it bounds this verdict.** The working tree was being
+  edited by another agent throughout the evaluation. `HEAD` was `di-046-review-round1-fixes`
+  @ `fac83c2`, not the branch named in the brief; `src/draft_intel/config.py`,
+  `src/draft_intel/quant/market.py` and `config/league.yaml` all changed under the evaluation,
+  and the suite grew from 216 to 265 tests mid-run. Everything below was therefore re-derived
+  against a pinned export of `c9eb210` (216 passed, matching the author's figure). Findings
+  B1/B2/M1/M2/M4 substantially match code review round 1's B1/M2/M4/M5/M6, reached
+  independently and without reading that review; that convergence is corroboration, not a
+  duplicate. DI-046 claims to close them and was not evaluated.
+- Every finding was produced by running the artifact. `docs/PLAN.md`, `docs/HANDOFF.md`,
+  `docs/DECISIONS_FOR_REVIEW.md` and commit messages were not read.
+
+#### Mutation verification, re-run independently — 14 escapes, not 15/15
+
+`PYTHONPATH` precedence over the editable install was proved first: `site-packages/draft_intel`
+holds only `py.typed` (a namespace-package portion), so a regular package earlier on the path
+wins. A control mutation (`CsvMarketValues.name = "ZZZ"`) killed 4 tests, confirming the harness
+is load-bearing before any result was trusted. 23 mutations the author did not try were then run
+against the **full** suite. Escapes:
+
+| Mutation | Effect |
+|---|---|
+| `ADP_SENTINEL = 900.0` → `100.0` | any ADP in 100–900 becomes "no opinion"; the tests only ever use 999 |
+| `adp >= ADP_SENTINEL` → `>` | boundary untested |
+| `MIN_COVERAGE_FRACTION = 0.5` → `0.9` | the gate constant is untested at its own value |
+| `max(1, int(...))` → `max(0, ...)`, and `int` → `round` | threshold arithmetic untested |
+| `coverage >= threshold` → `>` | off-by-one on the coverage gate |
+| `if dollars < 0` → `<= 0` | a legitimate $0 auction row would be rejected as "negative" |
+| **`sorted(ladder, reverse=True)` → `list(ladder)`** | **the ladder sort is entirely untested — see M4** |
+| `.strip().upper()` on the position cell → `.strip()` | a lowercase `qb` in the user's CSV stops resolving |
+| `round(sum, 2)` → `round(sum, 0)` | `MarketValues.total` precision untested |
+| `blocking("teams", ...)` → `pass` | **nothing asserts a team-count mismatch blocks**, though `teams` scales the whole pool |
+| `roster_size < config.draft_rounds` → `< config.roster_size` | equivalent only because the two happen to be 16 today |
+| `starting_slots: sum(...)` → `max(...)` | `LeagueConfig.starting_slots` is referenced by no code and no test |
+
+#### B1 — DI-045's grading boots a league whose every price is wrong (BLOCKING)
+
+Criterion "`draft_rounds` cannot be silently wrong" does not hold. `validate()` emits BLOCKING
+for `starters.*`, `teams`, `budget` and `roster_size < draft_rounds` only; `draft.rounds`
+disagreement is WARNING. Two reproducible payloads:
+
+- **S1** `draft.settings.rounds = 14`, `roster_positions` unchanged at 16. Legal under ADR-0005's
+  own model (14 drafted, 2 waiver spots). Boots with `draft.rounds=14` among four routine
+  warnings, indistinguishable from today's known-stale 15.
+- **S2** roster grown to 18 *and* rounds to 18. Boots with `roster_size=18`, `bench=8`,
+  `draft.rounds=18`.
+
+Priced three ways off the same fixtures:
+
+| rounds | pool_full | $/VORP | QB replacement pts | CeeDee Lamb LIVE $ | Drake Maye LIVE $ |
+|---|---|---|---|---|---|
+| 14 (S1 truth) | 140 | 0.2835 | 247.8 | **34.64** | **22.37** |
+| 16 (what ships) | 160 | 0.1883 | 227.8 | 26.60 | 17.74 |
+| 18 (S2 truth) | 180 | 0.1409 | 212.2 | 22.01 | 14.94 |
+
+All three boards pass all three §4.3 invariants and none raises, because the invariants are
+self-consistent against whatever pool they are given. The user bids $27 on a $35 player all night
+with no error anywhere.
+
+`draft_rounds` is documented as BLOCKING in three places — `config/league.yaml`'s header, the
+`config.py` module docstring, and ADR-0005's decision table — and blocks against nothing. ADR-0005
+contradicts itself: its Consequences section admits "`draft_rounds` cannot block against anything
+at boot". Both compensating controls it offers instead are false:
+
+- *"`make prep` prints the pool size at the top of the board."* There is no `prep` target. The
+  Makefile has `install lint types test ci replay smoke`. `value` is not a target either; the
+  board is reachable only via `python -m draft_intel.cli value`. The string `prep` appears
+  nowhere in the artifact except in ADR-0005 and twice more in `auction_values.csv.example`.
+- *"the ledger already rejects a team exceeding its draftable spots, so a wrong `draft_rounds`
+  surfaces as rejects within the first round of live picks."* `ledger.py:362` alerts only on
+  `filled_slots > total_slots`. That fires on a team's 17th pick — the *end* of the draft, not the
+  first round — and in the S1 direction (configured 16, real 14) it never fires at all.
+
+#### B2 — DI-027's primary use case is defeated by its own coverage gate (BLOCKING)
+
+The module exists because `floor(0.75 × auction_value)` "is NOT computable from the API". End to
+end: a `config/auction_values.csv` was written holding real dollars for exactly the 20 keepers and
+nothing else — the stated purpose. `resolve_market_values` takes the first provider clearing
+`max(1, int(160 × 0.5)) = 80` and discards the rest, so the file is thrown away whole:
+
+```
+source     adp_rank_transfer   [ESTIMATE]
+note       skipped csv: covered 20 of 160 (needs 80) -- read 20 rows from .../auction_values.csv
+!! ... Drop real values in .../auction_values.csv to fix this;
+```
+
+The banner instructs the user to do the thing they have already done. Josh Allen was supplied at
+$48 (correct retention $36); the table printed market $36 / rule $26, computed from our own
+model's ladder reshuffled by ADP — precisely the circularity the module docstring warns against,
+under a column header naming the league's actual rule. `auction_values.csv.example` contradicts
+itself on the same page: "The 20 keepers matter most — they are what the 75% rule prices" and
+"coverage of at least half the 160-player pool is needed before the file is preferred".
+
+#### M1 — a legal CSV crashes the `value` command (MAJOR)
+
+`market.py:232` zips physical file lines against `csv.DictReader` records with `strict=True`. Any
+quoted field containing a newline — routine from a spreadsheet — makes the counts differ:
+
+```
+File ".../quant/market.py", line 232, in market_values
+    rows = list(zip([number for number, _line in kept[1:]], reader, strict=True))
+ValueError: zip() argument 2 is shorter than argument 1
+```
+
+Uncaught, straight out through `resolve_market_values` and `cli.value`. The class docstring
+promises the opposite ("read tolerantly … a row it cannot resolve goes to `unmatched` with the
+reason") and `test_a_missing_file_is_a_note_not_an_exception` establishes that intent.
+
+#### M2 — an Excel-exported CSV silently resolves nothing (MAJOR)
+
+`open(newline="")` uses the default encoding, so a UTF-8 BOM — what Excel's "CSV UTF-8" writes —
+survives into the first header name. `_column` lowercases and strips whitespace but not `\ufeff`,
+so `name` is not found and the file is rejected with `needs either a player_id column or both a
+name and a position column; found \ufeffname, pos, value`. Coverage 0, silent fall-through to the
+estimate. `encoding="utf-8-sig"` is the whole fix. **Still present in the current working tree.**
+
+#### M3 — the printed retention table fails its own stated arithmetic on 5 of 20 rows (MAJOR)
+
+Header: `KEEPER RETENTION CHECK  floor(0.75 * market value), clamped to $1`. The display rounds
+(`f"{value:>9.0f}"`) while the computation truncates (`retention_price(int(value))`), so the two
+columns do not satisfy the relationship the header asserts:
+
+| player | market $ | printed rule $ | floor(0.75 × market $) |
+|---|---|---|---|
+| Christian McCaffrey | 30 | 21 | 22 |
+| George Pickens | 20 | 14 | 15 |
+| Lamar Jackson | 28 | 20 | 21 |
+| Josh Allen | 36 | 26 | 27 |
+| Puka Nacua | 32 | 23 | 24 |
+
+A user checking the tool by hand on draft morning concludes its arithmetic is broken.
+
+#### M4 — the headline ADP claim is false, and the test named for it is a tautology (MAJOR)
+
+Docstring: *"The ladder's shape and its total are preserved exactly, so the sum invariant holds by
+construction."* False whenever fewer players carry a usable ADP than the ladder has rungs — the
+cheapest rungs go unused and the total silently shrinks. Ladder `[50, 30, 20, 10]` (total 110)
+with two of four players at the undrafted sentinel yields total **80**. Today's fixtures hide it
+(400 ranked against 160 rungs) but 196 of 596 projected players already carry no usable
+`adp_2qb`, and `market.total` is printed as if it reconciled.
+
+`test_rank_transfer_preserves_the_ladder_exactly` cannot catch it: with 4 players and a 4-rung
+ladder, `sorted(values, reverse=True) == ladder` and `total == sum(ladder)` are true for *any*
+implementation that hands each of `ladder[0..3]` to a distinct player. Verified by running both
+assertions against a deliberately unsorted ladder — both hold while the mapping is wrong. This is
+also why the `sorted(ladder, reverse=True)` mutant escapes the full suite, and the sort is
+load-bearing: `cli.value` passes the ladder ordered by `baseline_value`, which puts every keeper
+(baseline 0, market value high) at the bottom.
+
+#### Tests that pass for the wrong reason
+
+- **`test_a_thin_file_falls_through…`:** `assert pid not in result.notes` tests membership against
+  a tuple of whole strings, not substrings. A note reading `"...LEAKED PLAYER ID 1"` still
+  satisfies it (verified). The assertion its comment describes — "the reason, not the data, is
+  what carries over" — is not being made.
+- **`test_two_extra_bench_spots_warn_but_do_not_block`:** `assert config.auction_pool == 160, "the
+  priced pool is unmoved by bench depth"`. `config` is loaded from the repo YAML and never
+  re-derived from the mutated `grown` payload, and `validate()` cannot mutate a frozen dataclass,
+  so bench depth has no path to `auction_pool`. It passes under `auction_pool = teams *
+  roster_size` too (both 16). Worse, the assertion's framing is wrong for its own S2 case: with
+  the draft also grown to 18 rounds the pool *should* move to 180, and this test presents the
+  failure as the feature. (`test_draft_rounds_and_roster_size_are_not_the_same_knob` does the real
+  work here and kills that mutant.)
+- **`test_the_equivalence_gate_is_not_vacuous`:** `broken_b` and `const` are the identical
+  expression `state_for(case_a_payload, lambda _p: PickClass.COMPETITIVE)`, compared against
+  `good_a` and `good_b`. Since the test immediately above asserts `good_a == good_b`, the third
+  arm is implied by the second and adds nothing — the same "both arms were the identical
+  expression" defect its own docstring claims to have fixed.
+
+#### Standing audits — all four run, three PASS
+
+- **Numerical sanity: PASS.** Re-derived by hand from the printed baselines. CeeDee Lamb, WR,
+  270.5 pts, WR replacement 128.4 → VORP 142.1 (printed 142.1); market $ = 1 + 142.1 × 0.1883 =
+  27.76 (printed 27.76); live $ = 1 + 142.1 × 0.1802 = 26.60 (printed 26.60). No divergence.
+- **2QB: PASS.** QB base 2 × 10 = 20; 7 QB keepers seated in base slots (no team keeps two, so no
+  FLEX or bench spill); remaining 13. `full_last_drafted` rosters 25 QBs, `live_last_drafted`
+  rosters 18 — difference exactly 7. Replacement points are identical across the two universes
+  (227.8), which is correct rather than suspicious: all 7 QB keepers sit above the cut, so the
+  18th available QB *is* the 25th QB overall.
+- **Keeper double-count: PASS, and the two-sided adjustment is load-bearing.** 20 unique ids out
+  of supply; `keeper_base` sums to 20 with `keeper_flex = keeper_bench = 0`; full-minus-live
+  rostered is `{QB: 7, RB: 6, WR: 7}` summing to exactly 20. Each naive variant was built and
+  produces a materially different QB replacement: supply-only 212.2, demand-only 262.7,
+  double-counted spots (140−20) 247.8, spots-not-reduced 212.2, against the correct 227.8.
+- **Ceremonial-pick contamination: PASS.** Case A (`is_keeper: true`, empty manifest) and Case B
+  (`is_keeper: false`, full manifest) agree on every auction statistic — totals, per-team
+  `(filled_slots, spent, keepers)`, `keeper_spend` 549, and the full 140-entry `competitive_seq`
+  map. Misclassifying **exactly one** ceremonial pick (dropping key `(4, '7564')` from a
+  20-key manifest) is detectable: `keeper_spend` 549 → 513 and `competitive_seq` 140 → 141 entries
+  with a different mapping, while `total_spent` is unchanged. The filter is load-bearing.
+
+#### Claims checked against the code
+
+- **True:** draft start. `real_draft.start_time = 1788656400000` = `2026-09-06T01:00:00Z` =
+  2026-09-05 19:00 at UTC−06:00, and 5 September is MDT. `config.draft_start` matches exactly and
+  warns rather than blocks on drift.
+- **True:** `auction_pool == 160` under both roster readings, and market values do not replace
+  `PlayerValue.market_value` — `board.players[*].market_value` is never written from `market`.
+- **True:** Finding 10's API table. `taxi_slots = 0`, `reserve_slots = 0`, `roster_positions` = 16
+  (10 starters + 6 BN), `draft.settings.rounds` = 15, `total_rosters` = 10.
+- **False:** ADR-0005's decision table (`draft_rounds | BLOCKING`), its `make prep` control, and
+  its ledger control — B1.
+- **False:** the rank transfer "preserves … its total exactly" — M4.
+
+#### Minor
+
+- `LeagueConfig.starting_slots` is referenced by no code and no test.
+- `cli.value()` has no identity-completeness guard, unlike `cli.smoke()`. If an owner fails to
+  resolve to a draft slot their keepers leave **supply** (via `keeper_ids`) but not **demand**
+  (`positions_by_slot` skips `slot is None`) — the exact asymmetry §4.2 singles out. Dropping one
+  owner moves remaining QB slots 13 → 14 and Lamb $26.60 → $27.13, invariants still passing.
+- The retention table prints `loaded: unset` for all 20 keepers while the same run reports
+  `keeper spend $549`; the two read different sources (`keepers.yaml` prices vs `picks.json`).
+- `MIN_COVERAGE_FRACTION`, `ADP_SENTINEL` and the threshold arithmetic have no test pinning their
+  values or boundaries (see the mutation table).
+- No test asserts that a `teams` mismatch blocks, though `teams` scales the entire pool.
+- A lowercase position cell (`qb`) in the user's CSV is unhandled by any test.
+
+#### Minimum bar to re-submit
+
+1. `draft_rounds` must block when the API corroborates a value against the config, and ADR-0005's
+   two false compensating controls must be struck, not quietly dropped. A test must build the S1
+   payload (`rounds=14`, roster 16) and assert the boot is refused.
+2. Real auction values must survive regardless of how many there are — the 20 keepers are the
+   stated use case. If providers layer, provenance must remain answerable per player.
+3. The CSV reader must not raise on any input; the newline case and the BOM case both need tests.
+4. Fix the docstring or the code on ladder-total preservation, and replace
+   `test_rank_transfer_preserves_the_ladder_exactly` with one that can fail — unequal ladder and
+   field lengths, and an unsorted ladder in.
+5. Make the printed `rule $` equal `floor(0.75 × printed market $)` for every row.
+6. Replace the three assertions listed under "tests that pass for the wrong reason" with
+   assertions that can fail.
+
+
 ### [DI-EVAL-3] Sprint 1 gate — adversarial re-evaluation of `di-044-round2-fixes`
 
 - **Verdict: REJECTED.** 1 blocking, 4 major, 4 minor. **This is the third eval rejection**, and
@@ -991,7 +1229,17 @@ append to. Written to schema here, retroactively for the cards already built.
   - [x] ADR-0005; the 18-vs-16 contradiction flagged as Finding 10 rather than resolved silently
 - **Reviewer verdict:** REJECT (round 1) — B1, `draft_rounds` documented as blocking in three
   places and blocking against nothing. Closed in DI-046.
-- **Evaluator verdict:** pending.
+- **Evaluator verdict: REJECTED** (DI-EVAL-4, artifact `di-027-market-value-provider` @ `c9eb210`).
+  Criteria 1, 2, 3, 5 and 6 independently confirmed by running the artifact; criterion 4
+  (`draft_rounds` cannot be silently wrong) is **false in the artifact**. Two payloads were built
+  that boot clean and price the board wrongly: `draft.settings.rounds = 14` with an unchanged
+  16-slot roster (a legal ADR-0005 league: 14 drafted, 2 from waivers) boots with a WARNING and
+  prices CeeDee Lamb at $26.60 against a correct $34.64 — a 23% under-price on the top asset,
+  with all three §4.3 invariants passing because they are self-consistent against whatever pool
+  they are handed. ADR-0005's two compensating controls are both false: `make prep` is not a
+  Makefile target anywhere in the repo, and the ledger's slot cap (`filled_slots > total_slots`)
+  fires only at the *end* of a draft and never at all when the configured figure exceeds reality.
+  Full detail in DI-EVAL-4.
 
 ### [DI-027] `MarketValueProvider` + the auction-value ingest path
 
@@ -1013,7 +1261,18 @@ append to. Written to schema here, retroactively for the cards already built.
 - **Reviewer verdict:** REJECT (round 1) — M2 crash on a legal CSV, M3 diagnostics discarded,
   M4 false docstring claim, M5 unreproducible arithmetic, M6 gate defeats the primary use case.
   All closed in DI-046.
-- **Evaluator verdict:** pending.
+- **Evaluator verdict: REJECTED** (DI-EVAL-4, artifact `di-027-market-value-provider` @ `c9eb210`).
+  Criteria 1-5 confirmed by running the artifact. Criterion 7 (supplying only the 20 keeper
+  values is useful) is **false**: a `config/auction_values.csv` holding real dollars for exactly
+  the 20 keepers is discarded whole (`skipped csv: covered 20 of 160 (needs 80)`), the board keeps
+  its `[ESTIMATE]` badge, and the retention table prints prices derived from our own model's
+  ladder — Josh Allen supplied at $48 (rule $36) printed as $36 / rule $26. Criterion 6 was not
+  reachable as stated: a legal RFC-4180 CSV with a quoted embedded newline raises an uncaught
+  `ValueError: zip() argument 2 is shorter than argument 1` out of `market.py:232` and takes the
+  whole `value` command down. The module docstring's central claim — the rank transfer "preserves
+  the ladder's shape and its total exactly, so the sum invariant holds by construction" — is false
+  whenever fewer players carry a usable ADP than the ladder has rungs (demonstrated: $110 ladder
+  in, $80 out), and the test named for that property cannot detect it. Full detail in DI-EVAL-4.
 
 ### [DI-031] Keeper surplus board + structural `keeper_inflation`
 
@@ -1047,6 +1306,60 @@ append to. Written to schema here, retroactively for the cards already built.
   `forward_positional_inflation` exists only to pin the degeneracy under test.
 - **Reviewer verdict:** pending.
 - **Evaluator verdict:** pending.
+
+### [DI-047] Close adversarial evaluation round 1 findings
+
+- **Sprint:** 2 · **Owner:** orchestrator · **Size:** M · **Branch:** `di-047-eval-round1-fixes`
+- **Context:** DI-EVAL-4 evaluated `c9eb210`, which predates DI-046, so its B1/B2/M1/M3/M4
+  substantially match code review's B1/M2/M4/M5/M6 and were already closed. Reached
+  independently, which is corroboration rather than duplication. What follows is what DI-046
+  did **not** close.
+- **Acceptance criteria:**
+  - [x] **M2 (new)** Excel writes a byte-order mark on every CSV it exports. Read as plain
+        utf-8 it arrives glued to the first header name, so `name` becomes `\ufeffname`, the
+        column lookup finds nothing, and a file with every value correct resolves zero rows
+        under a message blaming the columns. `encoding="utf-8-sig"`.
+  - [x] **B1 survivor (new)** DI-046's rule blocked only when the two API fields *agreed*. The
+        evaluator's payload — `draft.settings.rounds = 14` against a 16-slot roster, a legal
+        ADR-0005 league — still only warned, and that warning is indistinguishable from the
+        known-stale 15 among three other routine ones. `draft_rounds_api_known_stale` records
+        the *one* value we have diagnosed; any other value blocks, because "probably stale too"
+        is a guess about the field that scales every price.
+  - [x] **Four tests that passed for the wrong reason**, all of the shape this project keeps
+        producing:
+        - `test_rank_transfer_preserves_the_ladder_exactly` — 4 players against 4 rungs holds
+          for any implementation assigning the rungs to distinct players. Every ladder in the
+          suite was already sorted descending, so removing `sorted(..., reverse=True)` changed
+          nothing — and that sort is load-bearing, because `cli.value` hands in a list ordered
+          by `baseline_value`, which puts every keeper at the bottom at $0.
+        - `test_a_thin_file_falls_through…` — `assert pid not in result.notes` is whole-element
+          membership on a tuple of strings; a note reading `"...LEAKED <pid>"` satisfies it.
+          (Already replaced in DI-046 when the gate was removed.)
+        - `test_two_extra_bench_spots_warn_but_do_not_block` — `config.auction_pool == 160` read
+          a config the mutated payload never touched, so it passed under `teams * roster_size`
+          too. Now compares two configs that actually differ in roster capacity.
+        - `test_the_equivalence_gate_is_not_vacuous` — `broken_b` and `const` were the identical
+          expression, under a comment claiming the duplication had been fixed. Since
+          `good_a == good_b` is asserted elsewhere, the third arm was implied by the second. The
+          third arm now finds the *right number* of keepers and the *wrong ones*, which is the
+          failure a count-based check cannot see.
+  - [x] **Mutation escapes** closed with tests that pin the boundary rather than a value far
+        from it: `ADP_SENTINEL` 900→100 and `>=`→`>` (parametrised at 499 / 899 / 900);
+        `dollars < 0`→`<= 0` ($0 is a legal price, a negative one is a typo); the position
+        cell's `.upper()`; `blocking("teams", …)`; `starting_slots` `sum`→`max`.
+  - [x] **20/20 mutation-verified**, including the corroboration branch, which a first pass
+        showed to be unreachable — every existing test reached its block through the
+        undiagnosed branch instead, so deleting the corroboration check left the suite green.
+- **Evaluator's three standing audits: PASS**, independently re-derived — numerical sanity
+  (Lamb 270.5 − 128.4 = 142.1 VORP, 1 + 142.1×0.1802 = 26.60, matching the printed board), the
+  2QB keeper adjustment (full 25 QBs rostered, live 18, difference exactly 7), and keeper
+  double-counting (all four naive variants built and shown to diverge: 212.2 / 262.7 / 247.8 /
+  212.2 against the correct 227.8).
+- **Not reproduced:** the evaluator read `int`→`round` and `MIN_COVERAGE_FRACTION` 0.5→0.9 and
+  `max(1,…)`→`max(0,…)` as escapes. All three concern the coverage gate, which DI-046 removed
+  when it made providers layer; the constant is now reported rather than enforced.
+
+---
 
 ### [DI-046] Close review round 1 findings
 

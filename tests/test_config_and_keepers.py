@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -280,7 +281,13 @@ def test_two_extra_bench_spots_warn_but_do_not_block(real_league, real_draft):
     fields = {w.field for w in warnings}
     assert "roster_size" in fields
     assert "bench" in fields
-    assert config.auction_pool == 160, "the priced pool is unmoved by bench depth"
+
+    # The pool assertion has to compare two configs that differ in roster capacity, or it says
+    # nothing: reading `config.auction_pool` off a config the mutated payload never touched
+    # passes for any implementation, including one computing `teams * roster_size`.
+    grown_config = replace(config, roster_size=18, bench=8)
+    assert grown_config.auction_pool == config.auction_pool == 160
+    assert grown_config.roster_size != config.roster_size
 
 
 def test_a_roster_too_small_to_seat_the_draft_refuses_to_start(real_league, real_draft):
@@ -440,3 +447,86 @@ def test_an_unparseable_start_time_warns_rather_than_raising(real_league, real_d
     drift = [w for w in warnings if w.field == "draft.start_time"]
     assert len(drift) == 1
     assert "unparseable" in str(drift[0].actual)
+
+
+# ------------------------- mutation escapes found by the adversarial evaluator (DI-047)
+
+
+def test_an_undiagnosed_rounds_value_blocks_even_though_the_api_disagrees_with_itself(
+    real_league, real_draft
+):
+    """The evaluator's payload, which survived the DI-046 fix.
+
+    `draft.settings.rounds = 14` against a 16-slot roster is a legal ADR-0005 league: 14 drafted,
+    two waiver spots. The API disagrees with itself, so the DI-046 rule warned -- and that warning
+    is indistinguishable from the known-stale 15, sitting among three other routine ones. The
+    board then priced a 160-spot pool for a 140-pick draft, moving the top of the board by around
+    30%, with all three §4.3 invariants passing because they are self-consistent against whatever
+    pool they are handed.
+
+    A number we have no account of is not a diagnosed discrepancy, and must not be treated as one.
+    """
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    draft = json.loads(json.dumps(real_draft))
+    draft["settings"]["rounds"] = 14
+
+    with pytest.raises(ConfigMismatch, match="draft_rounds"):
+        assert_startable(validate(config, real_league, draft))
+
+
+def test_the_one_diagnosed_stale_value_still_only_warns(real_league, real_draft):
+    """Finding 1's discrepancy is understood. Blocking on it takes the tool down tonight."""
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    assert config.draft_rounds_api_known_stale == real_draft["settings"]["rounds"] == 15
+    warnings = assert_startable(validate(config, real_league, real_draft))  # must not raise
+    assert any(w.field == "draft.rounds" for w in warnings)
+
+
+def test_clearing_the_known_stale_value_makes_every_disagreement_block(real_league, real_draft):
+    """What the config should look like once DI-004 lands and the re-save is confirmed."""
+    config = replace(
+        load_league_config(ROOT / "config" / "league.yaml"), draft_rounds_api_known_stale=None
+    )
+    with pytest.raises(ConfigMismatch, match="draft_rounds"):
+        assert_startable(validate(config, real_league, real_draft))
+
+
+def test_a_changed_team_count_refuses_to_start(real_league, real_draft):
+    """`teams` multiplies both the budget pool and the priced pool. Previously unasserted."""
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    tampered = {**real_league, "total_rosters": 12}
+    with pytest.raises(ConfigMismatch, match="teams"):
+        assert_startable(validate(config, tampered, real_draft))
+
+
+def test_starting_slots_is_the_sum_of_the_starters_not_the_largest_one():
+    """Ten starters, of which the largest single position is two. `max` gives 2, `sum` gives 10,
+    and the difference is the entire starting lineup."""
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    assert config.starting_slots == 10
+    assert config.starting_slots != max(config.starters.values())
+
+
+def test_corroboration_blocks_even_a_value_recorded_as_diagnosed_stale(real_league, real_draft):
+    """The corroboration branch, isolated. A mutation run found it unreachable.
+
+    Every earlier test reached a block through the *undiagnosed* branch instead, so removing the
+    corroboration check entirely left the suite green. The two rules genuinely differ in one
+    case: a value that was recorded as diagnosed-stale, and which `roster_positions` has since
+    grown to agree with. The diagnosis is stale itself at that point -- two independent API
+    fields now say the same thing and our config is the odd one out.
+
+    Roster size is 18 here so that the roster-too-small rule cannot supply the block instead,
+    which is how this test would otherwise have passed for the wrong reason as well.
+    """
+    config = replace(
+        load_league_config(ROOT / "config" / "league.yaml"), draft_rounds_api_known_stale=18
+    )
+    league = _league_with(real_league, rounds_in_roster=18)
+    draft = json.loads(json.dumps(real_draft))
+    draft["settings"]["rounds"] = 18
+
+    issues = validate(config, league, draft)
+    blocking = [i for i in issues if i.severity == Severity.BLOCKING]
+    assert [i.field for i in blocking] == ["draft_rounds"], blocking
+    assert "corroborated" in blocking[0].source

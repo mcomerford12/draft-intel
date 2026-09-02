@@ -265,7 +265,12 @@ class CsvMarketValues:
                 notes=(f"no auction-value file at {self.path}",),
             )
 
-        with self.path.open(newline="") as handle:
+        # `utf-8-sig`, not `utf-8`. Excel writes a byte-order mark on every CSV it exports, and
+        # plain utf-8 delivers it as a `﻿` glued to the front of the first header name --
+        # so `name` arrives as `﻿name`, the column lookup finds nothing, and a file with
+        # every value correct resolves zero rows. Stripping whitespace does not remove it.
+        # `newline=""` stays: csv does its own line handling and must keep it.
+        with self.path.open(newline="", encoding="utf-8-sig") as handle:
             header, rows = _read_records(handle)
 
         fields = header or []

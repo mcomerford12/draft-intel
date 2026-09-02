@@ -677,3 +677,91 @@ def test_players_absent_from_the_adp_payload_are_counted_as_uncovered():
     result = AdpMarketValues(payload, [50.0, 30.0]).market_values(players)
 
     assert any("1 of 2 priced players carry no usable adp_2qb" in note for note in result.notes)
+
+
+# ------------------- mutation escapes found by the adversarial evaluator (DI-047)
+
+
+def test_an_excel_byte_order_mark_does_not_swallow_the_first_column(
+    tmp_path, players, unique_names
+):
+    """Excel writes a BOM on every CSV it exports.
+
+    Read as plain utf-8 it arrives glued to the front of the first header name, so `name`
+    becomes `﻿name`, the column lookup finds nothing, and a file with every value correct
+    resolves zero rows under a message blaming the columns. Stripping whitespace does not
+    remove it; the encoding has to.
+    """
+    pid, name, pos = unique_names[0]
+    path = tmp_path / "v.csv"
+    path.write_text(f"name,pos,value\n{name},{pos},25\n", encoding="utf-8-sig")
+
+    result = CsvMarketValues(path, players).market_values([])
+
+    assert result.values == {pid: 25.0}
+    assert not [note for note in result.notes if "no value column" in note]
+
+
+def test_the_ladder_is_sorted_before_it_is_assigned():
+    """The sort is load-bearing and every earlier test handed in an already-sorted ladder.
+
+    `cli.value` passes the board's `market_value` list, which is ordered by `baseline_value` --
+    putting every keeper, at $0, at the bottom. Without the sort the best ADP player is paid
+    whatever happens to be first in that list.
+    """
+    unsorted = [10.0, 50.0, 30.0]
+    payload = [
+        {"player_id": "best", "stats": {"adp_2qb": 1.0}},
+        {"player_id": "mid", "stats": {"adp_2qb": 2.0}},
+        {"player_id": "worst", "stats": {"adp_2qb": 3.0}},
+    ]
+    players = [proj(pid, pid, "RB", 1.0) for pid in ("best", "mid", "worst")]
+
+    result = AdpMarketValues(payload, unsorted).market_values(players)
+
+    assert result.values == {"best": 50.0, "mid": 30.0, "worst": 10.0}
+
+
+@pytest.mark.parametrize(("adp", "ranked"), [(499.0, True), (899.0, True), (900.0, False)])
+def test_the_sentinel_boundary_is_exactly_where_it_says_it_is(adp, ranked):
+    """Pins both the threshold value and the comparison.
+
+    A test using only 999 passes with the sentinel set anywhere below it, and a test using only
+    values far from the boundary passes whether the comparison is `>=` or `>`.
+    """
+    payload = [{"player_id": "a", "stats": {"adp_2qb": adp}}]
+    result = AdpMarketValues(payload, [50.0]).market_values([proj("a", "A", "RB", 1.0)])
+    assert ("a" in result.values) is ranked
+
+
+def test_a_free_player_is_a_legal_value_and_a_negative_one_is_not(tmp_path, players, unique_names):
+    """$0 means a player nobody bid on, which happens. It is not the same as a typo."""
+    pid, name, pos = unique_names[0]
+    other_pid, other_name, other_pos = unique_names[1]
+    path = write_csv(tmp_path / "v.csv", [f"{name},{pos},0", f"{other_name},{other_pos},-1"])
+
+    result = CsvMarketValues(path, players).market_values([])
+
+    assert result.values == {pid: 0.0}
+    assert other_pid not in result.values
+    assert len(result.unmatched) == 1
+
+
+@pytest.mark.parametrize("written", ["qb", "Qb", " qb "])
+def test_a_position_typed_in_lower_case_still_resolves(tmp_path, players, written):
+    """A hand-built file will not respect Sleeper's capitalisation, and the normalisation that
+    handles that was previously unasserted."""
+    quarterbacks = [
+        (pid, f"{p['first_name']} {p['last_name']}")
+        for pid, p in sorted(players.items())
+        if p.get("position") == "QB"
+    ]
+    counts: dict[str, int] = {}
+    for p in players.values():
+        full = f"{p.get('first_name') or ''} {p.get('last_name') or ''}".strip()
+        counts[full] = counts.get(full, 0) + 1
+    pid, name = next((pid, n) for pid, n in quarterbacks if counts[n] == 1)
+
+    path = write_csv(tmp_path / "v.csv", [f"{name},{written},25"])
+
+    assert CsvMarketValues(path, players).market_values([]).values == {pid: 25.0}

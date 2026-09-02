@@ -139,16 +139,31 @@ def test_the_equivalence_gate_is_not_vacuous(payload, classifier):
     assert broken_a.keeper_spend() == 0
     assert len(broken_a.competitive_seq) == 160
 
-    # Case B with is_keeper set but the manifest emptied. Distinct from broken_a: that one
-    # strips is_keeper, this one keeps it and removes the manifest. Both arms were previously
-    # the identical expression, so this half of the test asserted nothing.
+    # Case A payload with a constant classifier: the is_keeper flag is present and ignored.
     broken_b = state_for(case_a_payload, lambda _p: PickClass.COMPETITIVE)
     assert broken_b.model_dump() != good_a.model_dump()
     assert broken_b.keeper_spend() == 0
 
-    # A constant classifier must not satisfy the gate.
-    const = state_for(case_a_payload, lambda _p: PickClass.COMPETITIVE)
-    assert const.model_dump() != good_b.model_dump()
+    # A classifier that finds the WRONG twenty keepers. Distinct from both arms above, which
+    # find *none*: this one finds exactly the right number of keepers and the wrong ones, which
+    # is the failure a count-based check cannot see.
+    #
+    # A previous version had this arm as the identical expression to `broken_b`, under a comment
+    # claiming the duplication had been fixed. Since `good_a == good_b` is asserted by the test
+    # above, the third assertion was implied by the second and could never fail independently.
+    not_keepers = sorted(p["pick_no"] for p in payload if p["pick_no"] not in KEEPER_PICK_NOS)
+    wrong_twenty = frozenset(sorted(KEEPER_PICK_NOS)[:10]) | frozenset(not_keepers[:10])
+    mislabelled = state_for(
+        case_a_payload,
+        lambda pick: PickClass.KEEPER if pick.pick_no in wrong_twenty else PickClass.COMPETITIVE,
+    )
+    assert len(wrong_twenty) == 20, "the same COUNT of keepers, ten of them the wrong picks"
+    assert mislabelled.model_dump() != good_b.model_dump()
+    assert mislabelled.keeper_spend() != EXPECTED_KEEPER_SPEND
+    assert len(mislabelled.competitive_seq) == 140, (
+        "the count matches while the membership does not -- exactly the failure the gate has "
+        "to catch by comparing derived state rather than by counting"
+    )
 
 
 def test_misclassification_is_detectable(payload, classifier):
