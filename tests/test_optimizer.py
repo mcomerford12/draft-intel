@@ -21,6 +21,7 @@ import pytest
 from draft_intel.quant.optimizer import (
     DEFAULT_BENCH_WEIGHT,
     Candidate,
+    _prune,
     best_roster,
     marginal_value,
 )
@@ -265,6 +266,41 @@ def test_forcing_a_player_the_budget_cannot_cover_is_infeasible_not_wrong():
     )
     assert result.objective == float("-inf")
     assert any("INFEASIBLE" in note for note in result.notes)
+
+
+# ------------------------------------------------------- the pruning contract itself
+#
+# `_prune` is private and by design invisible from outside: a correct prune never changes the
+# answer, so no assertion about `best_roster`'s output can see it working. Two mutations proved
+# that -- disabling the slot-aware rule entirely, and letting the cap overrun by one, both
+# survived the whole suite. Neither can produce a wrong roster, which is why they escaped; both
+# break the contract the module documents and the latency budget (§4.7b) depends on. Pinned here
+# directly, on the helper, because that is the only place they are observable.
+
+
+def test_dominance_requires_max_take_better_players_not_just_one():
+    """Five $1 backs, strictly ordered. With three slots to fill, "one player beats you" is not
+    enough to be useless -- the two ahead of you can both be bought at once and the roster still
+    needs a third. Pruning on a single dominator left boards that could not fill their slots."""
+    pool = [player(f"r{i}", "RB", 10.0 - i, 1) for i in range(5)]
+    kept, capped = _prune(pool, cap=100, max_take=3)
+    assert not capped
+    assert [c.player_id for c in kept] == ["r0", "r1", "r2"], "exactly max_take survive"
+
+    # ...and the rule is genuinely a rule, not a no-op: with one slot, only the best survives.
+    assert [c.player_id for c in _prune(pool, cap=100, max_take=1)[0]] == ["r0"]
+
+
+def test_the_cap_is_honoured_exactly():
+    """The cap is the latency knob §4.7b's 200ms budget is bought with. Returning cap+1 is not
+    a rounding detail, it is the knob not doing what its caller asked."""
+    # A full Pareto frontier -- pay more, score more -- so dominance prunes nothing and the cap
+    # is the only thing standing between the DP and thirty candidates at one position.
+    pool = [player(f"w{i}", "WR", float(i), i + 1) for i in range(30)]
+    kept, capped = _prune(pool, cap=6, max_take=3)
+    assert capped
+    assert len(kept) == 6
+    assert len({c.player_id for c in kept}) == 6, "no duplicates from the reserve merge"
 
 
 def test_the_candidate_cap_never_makes_a_buyable_board_look_infeasible():
