@@ -222,6 +222,75 @@ def realized_positional_inflation(
     return out
 
 
+class InflationStep(BaseModel):
+    """One competitive pick, with the room's state on both sides of it.
+
+    The two are different numbers and confusing them biases every downstream figure in one
+    direction. ``before`` is what the room was actually bidding against when this player was on
+    the block; ``after`` is the state the pick left behind. A skew figure judged against
+    ``after`` measures the pick partly against its own effect, which flatters an overpay and
+    penalises a bargain.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    competitive_seq: int
+    player_id: str
+    amount: int
+    before: Inflation
+    after: Inflation
+
+
+def walk_inflation(
+    state: DerivedState,
+    board: Mapping[str, PlayerValue],
+    *,
+    total_budget: int,
+    total_slots: int,
+    keeper_spend: int,
+    keeper_slots: int,
+) -> list[InflationStep]:
+    """Replay the competitive picks, recomputing inflation on both sides of each one.
+
+    Keyed on ``competitive_seq`` and never on ``pick_no``. In Case B the ceremonial picks hold
+    ``pick_no`` 1-20 and shift every competitive pick by 20, so a series drawn against
+    ``pick_no`` differs between the two cases and the blocking Case A/B equivalence gate fails.
+    Recomputed wholesale on every fold; ``competitive_seq`` values are never persisted.
+
+    Args:
+        keeper_spend: ΣK. Charter §4.5 counts keeper money as spent and keeper picks as filled
+            slots, so both are subtracted from the starting position rather than ignored.
+        keeper_slots: Roster spots the keepers occupy.
+    """
+    money = total_budget - keeper_spend
+    slots = total_slots - keeper_slots
+    taken: set[str] = set()
+
+    def remaining() -> list[PlayerValue]:
+        return [
+            player
+            for player_id, player in board.items()
+            if player_id not in taken and not player.is_keeper
+        ]
+
+    steps: list[InflationStep] = []
+    for seq, player_id, amount in competitive_picks(state):
+        before = market_inflation(remaining(), remaining_money=money, remaining_slots=slots)
+        money -= amount
+        slots -= 1
+        taken.add(player_id)
+        steps.append(
+            InflationStep(
+                competitive_seq=seq,
+                player_id=player_id,
+                amount=amount,
+                before=before,
+                after=market_inflation(remaining(), remaining_money=money, remaining_slots=slots),
+            )
+        )
+    return steps
+
+
 def inflation_curve(
     state: DerivedState,
     board: Mapping[str, PlayerValue],
@@ -233,36 +302,20 @@ def inflation_curve(
 ) -> list[tuple[int, float]]:
     """``(competitive_seq, inflation)`` after each competitive pick, for charting.
 
-    Keyed on ``competitive_seq`` and never on ``pick_no``. In Case B the ceremonial picks hold
-    ``pick_no`` 1-20 and shift every competitive pick by 20, so a curve drawn against ``pick_no``
-    differs between the two cases and the blocking Case A/B equivalence gate fails. The curve is
-    recomputed wholesale on every fold; ``competitive_seq`` values are never persisted.
-
-    Args:
-        keeper_spend: ΣK. Charter §4.5 counts keeper money as spent and keeper picks as filled
-            slots, so both are subtracted from the starting position rather than ignored.
-        keeper_slots: Roster spots the keepers occupy.
+    The *after* figure, because a chart of the room's state should show where each pick left it.
+    Skew uses :attr:`InflationStep.before` instead; see :class:`InflationStep`.
     """
-    money = total_budget - keeper_spend
-    slots = total_slots - keeper_slots
-    taken: set[str] = set()
-    curve: list[tuple[int, float]] = []
-    for seq, player_id, amount in competitive_picks(state):
-        money -= amount
-        slots -= 1
-        taken.add(player_id)
-        available = [
-            player
-            for player_id_, player in board.items()
-            if player_id_ not in taken and not player.is_keeper
-        ]
-        curve.append(
-            (
-                seq,
-                market_inflation(available, remaining_money=money, remaining_slots=slots).inflation,
-            )
+    return [
+        (step.competitive_seq, step.after.inflation)
+        for step in walk_inflation(
+            state,
+            board,
+            total_budget=total_budget,
+            total_slots=total_slots,
+            keeper_spend=keeper_spend,
+            keeper_slots=keeper_slots,
         )
-    return curve
+    ]
 
 
 def forward_positional_inflation(
