@@ -172,9 +172,16 @@ settings re-save.
 
 ## Finding 11 — the public draft object carries the live nomination, which §2's ⛔ Hard Constraint says has no public feed
 
-**⚠️ ORCHESTRATOR DECISION REQUIRED. Flagged, not resolved.** Charter §1 says that where two
-passages contradict, the contradiction is surfaced rather than picked between. This is a charter
-passage contradicting observed data, which is the same situation with more at stake.
+**✅ DECIDED 2026-09-02: the manual layer is retained. Capture is carded as DI-052.** Charter §1
+says that where two passages contradict, the contradiction is surfaced rather than picked
+between. This was a charter passage contradicting observed data, which is the same situation
+with more at stake, so it was escalated rather than resolved in code. The orchestrator's answer:
+**§2's hybrid architecture stands unchanged** — the manual entry layer remains the live
+nomination path, and nothing on draft night depends on the fields below.
+
+What the finding is still worth is recorded separately: the same fields can be *logged*
+alongside the picks poll without being relied upon, which is what DI-052 covers. That is
+additive and reversible; the decision above is what keeps it from becoming load-bearing.
 
 Charter §2:184, under "⛔ The Hard Constraint — read this twice", states there is no public
 endpoint for, among other things, *the player currently on the block*, *the current high bid*,
@@ -207,11 +214,12 @@ decision:
   "there is no feed" and "there is a lossy feed worth cross-checking the operator against" are
   different architectures.
 
-**Not proposed here, and no code added.** Reading this field is within the ToS constraint (it is
-the documented REST object, not the internal websocket, which remains out of scope and
-untouched), but building on an undocumented, unstable field on draft night is exactly the risk
-§2 was written to avoid. Recorded so the decision is made deliberately rather than by whoever
-next reads the fixture.
+**Decided.** Reading this field is within the ToS constraint (it is the documented REST object,
+not the internal websocket, which remains out of scope and untouched), but building on an
+undocumented, unstable field on draft night is exactly the risk §2 was written to avoid — and
+that risk is why the manual layer stays. DI-052 logs the fields as an observation feed only:
+nothing reads them back on the night, so a shape change or a missed sample degrades a Sprint 3
+analysis rather than the live cockpit.
 
 ---
 

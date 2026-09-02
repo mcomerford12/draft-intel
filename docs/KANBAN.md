@@ -1931,12 +1931,13 @@ append to. Written to schema here, retroactively for the cards already built.
         auction value, so `rule implies` is applied to the market *provider's* consensus. Both
         are right in their own terms and neither was derivable from the other on the page. Both
         columns are now shown and labelled.
-- **⚠️ ESCALATED, NOT RESOLVED — api-findings Finding 11.** The public draft object carries
-  `nominating_slot`, `nominated_player_id`, `offering_slot`, `offering_user_id` and
+- **⚠️ ESCALATED — api-findings Finding 11. ✅ ANSWERED 2026-09-02.** The public draft object
+  carries `nominating_slot`, `nominated_player_id`, `offering_slot`, `offering_user_id` and
   `highest_offer`. Three of those are things charter §2's ⛔ Hard Constraint states have no
   public feed, and the entire hybrid manual-entry architecture is derived from that claim. No
-  code added and no architecture changed: it is an orchestrator decision, and it has a deadline,
-  because the history cannot be recovered after the fact.
+  code was added and no architecture changed here; it was put to the orchestrator, whose answer
+  is **the manual layer is retained and §2's hybrid architecture stands**. The observation value
+  is carded separately and non-load-bearing as **DI-052**.
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending (round 3 not commissioned).
 
 ### [DI-051] Solve the walk-away curve as one DP read at many budgets
@@ -1955,6 +1956,40 @@ append to. Written to schema here, retroactively for the cards already built.
   - [ ] the curve is exact against the current implementation on the real board, every point
   - [ ] `top=25` precompute fits inside a 30s between-picks window at 8 open slots
   - [ ] the 14-slot case is stated honestly if it still does not fit, rather than tuned around
+
+### [DI-052] Log the live nomination feed as observation only
+
+- **Sprint:** 3 · **Owner:** data-engineer · **Size:** S · **Dep:** DI-050
+- **Decision that produced this card (2026-09-02):** api-findings Finding 11 established that the
+  public draft object carries `nominating_slot`, `nominated_player_id`, `offering_slot`,
+  `offering_user_id` and `highest_offer` — three of them things charter §2's ⛔ Hard Constraint
+  states have no public feed. Escalated rather than resolved, per §1. **The orchestrator's answer
+  is that §2's hybrid architecture stands: the manual entry layer is retained as the live
+  nomination path.** This card is the residue — the observation value, with none of the
+  dependency.
+- **The distinction this card exists to hold.** Logged, never read back on the night. Nothing in
+  the cockpit, the optimizer, or the ledger may consume these fields, so a shape change, a
+  rename, or a missed sample degrades a Sprint 3 analysis and cannot touch live bidding. That is
+  what makes building on an undocumented field acceptable here and unacceptable in §2's sense:
+  the risk §2 was written against is *dependency*, not *observation*.
+- **Why it is small.** `SleeperClient.draft()` already fetches this object and the poller already
+  runs on a 1s floor. The work is a second call beside the picks poll, an event type, and a
+  dedupe on `(nominating_slot, nominated_player_id)` so an unchanged nomination is not re-logged
+  every second.
+- **⏳ The deadline is the draft itself.** These fields are a single live slot, overwritten by the
+  next nomination, and the picks feed carries no nominator — confirmed across all 160 mock picks.
+  So the history exists only if it is recorded as it happens. Not done before the first
+  nomination on 9/5 means §4.6's fifth manager tendency stays unavailable for this draft, which
+  is the status quo and an acceptable outcome; it is stated here so that is a choice rather than
+  a discovery.
+- **Acceptance criteria:**
+  - [ ] nomination samples appended to the event log, keyed on `draft_slot` per D1
+  - [ ] deduped: one event per distinct nomination, not one per poll
+  - [ ] **no read path** — a test asserts the ledger, optimizer and cockpit are unchanged when
+        the feed is absent, malformed, or renamed
+  - [ ] a missing or reshaped field logs a warning and is otherwise inert; never raises
+  - [ ] DI-037's `Profile.unavailable` string updated only once real samples exist, never before
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
 ---
 
