@@ -1,0 +1,45 @@
+name,pos,team,player_id,value
+# ---------------------------------------------------------------------------------------
+# HOW TO GET AUCTION VALUES TO THE TOOL
+#
+# Copy this file to `config/auction_values.csv` and fill it in. The tool reads that path
+# automatically; this .example file is never read.
+#
+# WHY IT IS NEEDED
+#   Sleeper publishes no auction-value field over REST (docs/api-findings.md, Finding 3).
+#   Every ADP variant is there; there is no `auction`, `auction_value`, `dollar` or `price`
+#   key anywhere in the projections payload. So the league's own keeper rule --
+#   floor(0.75 * sleeper_auction_value) -- references a number the API will not give us.
+#   Without this file, keeper prices are estimates and every figure derived from them is
+#   badged as an estimate.
+#
+# COLUMNS
+#   value      REQUIRED. Dollars. `47`, `$47`, `47.0` and `1,200` all parse.
+#   name + pos REQUIRED unless player_id is given. Position is confirmed against Sleeper's
+#              map, and that confirmation is not decoration: Sleeper carries a guard named
+#              Josh Allen alongside the Buffalo quarterback, and a cornerback named Lamar
+#              Jackson alongside the Baltimore one. Name-only matching attaches the value to
+#              the wrong player silently.
+#   player_id  OPTIONAL. Wins over name resolution when present. This is the escape hatch
+#              for a collision the name and position cannot resolve between them.
+#   team       OPTIONAL, ignored. Included because exports usually carry it.
+#
+# Column names are matched case-insensitively and across the obvious synonyms, so a file
+# exported from somewhere else will usually just work: `player`/`name`/`player_name`,
+# `pos`/`position`, `value`/`price`/`auction`/`cost`/`$`.
+#
+# WHAT HAPPENS TO ROWS THAT DO NOT RESOLVE
+#   They are reported, never dropped. Run `make prep` and any unresolvable row is printed
+#   with its line number and the reason. A row that quietly vanished would understate
+#   coverage and silently omit a player from the keeper-price check.
+#
+# HOW COMPLETE DOES IT NEED TO BE?
+#   The 20 keepers matter most -- they are what the 75% rule prices. Beyond that, coverage of
+#   at least half the 160-player pool is needed before the file is preferred over the
+#   fallbacks; below that the tool says so and falls through rather than pricing a board off
+#   a handful of rows.
+#
+# Delete these comment lines before use if your spreadsheet dislikes them; the reader skips
+# any row whose value column will not parse, and reports it, so leaving them is harmless but
+# noisy.
+# ---------------------------------------------------------------------------------------

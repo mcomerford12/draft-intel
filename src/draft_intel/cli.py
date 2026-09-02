@@ -22,8 +22,14 @@ from draft_intel.domain.identity import (
     build_identity,
     manifest_keys,
 )
-from draft_intel.domain.keepers import load_manifest, resolve_manifest
+from draft_intel.domain.keepers import load_manifest, resolve_manifest, retention_price
 from draft_intel.domain.ledger import fold
+from draft_intel.quant.market import (
+    AdpMarketValues,
+    CsvMarketValues,
+    InternalMarketValues,
+    resolve_market_values,
+)
 from draft_intel.quant.replacement import compute_baselines
 from draft_intel.quant.scoring import build_projections
 from draft_intel.quant.slots import seat_keepers
@@ -288,6 +294,55 @@ def value() -> int:
         f"    keeper + live == total: ${board.keeper_spend} + ${board.total_live_money}"
         f" == ${board.total_budget}"
     )
+
+    # DI-027. The ladder handed to the ADP provider is our own board's price curve, sorted; the
+    # provider supplies only the ordering. See quant/market.py for why that is honest and what
+    # it does not claim.
+    ladder = [p.market_value for p in board.players if p.in_pool_full]
+    market = resolve_market_values(
+        [
+            CsvMarketValues(CONFIG / "auction_values.csv", players_map),
+            AdpMarketValues(projections_raw, ladder),
+            InternalMarketValues({p.player_id: p.market_value for p in board.players}),
+        ],
+        projections,
+        required=roster_full,
+    )
+
+    print()
+    print("=" * 78)
+    print("DI-027  MARKET VALUES  (what the ROOM pays, not what our model says)")
+    print("=" * 78)
+    print(f"  source     {market.source}" + ("   [ESTIMATE]" if market.is_estimate else ""))
+    print(
+        f"  coverage   {market.coverage} of {roster_full} priced spots   total ${market.total:.0f}"
+    )
+    for note in market.notes:
+        print(f"  note       {note}")
+    for row in market.unmatched[:10]:
+        print(f"  UNMATCHED  {row}")
+    if len(market.unmatched) > 10:
+        print(f"  UNMATCHED  ... and {len(market.unmatched) - 10} more")
+    if market.is_estimate:
+        print(
+            "  !! Sleeper publishes no auction value (Finding 3), so the league's own keeper\n"
+            "     rule -- floor(0.75 * auction_value) -- is NOT computable from the API.\n"
+            f"     Drop real values in {CONFIG / 'auction_values.csv'} to fix this;\n"
+            f"     see {CONFIG / 'auction_values.csv.example'} for the format."
+        )
+
+    print()
+    print("  KEEPER RETENTION CHECK  floor(0.75 * market value), clamped to $1")
+    print(f"  {'owner':8} {'player':24} {'pos':4} {'market $':>9} {'rule $':>7} {'loaded':>7}")
+    keeper_rows = sorted(
+        ((owner, entry, market.get(pid)) for (owner, pid), entry in resolved.items()),
+        key=lambda row: (row[0], row[1].name),
+    )
+    for owner, entry, value in keeper_rows:
+        rule = f"{retention_price(int(value)):>7}" if value is not None else f"{'--':>7}"
+        loaded = f"{entry.price:>7}" if entry.price is not None else f"{'unset':>7}"
+        shown = f"{value:>9.0f}" if value is not None else f"{'--':>9}"
+        print(f"  {owner:8} {entry.name[:24]:24} {entry.pos:4} {shown} {rule} {loaded}")
 
     print()
     print("  TOP 25 AVAILABLE  (baseline_value is the number to bid against)")
