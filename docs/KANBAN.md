@@ -2065,7 +2065,68 @@ append to. Written to schema here, retroactively for the cards already built.
   passes one drawn slot to both sides, and `test_ledger_reconciles_exactly_with_overrides` draws
   exactly the in-league range. The underlying behaviours are covered by named gate tests, so
   these are weak tests rather than holes. Not closed here; carried as **DI-054**.
-- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+- **Reviewer verdict:** pending. · **Evaluator verdict: REJECTED** (DI-EVAL-6; artifact
+  `di-054-weak-tests` @ `26c8a12`, evaluated in an isolated worktree). All three headline
+  behaviours were reproduced and are pinned by named tests — disabling the cross-check, dropping
+  the `str()` normalisation, removing the `max_bid` clamp and disarming the product classifier
+  are each CAUGHT. The dropped-key figures reproduce exactly (unarmed 19 KEEPER / **141**
+  COMPETITIVE; armed 19 / 140 / **1 FLAGGED**), armed ≡ unarmed byte-for-byte on the full
+  manifest, `$686 → $186` with `spent -500` / `remaining 700` still exact, and a corrupted
+  `draft_slot` on the real fixture debits slot 4 instead of slot 3 while the room still totals
+  $1,979 — reported as `REJECT pick 30 (A.J. Brown): draft_slot is 4 but metadata says '3'`.
+  Rejected on two items.
+  - **E1 (blocking, still open at `ed8b66a` after DI-055).** The identity guard tests `is None`,
+    not falsiness, and Sleeper's empty value for a string field is `""` — `team_abbr` and
+    `team_changed_at` are `""` on all 160 real rows, `picked_by` on all 160, `injury_status` on
+    122. With top-level `player_id: null` and `metadata.player_id: ""`, `parse_pick` returns
+    `PickSnapshot(player_id='')` **with no complaint at all**. Folding the real fixture with
+    pick 30 in that shape: `total_spent 1979`, `rejects ()`, `alerts ()`, `orphans ()` — and
+    A.J. Brown, bought for $32, is on nobody's roster and stays on the available board all
+    night. Money conservation holds exactly while the ledger is nonsense, on the four lines this
+    card rewrote, in the field this card added a cross-check for. The `slot` twin of the same
+    shape is caught only incidentally, because `int("")` happens to raise. DI-055 m2 fixed the
+    *primary*-empty direction; the metadata-empty direction is untouched. Fix: treat `""` as
+    absent in the fallbacks, the `missing` guard and the conflict predicate.
+  - **E2 (criterion disproved).** "Arming changes **nothing** on a fully-resolving manifest" is
+    a property of `fixtures/picks.json`, whose 20 ceremonial picks occupy exactly `pick_no`
+    1..20 — not of the code. Two reproductions with a 20/20-resolving manifest where arming
+    moves the ledger: swap `pick_no` 20↔21 and a genuine $37 competitive bid (slot 5, player
+    8138) is FLAGGED, competitive 140→139; and the realistic one — the commissioner pre-loads
+    only 19 keepers, so the **first real nomination of the night** lands at `pick_no` 20, is
+    FLAGGED, and every one of the 139 remaining `competitive_seq` indices shifts. Independently
+    found; DI-055 reaches the same conclusion and reverses the default, so E2 is closed there.
+  - **Non-blocking.** (a) `min(self.remaining, self.budget)` clamps against a bound a mistyped
+    override controls: `BudgetAdjustment(slot=1, delta=10000)` yields budget $10,200 and
+    **`max_bid` $10,185 with zero alerts**, `override_delta` exactly accountable, every property
+    test green — also found by DI-055 M2. (b) The arming boundary `pick_no <= 20` survives being
+    changed to `<` across all 517 tests (DI-055 M4). (c) `competitive_seq`'s
+    `is PickClass.COMPETITIVE` filter survived at `26c8a12` when weakened to `is not KEEPER` —
+    the mechanism this card armed, with nothing asserting its consequence; now CAUGHT at
+    `ed8b66a`. (d) Conflicts are discarded whenever the row also carries an amount complaint
+    (`grumbles = [] if complaint else [...]` survives all 517) and whenever validation fails.
+  - **Standing audits, all passed at `26c8a12`.** *2QB:* 10 × 2 = 20 QB starting slots, 7 QB
+    keepers, **13 remaining** — verified from the resolved manifest. *Keeper double-count:*
+    supply drops the 20 ids once (`roster_live` 160−20=140) and demand seats each keeper into
+    exactly one bucket (3 WR → 2 base + 1 FLEX; 3 QB → 2 base + 1 bench, remaining QB 18 not 17;
+    2 teams × 2 QB → remaining 16), and full-vs-live rostered counts differ by exactly the
+    per-position keeper counts (QB 25→18, RB 41→35, WR 59→52, TE 25→25, K 10→10). *Ceremonial
+    contamination:* the Case A twin (`is_keeper` only, empty manifest) equals Case B (full
+    manifest, `is_keeper` false) on the ledger, the competitive count, skew overall/by-position/
+    by-team, positional inflation, the whole 140-point inflation curve and all ten tendency
+    profiles; misclassifying one ceremonial pick moves mean edge skew $4.01→$4.90, RB inflation
+    1.3585→1.4371 and the entire curve, so the filter is load-bearing. *Numerical sanity:*
+    re-derived on paper, `dpv` 1840/9770.98 = 0.188313 (code 0.1883), `dpv_live` 0.180166 (code
+    0.1802), CeeDee Lamb $27.76/$26.60, Nico Collins $26.16/$25.07, Brock Bowers $24.56/$23.54 —
+    exact to the cent; ΣMV $1,999.93, ΣBV $1,451.00 = live money exactly.
+  - **Two findings outside both cards, for new cards.** (i) The *mirror* of the double-count is
+    unguarded: if two owners list the same player, demand removes 20 starting slots while supply
+    removes 19 players (`roster_live` 141) and `manifest_keys(require=20)` still passes because
+    the `(slot, player_id)` keys differ — every price shifts, nothing alerts. (ii) The priced
+    pool (top-160 by VORP) and the pool the replacement fixed point solved for are not the same
+    160: 31 QB / 6 K priced against 25 QB / 10 K rostered, so four kickers the league must buy
+    carry `market_value 0.0` and render as `--`. All affected players sit at VORP 0, so the
+    dollar effect is $6 of $2,000 and no real price moves — but the two halves of the model
+    disagree about who is in the pool.
 
 ### [DI-054] Close DI-EVAL-2 M2 — three tests that could not fail
 
@@ -2106,7 +2167,34 @@ append to. Written to schema here, retroactively for the cards already built.
   value api-findings Finding 5 says never appears on a real ceremonial keeper; and
   `test_ledger_reconciles_exactly_with_overrides` asserts only aggregates, so crediting every
   correction to the wrong team survives it. **Carried to DI-056**, not folded in silently.
-- **Evaluator verdict:** pending (DI-EVAL-6 in flight).
+- **Evaluator verdict: APPROVED, with one residual blindness in the same test** (DI-EVAL-6;
+  artifact `di-054-weak-tests` @ `26c8a12`). Every claim on this card is independently
+  confirmed, and the counterfactual the card only asserts was verified rather than taken: each
+  of the three defects **SURVIVES** the pre-strengthening form of its own test and is **CAUGHT**
+  by the current form. Supersession re-keyed on `(slot, player_id)` → caught by
+  `test_manual_keeper_counted_exactly_once`, survives once `pick_slot` is forced equal to
+  `manual_slot`. Orphan slots no longer alerted, and `override_delta` counting adjustments for
+  teams that do not exist → both caught by `test_ledger_reconciles_exactly_with_overrides`, both
+  survive once the draw is narrowed back to `st.integers(1, 10)`. The strengthening is
+  load-bearing, not decorative. Item 1 re-verified at HEAD: the precondition and the companion
+  test are both present; note the property genuinely cannot exercise the clamp, since
+  `event_logs` draws amounts ≥ 0 so `remaining ≤ budget` always — which is what the card says,
+  the clamp being pinned by the named money-safety test instead.
+  - **Six clean runs CONFIRMED.** `rm -rf .hypothesis && uv run pytest -q`, six times: **517
+    passed** every time, 39.6–42.5s. No hypothesis profile is registered in `pyproject.toml` and
+    there is no `conftest.py`, so the runs are genuinely re-randomised rather than derandomised —
+    the claim means what it reads as. `ruff check`, `ruff format --check` and `mypy --strict`
+    also clean.
+  - **Residual blindness (not a claim this card made, and still open at `ed8b66a`).**
+    `test_manual_keeper_counted_exactly_once` still cannot fail for an *un-superseded* manual
+    keeper. It always constructs a pick carrying the drawn `player_id`, so supersession always
+    fires and the `for entry in manual.values()` roster branch is never reached in the state it
+    asserts on — the test never actually counts a manual keeper, only the pick that replaced
+    one. Mutation: book manual keepers as `pick_class=PickClass.COMPETITIVE` → **SURVIVES all
+    517** at `26c8a12` and all **527** at `ed8b66a`. The ledger's own docstring calls
+    `ManualKeeper` "the *primary* route by which real keeper prices enter"; that entry's class
+    drives `keeper_spend()`, the N/20 readout, the `expect_keepers` under-count alert,
+    `reconcile()` and the competitive filter, and nothing pins it. Worth folding into DI-056.
 
 ### [DI-055] Close code review round 1 on DI-053 — arming reversed
 
@@ -2186,6 +2274,65 @@ append to. Written to schema here, retroactively for the cards already built.
         than a hardcoded `pick_no <= 20`, so a room that holds no ceremonial round is unaffected
   - [ ] FLAGGED picks are surfaced everywhere they matter, not only in `cli.replay`
   - [ ] pinned on a payload where the ceremonial round is *not* at picks 1-20
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+### [DI-058] Close adversarial evaluation round 6 on DI-053/DI-054
+
+- **Sprint:** 1 · **Owner:** orchestrator · **Size:** M · **Branch:** `di-058-eval-round6-fixes`
+- **DI-EVAL-6 verdicts:** DI-053 **REJECTED** (one blocking, still open at HEAD after DI-055),
+  DI-054 **APPROVED with one residual blindness**. The evaluator independently confirmed the
+  6-of-6 clean-run claim, re-derived the valuation arithmetic to the cent, and reproduced the
+  Case A/B equivalence and 2QB checks — all of which hold.
+- **Acceptance criteria:**
+  - [x] **E1 (BLOCKING) — Sleeper's empty value for a string field is `""`, not `null`.** It uses
+        it liberally: `picked_by`, `team_abbr` and `team_changed_at` are empty on all 160 fixture
+        rows, `injury_status` on 122. The missing-field guard tested `is None`, so with
+        `player_id: null` on top and `metadata.player_id: ""` beneath, the fallback selected `""`
+        and a `PickSnapshot` with **no player** entered the ledger complaint-free. On the real
+        fixture: total spend $1,979 — identical to clean — zero rejects, zero alerts, and the
+        $32 player on **nobody's** roster. So the board still shows a rostered player as
+        available and the tool recommends bidding on him. DI-055's m2 closed the primary-empty
+        direction; this closes the class. Presence is now decided in one place, `_present`.
+  - [x] **E1b** zero counts as absent too, and that is a judgement recorded rather than assumed:
+        all three guarded fields are 1-based identifiers (`Slot` validates `ge=1`), so `0` is a
+        sentinel. Reading it as present would refuse a `draft_slot: 0` row outright and take its
+        dollars with it, when `metadata.slot` beside it names the team. Falling back keeps the
+        pick, the money and the roster spot; both sources empty still fires the missing guard.
+  - [x] **DI-054 residual** — `test_manual_keeper_counted_exactly_once` always builds a pick
+        carrying the drawn `player_id`, so supersession always fires and the manual entry never
+        survives into the asserted state. It counts the pick that *replaced* a manual keeper,
+        never a manual keeper. Classifying manual entries COMPETITIVE survived all 527 tests —
+        and `ManualKeeper` is, in `ledger.py`'s own words, "the *primary* route by which real
+        keeper prices enter the system". That class drives `keeper_spend()`, the N/20 readout,
+        the `expect_keepers` alert, `reconcile()` and the competitive filter.
+  - [x] **Attacker-controlled clamp bound** — `max_bid` is bounded by `budget`, and `budget` is
+        whatever the corrections made it, so `BudgetAdjustment(delta=10000)` advised a **$10,185
+        bid in a $200 league** with the ledger reconciling exactly and nothing looking unusual.
+        §4.8 says the correction wins and the next poll must not fight it, so it is still applied
+        as entered and still exactly accountable in `override_delta`; what changes is that it
+        stops being silent. Ordinary corrections stay quiet, or the alert is tuned out by 7pm.
+  - [x] **Surviving mutation** — the competitive filter widened to `is not KEEPER` passed all 517
+        at the evaluated commit. Now caught.
+- **Mutation-verified 4/4**, each against the exact escape demonstrated. Replay gate still exact:
+  $1,979 / 20-of-20 / 140 competitive.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending (round 7 not commissioned).
+
+### [DI-059] Two findings from DI-EVAL-6 outside both cards
+
+- **Sprint:** 2 · **Owner:** quant · **Size:** M
+- Found while evaluating DI-053/054, correctly reported as out of scope rather than folded in.
+  Neither is a regression; both are real.
+- **Acceptance criteria:**
+  - [ ] **The mirror of the keeper double-count is unguarded.** Two owners listing the same
+        player removes 20 slots from demand but only 19 players from supply (`roster_live` 141),
+        `manifest_keys(require=20)` still passes, every price on the board shifts, and nothing
+        alerts. The manifest currently has no duplicates — verified — so this is latent, and the
+        manifest is a hand-typed file that changes before draft day.
+  - [ ] **The priced pool and the replacement fixed point disagree about who is in the pool.**
+        Top-160 by VORP is 31 QB / 6 K; the fixed point solved for 25 QB / 10 K. Four kickers the
+        league must buy render as `--`. The effect is $6 of $2,000 and every affected player sits
+        at VORP 0, so it is small — but two halves of the valuation disagreeing about pool
+        membership is the kind of thing that stops being small when a setting changes.
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
 ---

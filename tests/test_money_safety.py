@@ -506,3 +506,81 @@ def test_a_falsy_primary_field_falls_back_without_claiming_the_primary_won(field
     assert pick is not None
     assert complaint is None, "a falsy primary is a fallback, not a disagreement"
     assert pick.conflicts == ()
+
+
+# --------------------------------- DI-EVAL-6 E1: Sleeper's empty string is not `null`
+
+
+@pytest.mark.parametrize(
+    "top,meta",
+    [(None, ""), ("", ""), ("", None), ("  ", "  "), (None, "   ")],
+)
+def test_a_pick_with_no_player_from_either_source_is_refused(top, meta):
+    """BLOCKING. Sleeper's empty value for a string field is `""`, not `null`, and it uses it
+    liberally — `picked_by`, `team_abbr` and `team_changed_at` are empty on all 160 fixture rows.
+    The missing-field guard tested `is None`, so `""` read as real data and a PickSnapshot with
+    **no player** entered the ledger complaint-free.
+
+    That is the charter's named failure mode exactly: the bought player is on nobody's roster,
+    the room still totals $1,979, nothing alerts — so the board goes on showing a rostered player
+    as available and the tool recommends bidding on him.
+    """
+    row = {
+        "pick_no": 1,
+        "player_id": top,
+        "draft_slot": 1,
+        "is_keeper": False,
+        "metadata": {
+            "amount": "32",
+            "player_id": meta,
+            "slot": "1",
+            "first_name": "A",
+            "last_name": "B",
+        },
+    }
+    pick, complaint = parse_picks([row]).picks, parse_picks([row]).rejects
+    assert not pick, "a pick with no player must not reach the ledger"
+    assert complaint and "player_id" in complaint[0]
+
+
+def test_an_empty_string_on_one_side_still_falls_back_to_the_other():
+    """The fix must not refuse legitimate rows: `""` on one source is absence, not conflict."""
+    from draft_intel.sleeper.poller import parse_pick
+
+    for top, meta, expected in (("", "123", "123"), ("123", "", "123")):
+        row = {
+            "pick_no": 1,
+            "player_id": top,
+            "draft_slot": 1,
+            "is_keeper": False,
+            "metadata": {"amount": "32", "player_id": meta, "slot": "1"},
+        }
+        pick, complaint = parse_pick(row)
+        assert pick is not None and pick.player_id == expected
+        assert complaint is None, "one side being empty is a fallback, not a disagreement"
+
+
+def test_the_whole_real_fixture_still_parses_clean():
+    """160 rows carrying empty strings in four other fields. The presence rule must not turn any
+    of them into a rejection."""
+    result = parse_picks(copy.deepcopy(load_picks(FIXTURES / "picks.json")))
+    assert len(result.picks) == 160
+    assert not result.rejects
+
+
+def test_an_implausible_budget_correction_is_applied_but_never_silent():
+    """`max_bid` is bounded by `budget`, and `budget` is whatever the corrections made it — so a
+    fat-fingered `delta=10000` advised a $10,185 bid in a $200 league with the ledger reconciling
+    exactly and nothing looking unusual. §4.8 says the correction wins and the next poll must not
+    fight it, so it is applied as entered; what changes is that it stops being silent."""
+    from draft_intel.models import BudgetAdjustment
+
+    absurd = fold([BudgetAdjustment(seq=1, slot=1, delta=10000)], slots=SLOTS)
+    assert absurd.teams[1].budget == 10200, "applied as entered, per §4.8"
+    assert absurd.override_delta == 10000, "and still exactly accountable"
+    assert any("IMPLAUSIBLE CORRECTION" in a for a in absurd.alerts)
+
+    ordinary = fold([BudgetAdjustment(seq=1, slot=1, delta=-50)], slots=SLOTS)
+    assert not [a for a in ordinary.alerts if "IMPLAUSIBLE" in a], (
+        "a real correction must stay quiet, or the alert gets tuned out by draft night"
+    )

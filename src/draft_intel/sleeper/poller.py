@@ -95,6 +95,44 @@ def _read_amount(raw: Any) -> tuple[int, str | None]:
     return 0, f"amount {text!r} is unparseable"
 
 
+def _present(*values: Any) -> Any:
+    """The first value that is genuinely present, or ``None``.
+
+    **Sleeper's empty value for a string field is ``""``, not ``null``**, and it uses it
+    liberally: in `fixtures/picks.json`, `picked_by`, `team_abbr` and `team_changed_at` are
+    empty on all 160 rows and `injury_status` on 122. So "absent" has two spellings, and a
+    guard that tests only ``is None`` accepts the other one as real data.
+
+    That was not theoretical. With ``player_id: null`` at the top level and ``metadata.
+    player_id: ""``, the fallback selected ``""`` and the missing-field guard let it through:
+    a ``PickSnapshot`` with **no player** entered the ledger, complaint-free. The bought player
+    was not on anybody's roster, the room still totalled $1,979, and nothing alerted -- so the
+    board went on showing a rostered player as available and the tool would have recommended
+    bidding on him. Money conservation holding exactly while the ledger is nonsense is the
+    charter's named failure mode, and this is it, in the field DI-053 added a cross-check for.
+
+    Whitespace counts as empty for the same reason a hand-typed " " is not a player id.
+
+    **Zero counts as absent too**, which is a judgement rather than an obvious rule. All three
+    fields this guards -- ``draft_slot``, ``player_id``, ``pick_no`` -- are 1-based identifiers,
+    so ``0`` is never a value any of them can legitimately take; ``Slot`` itself validates
+    ``ge=1``. Reading it as present means a ``draft_slot: 0`` row is refused outright and takes
+    its dollars with it, when the ``metadata.slot`` beside it says exactly which team bought the
+    player. Falling back keeps the pick, keeps the money, and keeps the roster spot. If both
+    sources are empty the missing-field guard still fires, which is the case that matters.
+    """
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            if not value.strip():
+                continue
+        elif not value:
+            continue
+        return value
+    return None
+
+
 def parse_pick(raw: dict[str, Any]) -> tuple[PickSnapshot | None, str | None]:
     """Build a :class:`PickSnapshot` from one element of the picks feed.
 
@@ -123,9 +161,9 @@ def parse_pick(raw: dict[str, Any]) -> tuple[PickSnapshot | None, str | None]:
     ``cli.replay`` prints. Being wrong loudly beats being wrong quietly.
     """
     meta = raw.get("metadata") or {}
-    slot = raw.get("draft_slot") or meta.get("slot")
-    player_id = raw.get("player_id") or meta.get("player_id")
-    pick_no = raw.get("pick_no")
+    slot = _present(raw.get("draft_slot"), meta.get("slot"))
+    player_id = _present(raw.get("player_id"), meta.get("player_id"))
+    pick_no = _present(raw.get("pick_no"))
     # The conflict test must use the same truthiness rule as the fallback two lines above, or
     # the two disagree about which value won. ``or`` falls through on any falsy primary, so
     # ``player_id: ""`` and ``draft_slot: 0`` take the metadata value -- while an
@@ -136,11 +174,12 @@ def parse_pick(raw: dict[str, Any]) -> tuple[PickSnapshot | None, str | None]:
     conflicts = [
         f"{field} is {primary!r} but metadata says {duplicate!r}"
         for field, primary, duplicate in (
-            ("draft_slot", raw.get("draft_slot"), meta.get("slot")),
-            ("player_id", raw.get("player_id"), meta.get("player_id")),
+            ("draft_slot", _present(raw.get("draft_slot")), _present(meta.get("slot"))),
+            ("player_id", _present(raw.get("player_id")), _present(meta.get("player_id"))),
         )
-        if primary and duplicate and str(primary) != str(duplicate)
+        if primary is not None and duplicate is not None and str(primary) != str(duplicate)
     ]
+    # Same rule as `_present` above, or the guard disagrees with the selection it is guarding.
     missing = [
         name
         for name, value in (("draft_slot", slot), ("player_id", player_id), ("pick_no", pick_no))

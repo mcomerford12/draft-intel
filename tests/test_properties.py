@@ -19,6 +19,7 @@ from draft_intel.models import (
     BudgetAdjustment,
     ManualKeeper,
     PickAmended,
+    PickClass,
     PickObserved,
     PickRemoved,
     PickSnapshot,
@@ -203,6 +204,36 @@ def test_manual_keeper_counted_exactly_once(
     if manual_slot != pick_slot:
         assert state.teams[manual_slot].filled_slots == 0, "the wrong team keeps nothing"
         assert any("SLOT MISMATCH" in alert for alert in state.alerts)
+
+
+@given(st.integers(1, 10), st.integers(1, 200).map(str), st.integers(1, 60))
+@settings(max_examples=200, deadline=None)
+def test_a_manual_keeper_the_feed_has_not_delivered_is_classified_as_a_keeper(
+    slot, player_id, amount
+):
+    """The residual blindness in the test above: it always builds a pick carrying the drawn
+    ``player_id``, so supersession always fires and the manual entry never survives into the
+    asserted state. It counts the pick that replaced a manual keeper, never a manual keeper.
+
+    That branch matters more than most. ``ledger.py`` calls ``ManualKeeper`` "the *primary*
+    route by which real keeper prices enter the system" -- Sleeper publishes no auction value,
+    so retention prices are typed in from the draft room, and until the ceremonial pick lands
+    the manual entry is the only record of one. Its ``pick_class`` drives ``keeper_spend()``,
+    the N/20 readout, the ``expect_keepers`` alert, ``reconcile()``, and whether it is filtered
+    out of ``competitive_seq``.
+
+    Classifying it COMPETITIVE instead survived all 527 tests: keeper spend would drop out of
+    structural inflation, the entry would join the skew series as a competitive bid at a
+    retention price, and the readout would report fewer keepers than the team had entered.
+    """
+    state = fold(_seq([ManualKeeper(slot=slot, player_id=player_id, amount=amount)]), slots=SLOTS)
+    team = state.teams[slot]
+
+    assert team.filled_slots == 1
+    assert [entry.pick_class for entry in team.roster] == [PickClass.KEEPER]
+    assert len(team.keepers) == 1
+    assert state.keeper_spend() == amount
+    assert not state.competitive_seq, "a retention price is not a competitive bid"
 
 
 @example(

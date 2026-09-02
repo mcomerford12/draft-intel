@@ -351,6 +351,18 @@ def fold(
             total_slots=total_slots,
         )
         teams_built[slot] = state
+        # A budget correction is applied faithfully -- §4.8 is explicit that the user's
+        # correction wins and the next poll must not fight it -- but the *size* of one is worth
+        # a word. `max_bid` is bounded by `budget`, and `budget` is whatever the corrections
+        # made it, so a fat-fingered `delta=10000` advises a $10,185 bid in a $200 league with
+        # the whole ledger reconciling exactly and nothing else looking unusual. The correction
+        # stands; what changes is that it stops being silent.
+        correction = applied_adjustments.get(slot, 0)
+        if correction and (abs(correction) >= budget or not 0 <= state.budget <= 2 * budget):
+            alerts.append(
+                f"IMPLAUSIBLE CORRECTION slot {slot}: {correction:+d} takes this team's budget "
+                f"to ${state.budget} in a ${budget} league; applied as entered, but check it"
+            )
         # A negative amount is never a real price, on any path. The parser guards the feed,
         # but `ManualKeeper` -- the *primary* route by which real keeper prices enter, since
         # Sleeper publishes no auction value -- never touches the parser at all. A single
