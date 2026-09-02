@@ -140,6 +140,36 @@ mapping must therefore be **late-bound and re-resolvable**, not a boot-time cons
 
 ---
 
+## 🟡 FINDING 10 — the commissioner reports 18 roster positions; the API reports 16
+
+Asked to confirm the league shape, the commissioner answered: *"2QB, 0 DEF, 6B. 18 roster
+positions, 16 rounds in the draft."*
+
+The first three agree with `league.roster_positions` exactly and settle Finding 1 in its
+favour for a third time. The fourth does not:
+
+| Source | Roster positions | Draft rounds |
+|---|---|---|
+| `league.roster_positions` | **16** (10 starters + 6 BN, no IR, no taxi) | — |
+| `draft.settings` | — | 15 (stale, Finding 1) |
+| The user's own mock draft | — | 16 (160 picks, 16 per team) |
+| Commissioner, directly | **18** | 16 |
+
+`league.settings.taxi_slots` and `reserve_slots` are both `0`, so there is no hidden pair of
+slots making 18 out of what the API returns. Either two bench spots are intended and not yet
+saved, or the count includes something the API does not expose.
+
+**Left open deliberately, because it changes nothing.** What scales prices is the number of
+players *bought* — `teams × draft_rounds = 160` — and both readings agree on 16 rounds. Roster
+capacity above the draft is waiver space that costs nothing at auction. ADR-0005 splits the two
+fields so this can stay unresolved: `roster_size` tracks what the API says today, growth warns
+rather than blocks, and the priced pool is untouched either way.
+
+Worth confirming with the commissioner anyway, since it likely rides along with the DI-004
+settings re-save.
+
+---
+
 ## Endpoint status
 
 | Endpoint | Status | Note |

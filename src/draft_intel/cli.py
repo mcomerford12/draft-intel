@@ -67,7 +67,7 @@ def replay() -> int:
         replay_all(payload),
         slots=range(1, config.teams + 1),
         budget=config.budget,
-        total_slots=config.total_slots,
+        total_slots=config.draft_rounds,
         max_keepers=config.keepers_per_team,
         classifier=_classifier(
             draft, players, identity, require=config.teams * config.keepers_per_team
@@ -187,7 +187,7 @@ def value() -> int:
             positions_by_slot.setdefault(slot, []).append(entry.pos)
 
     demand = seat_keepers(positions_by_slot, starters=config.starters, teams=config.teams)
-    roster_full = config.teams * config.total_slots
+    roster_full = config.auction_pool
     roster_live = roster_full - len(keeper_ids)
 
     baselines = compute_baselines(

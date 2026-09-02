@@ -256,7 +256,7 @@ def test_real_manifest_reproduces_appendix_a_demand():
 
     # Charter §4.2: assert BOTH totals. They are different numbers and easy to transpose.
     assert demand.remaining_starting == 80
-    assert config.teams * config.total_slots - 20 == 140
+    assert config.auction_pool - 20 == 140
     assert demand.remaining_starting != 140
 
 
@@ -582,7 +582,7 @@ def real_board():
             positions_by_slot.setdefault(slot, []).append(entry.pos)
     demand = seat_keepers(positions_by_slot, starters=config.starters, teams=config.teams)
 
-    full = config.teams * config.total_slots
+    full = config.auction_pool
     live = full - len(keeper_ids)
     baselines = compute_baselines(
         projections,
@@ -635,7 +635,7 @@ def test_real_board_shows_the_2qb_signature():
         projections,
         base_slots={"QB": 20, "RB": 20, "WR": 20, "TE": 10, "K": 10},
         flex_slots=20,
-        roster_spots=config.teams * config.total_slots,
+        roster_spots=config.auction_pool,
         pinned={"K": 10},
     )
     qb = baseline.points["QB"]

@@ -232,7 +232,83 @@ def test_league_config_file_exists_and_matches_the_live_league(real_league):
     """M6: the error message and ADR-0002 both named a file that did not exist."""
     config = load_league_config(ROOT / "config" / "league.yaml")
     assert config.starters == positions_from_roster(real_league["roster_positions"])
-    assert config.total_slots == len(real_league["roster_positions"])
+    assert config.roster_size == len(real_league["roster_positions"])
     assert assert_startable(
         validate(config, real_league, json.loads((FIXTURES / "real_draft.json").read_text()))
     )  # warnings, but startable
+
+
+def test_the_configured_draft_start_matches_sleeper_exactly(real_draft):
+    """The user says 2026-09-05 19:00 MT; Sleeper's start_time must say the same instant.
+
+    19:00 MDT is UTC-06:00, so the epoch millis must land on 2026-09-06T01:00:00Z. This is the
+    check that would have caught the date being a day out, which it was for most of a sprint.
+    """
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    assert config.draft_start == "2026-09-06T01:00:00Z"
+    issues = validate(config, json.loads((FIXTURES / "league.json").read_text()), real_draft)
+    assert not [i for i in issues if i.field == "draft.start_time"]
+
+
+def test_a_moved_draft_warns_and_still_boots(real_league, real_draft):
+    """A commissioner nudging the start time must never be able to keep the tool down."""
+    moved = json.loads(json.dumps(real_draft))
+    moved["start_time"] = real_draft["start_time"] + 3_600_000
+    warnings = assert_startable(
+        validate(load_league_config(ROOT / "config" / "league.yaml"), real_league, moved)
+    )
+    drift = [w for w in warnings if w.field == "draft.start_time"]
+    assert len(drift) == 1
+    assert drift[0].actual == "2026-09-06T02:00:00Z"
+
+
+# ------------------------------------------------- roster size vs draft rounds (DI-045)
+
+
+def test_two_extra_bench_spots_warn_but_do_not_block(real_league, real_draft):
+    """The user reports 18 roster positions against 16 draft rounds.
+
+    Waiver capacity above the draft costs nothing at auction, so it must move no price and
+    must not refuse the boot. Before DI-045 this raised ConfigMismatch and took the tool down.
+    """
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    grown = dict(real_league)
+    grown["roster_positions"] = [*real_league["roster_positions"], "BN", "BN"]
+
+    warnings = assert_startable(validate(config, grown, real_draft))  # must not raise
+    fields = {w.field for w in warnings}
+    assert "roster_size" in fields
+    assert "bench" in fields
+    assert config.auction_pool == 160, "the priced pool is unmoved by bench depth"
+
+
+def test_a_roster_too_small_to_seat_the_draft_refuses_to_start(real_league, real_draft):
+    """The one roster-shape case that is incoherent rather than merely surprising."""
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    shrunk = dict(real_league)
+    shrunk["roster_positions"] = real_league["roster_positions"][:12]
+    with pytest.raises(ConfigMismatch, match="roster_size"):
+        assert_startable(validate(config, shrunk, real_draft))
+
+
+def test_a_self_contradictory_config_file_is_rejected_at_load(tmp_path):
+    """roster_size below draft_rounds is our own typo, and must not reach the API comparison."""
+    path = tmp_path / "league.yaml"
+    path.write_text(
+        "teams: 10\nbudget: 200\ndraft_rounds: 16\nroster_size: 14\n"
+        "keepers_per_team: 2\nbench: 6\nstarters: {QB: 2}\n"
+    )
+    with pytest.raises(ConfigMismatch, match="self-contradictory"):
+        load_league_config(path)
+
+
+def test_draft_rounds_and_roster_size_are_not_the_same_knob(tmp_path):
+    """A bigger roster with the same draft must not change the priced pool by a single spot."""
+    body = (
+        "teams: 10\nbudget: 200\ndraft_rounds: 16\nroster_size: {size}\n"
+        "keepers_per_team: 2\nbench: 6\nstarters: {{QB: 2}}\n"
+    )
+    (tmp_path / "a.yaml").write_text(body.format(size=16))
+    (tmp_path / "b.yaml").write_text(body.format(size=18))
+    assert load_league_config(tmp_path / "a.yaml").auction_pool == 160
+    assert load_league_config(tmp_path / "b.yaml").auction_pool == 160
