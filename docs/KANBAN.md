@@ -40,12 +40,21 @@ you cannot sanity-check. The draft is 2026-09-05 19:00 MDT.
 
 ### [DI-043] Six managers have not joined the league — manifest cannot fully resolve
 - **Sprint:** 1 · **Owner:** user/commissioner · **Size:** S · **Surfaced by:** DI-EVAL-1 B1
-- Only 4 of 10 managers have joined, so slot-to-owner resolves 8 of 20 keeper keys against
-  the real league. `manifest_keys(require=20)` now raises loudly rather than silently
-  classifying the other 12 keepers as competitive bids, but the tool cannot run against the
-  real draft until the remaining six join: **Jake, Connor, Keenan, Willie, Burt, TD.**
-- Their Sleeper display names are also unknown until then, so `config/owners.yaml` cannot be
-  completed. The four known are `mattchupiccu`, `ajthebeard`, `MasonWAlpert`, `steeveegee300`.
+- **Live check 2026-09-02: 5 of 10 have now joined.** `jswilliams5` holds roster 5, up from the
+  four this card was written against. Still 8 of 20 keeper keys resolved, because a joined
+  manager is only useful once their Sleeper name is mapped to a manifest owner.
+- **⚠️ One question is now answerable and is the cheapest win on this card.** `jswilliams5` set
+  no `team_name`, so which of the six remaining manifest owners they are cannot be read off the
+  API — and it must not be guessed. A wrong owner→slot mapping classifies that team's two
+  keepers as competitive bids, which poisons skew, inflation and every tendency profile for the
+  whole draft; the tool says so in its own blocker text. **Ask the user: which of Jake, Connor,
+  Keenan, Willie, Burt or TD is `jswilliams5`?** That answer alone takes keeper resolution from
+  8/20 to 10/20.
+- Still unjoined, and blocking the remaining 10 keys: **five of Jake, Connor, Keenan, Willie,
+  Burt, TD** (whichever five `jswilliams5` is not).
+- Mapped today: `mattchupiccu`→Me, `ajthebeard`→AJ, `MasonWAlpert`→Mason,
+  `steeveegee300`→Steve. `manifest_keys(require=20)` raises loudly rather than silently
+  classifying the unmapped keepers as competitive bids.
 - **Acceptance criteria:**
   - [ ] All 10 managers joined; `build_identity(...).is_complete(10)` is true
   - [ ] `config/owners.yaml` maps all 10 manifest owners to display names
