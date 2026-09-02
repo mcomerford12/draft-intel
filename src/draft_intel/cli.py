@@ -24,6 +24,7 @@ from draft_intel.domain.identity import (
 )
 from draft_intel.domain.keepers import load_manifest, resolve_manifest
 from draft_intel.domain.ledger import fold
+from draft_intel.models import PickClass
 from draft_intel.quant.keeper_board import keeper_board
 from draft_intel.quant.market import (
     AdpMarketValues,
@@ -67,11 +68,44 @@ def _or_dash(figure: float | int | None) -> str:
 
 
 def _classifier(
-    draft: dict[str, Any], players: dict[str, Any], identity: Identity, *, require: int | None
+    draft: dict[str, Any],
+    players: dict[str, Any],
+    identity: Identity,
+    *,
+    require: int | None,
+    armed: bool = True,
 ) -> KeeperClassifier:
+    """Build the pick classifier from the resolved manifest.
+
+    **Armed by default, which it had not been from any product path.** ``KeeperClassifier.armed``
+    is the charter's classification mechanism #4 -- an unmatched pick inside the ceremonial
+    window is FLAGGED for confirmation rather than silently treated as a competitive bid -- and
+    it was set ``True`` by nothing outside `tests/`. The backstop existed and never ran.
+
+    What it backstops is not hypothetical here. The manifest is a file typed in August; the
+    ceremonial keeper picks land in the first twenty picks on the night. A keeper swapped after
+    the manifest was written matches nothing, and unarmed it becomes a COMPETITIVE pick worth
+    real money against a player we still show as available. Armed, it is FLAGGED and the operator
+    is asked.
+
+    The window is ``arming_window`` picks, not the whole draft, so a genuine competitive bid in
+    round three is never flagged, and on a manifest that resolves fully it changes nothing at
+    all -- the mock replays to the same 20 KEEPER / 140 COMPETITIVE ledger either way. Drop one
+    manifest key and the difference is the whole point:
+
+    ===========  ===========================================
+    unarmed      19 KEEPER, **141 COMPETITIVE**
+    armed        19 KEEPER, 140 COMPETITIVE, **1 FLAGGED**
+    ===========  ===========================================
+
+    ``armed=False`` remains available for callers that genuinely want the raw classification,
+    but no product path uses it.
+    """
     manifest = load_manifest(CONFIG / "keepers.yaml")
     resolved = resolve_manifest(manifest, players)
-    return KeeperClassifier(manifest_keys=manifest_keys(resolved, identity, require=require))
+    return KeeperClassifier(
+        manifest_keys=manifest_keys(resolved, identity, require=require), armed=armed
+    )
 
 
 def replay() -> int:
@@ -128,6 +162,25 @@ def replay() -> int:
     print(f"competitive picks: {len(state.competitive_seq)}")
     for line in reconcile(recorded, expected, keepers_per_team=config.keepers_per_team):
         print(f"  RECONCILE {line}")
+    # A FLAGGED pick is the armed classifier saying "this looks like a keeper the manifest does
+    # not know about". Printing it is what makes the backstop a backstop: the classification
+    # already keeps the pick out of the competitive series, but the thing that needs to happen
+    # is a human confirming or denying it, and they cannot do that from a count.
+    # `flagged_slot`/`roster_entry`, not `slot`/`entry`: both of those names are already bound
+    # in this function -- `entry` to a `KeeperEntry` from the manifest loop just above -- and
+    # reusing them is the shadowing the comment there warns about. mypy caught it.
+    flagged = [
+        (flagged_slot, roster_entry)
+        for flagged_slot, flagged_team in sorted(state.teams.items())
+        for roster_entry in flagged_team.roster
+        if roster_entry.pick_class is PickClass.FLAGGED
+    ]
+    for flagged_slot, roster_entry in flagged:
+        print(
+            f"  FLAGGED slot {flagged_slot} pick {roster_entry.pick_no} "
+            f"player {roster_entry.player_id} ${roster_entry.amount} — inside the keeper "
+            "window and not in the manifest; confirm whether this is a late keeper swap"
+        )
     for reject in state.rejects:
         print(f"  REJECT {reject}")
     for orphan in state.orphans:

@@ -97,3 +97,97 @@ def test_unknown_expected_price_skips_the_price_check():
 def test_keepers_seen_counts_progress():
     assert keepers_seen({1: [("a", 1), ("b", 2)], 2: [("c", 3)], 3: []}) == (3, 1)
     assert keepers_seen({}) == (0, 0)
+
+
+# ------------------------- DI-053: the arming backstop, wired into the product path
+
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from draft_intel.domain.identity import build_identity, manifest_keys  # noqa: E402
+from draft_intel.domain.keepers import load_manifest, resolve_manifest  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = ROOT / "fixtures"
+
+
+def _identity():
+    draft = json.loads((FIXTURES / "draft.json").read_text())
+    return build_identity(draft, aliases={"Me": "Matt"})
+
+
+def _manifest_keys() -> frozenset[tuple[int, str]]:
+    players = json.loads((FIXTURES / "players_slim.json").read_text())
+    resolved = resolve_manifest(load_manifest(ROOT / "config" / "keepers.yaml"), players)
+    return manifest_keys(resolved, _identity())
+
+
+def test_the_product_classifier_is_armed():
+    """`KeeperClassifier.armed` is the charter's classification mechanism #4 — an unmatched pick
+    inside the ceremonial window is FLAGGED for confirmation rather than silently treated as a
+    competitive bid. It was set True by nothing outside `tests/`, so the backstop existed and
+    never ran.
+
+    What it guards is not hypothetical: the manifest is a file typed in August, the ceremonial
+    keeper picks land in the first twenty picks on the night, and a keeper swapped afterwards
+    matches nothing. Unarmed, it becomes a COMPETITIVE bid against a player we still show as
+    available.
+    """
+    from draft_intel.cli import _classifier
+
+    built = _classifier(
+        json.loads((FIXTURES / "draft.json").read_text()),
+        json.loads((FIXTURES / "players_slim.json").read_text()),
+        _identity(),
+        require=20,
+    )
+    assert built.armed is True
+
+
+def test_a_keeper_the_manifest_does_not_know_is_flagged_not_counted_as_competitive():
+    """The exact stale-manifest scenario, on the real 160-pick fixture. Dropping one manifest key
+    stands for a keeper swapped after the file was written."""
+    from draft_intel.domain.classify import KeeperClassifier
+    from draft_intel.domain.ledger import fold
+    from draft_intel.models import PickClass
+    from draft_intel.replay.harness import load_picks, replay_all
+
+    payload = load_picks(FIXTURES / "picks.json")
+    keys = _manifest_keys()
+    stale = frozenset(sorted(keys)[1:])
+    assert len(stale) == len(keys) - 1
+
+    def classes(classifier: KeeperClassifier) -> dict[str, int]:
+        state = fold(replay_all(payload), slots=range(1, 11), classifier=classifier)
+        counts: dict[str, int] = {}
+        for team in state.teams.values():
+            for entry in team.roster:
+                counts[entry.pick_class.name] = counts.get(entry.pick_class.name, 0) + 1
+        return counts
+
+    unarmed = classes(KeeperClassifier(manifest_keys=stale, armed=False))
+    armed = classes(KeeperClassifier(manifest_keys=stale, armed=True))
+
+    assert unarmed["COMPETITIVE"] == 141, "the unknown keeper is silently a competitive bid"
+    assert armed["COMPETITIVE"] == 140, "armed, the competitive series is restored"
+    assert armed[PickClass.FLAGGED.name] == 1
+
+
+def test_arming_changes_nothing_when_the_manifest_resolves_fully():
+    """Or the backstop would be a behaviour change rather than a backstop, and the replay gate's
+    exact reproduction would move every time somebody armed or disarmed it."""
+    from draft_intel.domain.classify import KeeperClassifier
+    from draft_intel.domain.ledger import fold
+    from draft_intel.replay.harness import load_picks, replay_all
+
+    payload = load_picks(FIXTURES / "picks.json")
+    keys = _manifest_keys()
+    states = [
+        fold(
+            replay_all(payload),
+            slots=range(1, 11),
+            classifier=KeeperClassifier(manifest_keys=keys, armed=armed),
+        )
+        for armed in (False, True)
+    ]
+    assert states[0].model_dump() == states[1].model_dump()

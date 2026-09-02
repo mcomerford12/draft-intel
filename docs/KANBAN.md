@@ -1991,6 +1991,63 @@ append to. Written to schema here, retroactively for the cards already built.
   - [ ] DI-037's `Profile.unavailable` string updated only once real samples exist, never before
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
+### [DI-053] Close the last three open Sprint 1 blockers
+
+- **Sprint:** 1 · **Owner:** data-engineer · **Size:** M · **Branch:** `di-053-payload-cross-checks`
+- **Why now:** the status summary still reads 🟥 REJECTED for Sprint 1 on DI-EVAL-2, and all of
+  Sprint 2 is built on it. Re-ran every finding at HEAD before touching anything: **B2 (poller
+  raising on `inf`/`nan`) and B3 (the dead-ended rejects channel) are genuinely closed** —
+  `parse_amount` complains instead of raising, `replay_rejects` reaches `state.rejects`, and
+  `cli.replay` prints them. What was still open is below. One reported symptom did not
+  reproduce and is recorded as such rather than "fixed".
+- **Acceptance criteria:**
+  - [x] **The duplicated payload fields are cross-checked, not merely fallen back on.** The
+        Sprint 1 design said `metadata.slot` "duplicates `draft_slot` and is used as a
+        cross-check"; what shipped was `a or b`, which takes the primary and never looks at the
+        duplicate again. Neither `draft_slot` nor `player_id` was ever compared, so a payload
+        where the two disagree parsed clean and silent. **Neither disagreement shows up in money
+        conservation**, which is what makes this the charter's named failure mode: a wrong slot
+        debits the wrong team while the total still reconciles to $2,000, and a wrong
+        `player_id` leaves the player actually bought sitting on our available board, so the
+        tool keeps recommending bids for somebody already rostered.
+  - [x] the pick is **kept** on a conflict, primary wins, complaint surfaced — dropping loses a
+        roster spot and its dollars *as well as* being wrong, and `state.rejects` is printed
+  - [x] the legitimate fallback (primary absent, duplicate present) stays silent, or all 160
+        mock picks would report a conflict they do not have
+  - [x] **`max_bid` can no longer exceed the team's budget.** A sign-flipped amount makes `spent`
+        negative and `remaining` larger than the budget, and this returned **$686 in a $200
+        league**. An earlier round added an alert and *deliberately* left the figure, on the
+        principle that masking corruption is how it survives to draft night. That principle is
+        right for `spent` and `remaining`, which are facts and are still exact — and wrong for
+        `max_bid`, which is a *recommendation* read by the optimizer and the affordability
+        ladder, neither of which reads `state.alerts`. The alert was necessary and not
+        sufficient. The superseded assertion is documented at the point of change.
+  - [x] **`KeeperClassifier.armed` is wired into the product path.** It is the charter's
+        classification mechanism #4 — an unmatched pick inside the ceremonial window is FLAGGED
+        for confirmation rather than silently treated as a competitive bid — and it was set
+        `True` by nothing outside `tests/`. The backstop existed and never ran. The manifest is a
+        file typed in August; the ceremonial picks land in the first twenty on the night; a
+        keeper swapped afterwards matches nothing. On the real fixture with one manifest key
+        dropped: unarmed **141 competitive**, armed **140 competitive + 1 FLAGGED** — exactly the
+        restoration DI-EVAL-2 M1 said the backstop should produce.
+  - [x] arming changes **nothing** on a fully-resolving manifest, pinned by comparing whole
+        folded states, so the replay gate's exact reproduction cannot move with the switch
+  - [x] FLAGGED picks are **printed** by `cli.replay`, naming slot, pick, player and price. A
+        classification nobody sees is not a backstop; the thing that has to happen is a human
+        confirming or denying it, and they cannot do that from a count.
+- **Did not reproduce.** DI-EVAL-2's "pick 50 is missing player_id" reject no longer fires,
+  which looked at first like a regression in the rejects channel. It is not: the parser falls
+  back to `metadata.player_id`, which the fixture also carries, so clearing only the top-level
+  field is not actually a malformed pick. Clearing both still rejects correctly and loses the
+  pick's $20 loudly. My first probe was wrong, not the code — recorded because the next person
+  to read that finding will construct the same wrong probe.
+- **Still open from DI-EVAL-2 M2** (test-quality, not defects): `test_max_bid_never_strands_a_team`
+  lacks the precondition its property-test twin has, `test_manual_keeper_counted_exactly_once`
+  passes one drawn slot to both sides, and `test_ledger_reconciles_exactly_with_overrides` draws
+  exactly the in-league range. The underlying behaviours are covered by named gate tests, so
+  these are weak tests rather than holes. Not closed here; carried as **DI-054**.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
 ---
 
 ## Ready — Sprint 2 (Intelligence Core)

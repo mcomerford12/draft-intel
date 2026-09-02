@@ -249,11 +249,23 @@ class TeamState(Frozen):
     def max_bid(self) -> int:
         """Most this team can bid while still reserving $1 for every other open slot.
 
-        Zero when the roster is full; never negative.
+        Zero when the roster is full; never negative; **never more than the team's whole
+        budget**, whatever the ledger says was spent.
+
+        That last clause is a guard against corrupt input rather than arithmetic. A negative
+        amount -- a sign-flipped correction, a hand-typed ``-500`` -- makes ``spent`` negative,
+        which makes ``remaining`` *larger* than the budget, and this returned **$686 in a $200
+        league**. The fold does alert on it, but ``max_bid`` is read by the optimizer and the
+        affordability ladder, and neither of those reads alerts. Clamping keeps an impossible
+        number from reaching a bid recommendation while the alert still says why.
+
+        The clamp is deliberately the only correction made here: ``spent`` and ``remaining``
+        keep reporting exactly what the ledger folded, because hiding the corruption is how it
+        survives to draft night.
         """
         if self.open_slots <= 0:
             return 0
-        return max(0, self.remaining - (self.open_slots - 1))
+        return max(0, min(self.remaining, self.budget) - (self.open_slots - 1))
 
     @property
     def keepers(self) -> tuple[RosterEntry, ...]:

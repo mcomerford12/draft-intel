@@ -104,11 +104,36 @@ def parse_pick(raw: dict[str, Any]) -> tuple[PickSnapshot | None, str | None]:
     Team identity comes from ``draft_slot``, falling back to ``metadata.slot``. It is
     deliberately never taken from ``roster_id``: mock drafts return null for it (see
     docs/api-findings.md, Finding 4), which would null out every pick in our replay fixture.
+
+    **Both duplicated fields are cross-checked, not merely fallen back on.** The Sprint 1 design
+    said ``metadata.slot`` "duplicates ``draft_slot`` and is used as a cross-check"; what shipped
+    was ``a or b``, which takes the primary and never looks at the duplicate again. A payload
+    where the two disagree parsed clean and silent.
+
+    Both disagreements are the failure mode the charter cares about, because neither shows up in
+    money conservation. A wrong ``slot`` debits the wrong team -- the total still reconciles to
+    $2,000 while two managers' budgets, max bids and affordability figures are all wrong. A wrong
+    ``player_id`` leaves the player who was actually bought sitting on our available board, so
+    the tool goes on recommending bids for somebody already rostered, and a keeper stops matching
+    the manifest on ``(player_id, slot)``.
+
+    The pick is kept and the primary field wins, rather than being dropped. We cannot tell which
+    side of a conflict is right, and dropping loses a roster spot and its dollars *as well as*
+    being wrong -- whereas a kept pick with a complaint is visible in ``state.rejects``, which
+    ``cli.replay`` prints. Being wrong loudly beats being wrong quietly.
     """
     meta = raw.get("metadata") or {}
     slot = raw.get("draft_slot") or meta.get("slot")
     player_id = raw.get("player_id") or meta.get("player_id")
     pick_no = raw.get("pick_no")
+    conflicts = [
+        f"{field} is {primary!r} but metadata says {duplicate!r}"
+        for field, primary, duplicate in (
+            ("draft_slot", raw.get("draft_slot"), meta.get("slot")),
+            ("player_id", raw.get("player_id"), meta.get("player_id")),
+        )
+        if primary is not None and duplicate is not None and str(primary) != str(duplicate)
+    ]
     missing = [
         name
         for name, value in (("draft_slot", slot), ("player_id", player_id), ("pick_no", pick_no))
@@ -131,8 +156,11 @@ def parse_pick(raw: dict[str, Any]) -> tuple[PickSnapshot | None, str | None]:
         )
     except (ValidationError, ValueError, TypeError) as exc:
         return None, f"pick {pick_no} failed validation: {exc}"
+    grumbles = [*conflicts]
     if complaint:
-        return pick, f"pick {pick.pick_no} ({name or player_id}): {complaint}"
+        grumbles.append(complaint)
+    if grumbles:
+        return pick, f"pick {pick.pick_no} ({name or player_id}): {'; '.join(grumbles)}"
     return pick, None
 
 

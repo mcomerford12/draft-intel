@@ -55,7 +55,21 @@ def test_manual_keeper_negative_amount_is_alerted():
     # The money is still recorded as observed -- the fold never silently discards a fact --
     # but it can no longer pass for a real ledger.
     assert team.spent == -500
-    assert team.max_bid == 686, "the absurd figure itself is unchanged; what changes is silence"
+    assert team.remaining == 700
+
+    # **This assertion changed in DI-053, and the earlier decision it replaces was deliberate.**
+    # The round that added the alert pinned `max_bid == 686` with "the absurd figure itself is
+    # unchanged; what changes is silence" -- on the principle that masking corruption is how it
+    # survives to draft night. That principle is right about `spent` and `remaining`, which are
+    # facts and are still exact above.
+    #
+    # It does not hold for `max_bid`, because `max_bid` is not a fact, it is a *recommendation*
+    # -- and it is consumed by the optimizer and the affordability ladder, neither of which reads
+    # `state.alerts`. So the alert was necessary and not sufficient: the headline defect this
+    # test is named for, a $686 bid in a $200 league, was still reachable by every code path that
+    # actually acts on the number.
+    assert team.max_bid <= team.budget, "an impossible bid must not reach a recommendation"
+    assert team.max_bid == 186, "$200 capped, less $1 held back for each of 14 other open slots"
     assert any("NEGATIVE AMOUNT" in alert for alert in state.alerts), (
         f"a -$500 keeper must be alerted, got alerts={state.alerts}"
     )
@@ -278,3 +292,105 @@ def test_derived_state_survives_copy_deepcopy_pickle_and_revalidation():
     assert isinstance(revalidated.teams, FrozenDict), "validation must not hand back a live dict"
     with pytest.raises(TypeError, match="immutable"):
         revalidated.teams[99] = None
+
+
+# ---------------------------------------- DI-053: the duplicated fields are cross-checked
+
+
+def _fixture_pick(pick_no: int) -> dict:
+    payload = copy.deepcopy(load_picks(FIXTURES / "picks.json"))
+    return next(p for p in payload if p["pick_no"] == pick_no)
+
+
+def test_a_slot_that_disagrees_with_its_metadata_is_reported():
+    """The Sprint 1 design said `metadata.slot` "duplicates `draft_slot` and is used as a
+    cross-check". What shipped was `a or b`, which takes the primary and never looks at the
+    duplicate again, so a payload where the two disagree parsed clean and silent.
+
+    This is the shape that matters: money debited from the wrong team still reconciles to
+    $2,000. The total is right, and two managers' budgets, max bids and affordability figures
+    are all wrong, all night.
+    """
+    row = _fixture_pick(50)
+    truth = row["metadata"]["slot"]
+    row["draft_slot"] = 1
+    assert str(truth) != "1", "the fixture must actually disagree for this to test anything"
+
+    result = parse_picks([row])
+
+    assert len(result.picks) == 1, "the pick is kept: dropping loses its dollars AND its slot"
+    assert result.picks[50].slot == 1, "the primary field still wins"
+    reject = " ".join(result.rejects)
+    assert "draft_slot" in reject and str(truth) in reject
+
+
+def test_a_player_id_that_disagrees_with_its_metadata_is_reported():
+    """Same gap, worse consequence. The player actually bought stays on our available board, so
+    the tool goes on recommending bids for somebody already rostered, and a keeper stops
+    matching the manifest on `(player_id, slot)`."""
+    row = _fixture_pick(50)
+    truth = row["metadata"]["player_id"]
+    row["player_id"] = "9999999"
+
+    result = parse_picks([row])
+
+    assert result.picks[50].player_id == "9999999"
+    reject = " ".join(result.rejects)
+    assert "player_id" in reject and truth in reject
+
+
+def test_both_conflicts_are_reported_together_rather_than_the_first_only():
+    row = _fixture_pick(50)
+    row["draft_slot"], row["player_id"] = 1, "9999999"
+    reject = " ".join(parse_picks([row]).rejects)
+    assert "draft_slot" in reject and "player_id" in reject
+
+
+def test_a_missing_primary_field_falls_back_silently_and_is_not_a_conflict():
+    """The fallback is the documented behaviour and must stay quiet, or every mock pick -- which
+    is the whole replay fixture -- would report a conflict it does not have."""
+    for field in ("draft_slot", "player_id"):
+        row = _fixture_pick(50)
+        row[field] = None
+        result = parse_picks([row])
+        assert result.picks and not result.rejects, f"{field} fallback must be silent"
+
+
+def test_the_real_fixture_reports_no_conflicts_at_all():
+    """160 real picks, both duplicated fields populated on every one of them."""
+    result = parse_picks(copy.deepcopy(load_picks(FIXTURES / "picks.json")))
+    assert len(result.picks) == 160
+    assert not result.rejects
+
+
+def test_a_negative_amount_cannot_produce_a_bid_larger_than_the_league_budget():
+    """M3, second half. A sign-flipped amount makes `spent` negative, which makes `remaining`
+    larger than the budget, and `max_bid` returned **$686 in a $200 league**. The fold does alert
+    — but `max_bid` is read by the optimizer and the affordability ladder, and neither of those
+    reads alerts, so the cockpit would have advised bidding $686.
+
+    `spent` and `remaining` still report exactly what the ledger folded. Only the *recommendation*
+    is clamped, because hiding the corruption is how it survives to draft night.
+    """
+    state = fold(
+        [
+            PickObserved(
+                seq=1,
+                pick=PickSnapshot(pick_no=1, player_id="A", slot=1, amount=-500, is_keeper=False),
+            )
+        ],
+        slots=range(1, 11),
+    )
+    team = state.teams[1]
+
+    assert team.spent == -500, "the ledger still says what it folded"
+    assert team.remaining == 700, "and so does the arithmetic"
+    assert state.alerts, "the corruption is reported"
+    assert team.max_bid <= team.budget, f"advised a ${team.max_bid} bid in a ${team.budget} league"
+
+
+def test_the_clamp_does_not_touch_an_honest_ledger():
+    """It must bind only on impossible input, or it is silently capping real bids."""
+    state = fold([], slots=range(1, 11), budget=200, total_slots=16)
+    team = state.teams[1]
+    assert team.max_bid == 200 - 15, "$200 less $1 held back for each of 15 other open slots"
