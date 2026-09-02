@@ -473,3 +473,38 @@ def test_run_chasing_is_measured_against_the_managers_own_average_not_in_absolut
     assert abs(profile.chases_runs) < 1.0, (
         "uniform overpayment is not run-chasing: measured against their own average it is zero"
     )
+
+
+def test_the_slope_is_fitted_on_competitive_seq_even_when_the_picks_are_interleaved():
+    """The test above cannot actually show this. It gives one manager eight *consecutive* picks,
+    so within their own list `competitive_seq` is the list index plus a constant -- and a
+    least-squares slope is invariant under shifting x. Fitting on `enumerate()` produces the
+    identical number, and the assertion passes against the defect it was written to catch.
+
+    A real draft interleaves: this manager bids every third pick, so their `competitive_seq`
+    values step by 3 while their list index steps by 1. Now the two fits differ by that factor,
+    and only one of them is the rate the charter asks for -- dollars of skew per pick of the
+    night, not per pick of theirs.
+    """
+    board = {f"r{i}": value(f"r{i}", baseline=5.0) for i in range(18)}
+    # Slots 1, 2, 3 in rotation. Slot 2 pays steadily more as the night runs.
+    picks = []
+    for i in range(18):
+        slot = (i % 3) + 1
+        amount = 5 + (i // 3) * 6 if slot == 2 else 5
+        picks.append((i + 1, f"r{i}", slot, amount, False))
+    profile = profiles(par_skew(state_from(*picks), board))[2]
+
+    assert profile.picks == 6
+    assert profile.aggression_slope is not None
+
+    # The same figures fitted against the manager's own list index -- what `enumerate()` gives.
+    their_picks = [p for p in par_skew(state_from(*picks), board).picks if p.slot == 2]
+    by_index = _slope([(i, p.edge_skew) for i, p in enumerate(their_picks)])
+    assert by_index is not None
+    assert profile.aggression_slope != pytest.approx(by_index), (
+        "interleaving is what separates the two fits; without it the defect is invisible"
+    )
+    assert profile.aggression_slope == pytest.approx(by_index / 3, abs=0.01), (
+        "one pick of theirs is three picks of the night"
+    )

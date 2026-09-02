@@ -170,6 +170,51 @@ settings re-save.
 
 ---
 
+## Finding 11 — the public draft object carries the live nomination, which §2's ⛔ Hard Constraint says has no public feed
+
+**⚠️ ORCHESTRATOR DECISION REQUIRED. Flagged, not resolved.** Charter §1 says that where two
+passages contradict, the contradiction is surfaced rather than picked between. This is a charter
+passage contradicting observed data, which is the same situation with more at stake.
+
+Charter §2:184, under "⛔ The Hard Constraint — read this twice", states there is no public
+endpoint for, among other things, *the player currently on the block*, *the current high bid*,
+and *who is currently bidding*, and derives the whole hybrid manual-entry architecture from it.
+
+`fixtures/draft.json` — the plain public `/v1/draft/{id}` response, no websocket involved —
+carries all three in `metadata`:
+
+| Field | Observed value | Charter item it contradicts |
+|---|---|---|
+| `nominated_player_id` | `'4227'` | the player currently on the block |
+| `highest_offer` | `'1'` | the current high bid |
+| `nominating_slot` | `'5'` | who is currently bidding |
+| `offering_slot` | `'5'` | " |
+| `offering_user_id` | present | " |
+
+**What is genuinely absent** is the bid *ladder* (history of offers) and the nomination timer.
+And the picks feed is confirmed clean: no nominator field on the pick or in its metadata, across
+all 160 mock picks. So retroactive analysis of a finished draft is impossible as documented —
+this does not change DI-037's deviation.
+
+**What it does change is what is possible going forward**, and that is the part needing a
+decision:
+
+- Nomination behaviour (§4.6's fifth tendency) becomes measurable if a poller records
+  `nominating_slot` + `nominated_player_id` from the first nomination. It cannot be recovered
+  afterwards, so **this is decided before 9/5 or not at all**.
+- The manual-entry layer's premise weakens. It is still needed — a 1s poll against an
+  overwritten single-slot field will miss fast nominations, and there is no bid ladder — but
+  "there is no feed" and "there is a lossy feed worth cross-checking the operator against" are
+  different architectures.
+
+**Not proposed here, and no code added.** Reading this field is within the ToS constraint (it is
+the documented REST object, not the internal websocket, which remains out of scope and
+untouched), but building on an undocumented, unstable field on draft night is exactly the risk
+§2 was written to avoid. Recorded so the decision is made deliberately rather than by whoever
+next reads the fixture.
+
+---
+
 ## Endpoint status
 
 | Endpoint | Status | Note |

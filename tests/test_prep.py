@@ -278,3 +278,114 @@ def test_the_budget_scenarios_vary_the_allocation_not_just_the_budget(report: st
     assert "no pre-commitment" in section
     assert "two QBs at the top" in section
     assert "(-" in section or "(+" in section, "the cost of pre-committing is shown"
+
+
+# ------------- evaluation round 2: the report's own arithmetic, not just its section headings
+
+
+def test_the_page_reconciles_its_own_pool_arithmetic_against_the_config(report: str) -> None:
+    """97% line coverage, ~8% mutation coverage. `roster_live = roster_full` -- deleting the
+    keeper subtraction outright -- left every test green while the page printed 160 roster spots
+    against a 20-keeper league and re-priced the top asset by $4.59. Line coverage measures which
+    statements ran, not which numbers were checked, and nothing here was checking the numbers.
+
+    Derived from `config/league.yaml` and the manifest, so the assertion tracks the config
+    instead of pinning a figure that a settings change would falsify.
+    """
+    from draft_intel.config import load_league_config
+    from draft_intel.domain.keepers import load_manifest
+
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    kept = len(load_manifest(ROOT / "config" / "keepers.yaml").entries)
+
+    line = next(line for line in report.splitlines() if "roster spots remain" in line)
+    starting_slots, roster_spots = (int(w) for w in line.split() if w.isdigit())
+
+    assert roster_spots == config.auction_pool - kept, (
+        "roster spots remaining is the auction pool less the players already kept"
+    )
+    assert starting_slots == sum(config.starters.values()) * config.teams - kept, (
+        "a kept player is already sitting in a starting slot; that slot is not still open"
+    )
+    assert roster_spots < config.auction_pool, "the subtraction has to actually happen"
+
+
+def test_the_positional_need_column_sums_to_the_starting_slots_the_page_states(
+    report: str,
+) -> None:
+    """The same class of check one line further on: the map's own column against the map's own
+    total. `seat_keepers({})` -- ignoring which positions the keepers occupy -- printed 100
+    starting slots against a true 80, and no test compared the two."""
+    section = report.split("4. POSITIONAL MARKET MAP")[1].split("1. THE PRICED BOARD")[0]
+    stated = int(section.split("starting slots and")[0].split()[-1])
+    needs = [
+        int(line.split()[2])
+        for line in section.splitlines()
+        if line.startswith("  ")
+        and len(line.split()) >= 3
+        and line.split()[0] in {"QB", "RB", "WR", "TE", "K"}
+    ]
+    assert needs and sum(needs) == stated
+
+
+def test_the_as_loaded_scenario_reports_the_money_actually_paid_for_the_keepers(
+    report: str,
+) -> None:
+    """`keeper_spend = 0` -- deleting the sum outright -- passed the whole suite. Every existing
+    assertion about the figure read it back off the report and checked it against itself, which
+    is satisfied by any number including zero.
+
+    Checked here against the picks feed the report sources it from, and against the league's own
+    money identity: what the keepers cost plus what is left to bid must be the whole pot.
+    """
+    import json
+
+    from draft_intel.config import load_league_config
+    from draft_intel.domain.keepers import load_manifest, resolve_manifest
+
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    players = json.loads((ROOT / "fixtures" / "players_slim.json").read_text())
+    resolved = resolve_manifest(load_manifest(ROOT / "config" / "keepers.yaml"), players)
+    kept = {pid for _owner, pid in resolved}
+    picks = json.loads((ROOT / "fixtures" / "picks.json").read_text())
+    paid = sum(int(p["metadata"]["amount"]) for p in picks if p["player_id"] in kept)
+
+    assert paid > 0, "the fixture must actually contain keeper money for this to test anything"
+
+    # Two scenarios print this line; the as-loaded one is the mock's own money.
+    scenarios = {
+        int(line.split("SK $")[1].split(",")[0]): int(line.split("live money $")[1].split(",")[0])
+        for line in report.splitlines()
+        if "SK $" in line and "live money" in line
+    }
+    assert paid in scenarios, f"no scenario reports the ${paid} actually paid; saw {scenarios}"
+    assert scenarios[paid] == config.teams * config.budget - paid, (
+        "money left to bid is the pot less what the keepers cost"
+    )
+    assert all(v > 0 for v in scenarios.values())
+
+
+def test_the_board_reconciles_the_talent_it_prices_against_the_money_in_the_room(
+    report: str,
+) -> None:
+    """Every price on this page scales with live money, and nothing was checking that it did.
+    Deleting the keeper-spend sum outright moved the top asset $26.60 -> $37.32 and re-priced all
+    140 players by 40%, with the whole suite green: 97% line coverage measures which statements
+    ran, not which numbers were checked.
+
+    The identity is the one an auction has to satisfy -- the board prices exactly the money that
+    will be spent on it -- so it is now printed where the user can check it by eye too.
+    """
+    from draft_intel.config import load_league_config
+
+    config = load_league_config(ROOT / "config" / "league.yaml")
+    line = next(line for line in report.splitlines() if "Reconciles:" in line)
+    priced, live, pot, keepers = (
+        int(word.strip("(),.").lstrip("$").replace(",", ""))
+        for word in line.split()
+        if word.strip("(").startswith("$")
+    )
+    assert pot == config.teams * config.budget
+    assert live == pot - keepers
+    assert keepers > 0, "the keepers cost real money; zero means the sum was not taken"
+    assert abs(priced - live) <= 1, f"board prices ${priced} against ${live} of live money"

@@ -406,6 +406,15 @@ def _priced_board(board: ValueBoard, keepers: KeeperBoard) -> list[str]:
         out.append(
             "  Only one keeper-price scenario is complete, so no alternate price is shown.\n"
         )
+    # The board's money identity, printed so it can be checked by eye. Every price on this page
+    # scales with `total_live_money`, and deleting the keeper-spend sum outright moved the top
+    # asset from $26.60 to $37.32 with the whole test suite green -- 97% line coverage measures
+    # which statements ran, not which numbers were checked.
+    priced_total = sum(p.baseline_value for p in board.players if p.in_pool_live)
+    out.append(
+        f"  Reconciles: ${priced_total:,.0f} of talent priced against ${board.total_live_money:,}"
+        f" of live money (${board.total_budget:,} pot less ${board.keeper_spend:,} on keepers).\n"
+    )
     out.append(
         f"  {'#':>3} {'player':24} {'pos':4} {'pts':>7} {'VORP':>7} "
         f"{'LIVE $':>7} {'rule $':>7} {'book $':>7}"

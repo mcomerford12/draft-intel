@@ -543,3 +543,48 @@ def test_the_oracle_would_actually_catch_a_wrong_dp():
 
     assert dp.objective != float("-inf"), "a comparison of two infeasible answers proves nothing"
     assert dp.objective != pytest.approx(wrong, abs=1e-4)
+
+
+# ------------------------------------ evaluation round 2: lineups that could be fielded
+
+
+def test_a_lineup_never_leaves_a_starting_slot_open_with_an_eligible_player_benched():
+    """The FLEX split is committed before the players are known, so it can hand a slot to a
+    position the roster then buys nobody at. That slot is unfillable while an eligible player
+    sits behind it -- and because a benched player is worth `λ x vorp`, the DP scored that
+    fiction *higher* than any legal lineup and returned it.
+
+    Two players, one open FLEX: objective 202 with an empty starting eleven.
+    """
+    pool = [
+        player("rb", "RB", 104.0, 6, vorp=106.0),
+        player("te", "TE", 73.0, 1, vorp=96.0),
+        player("wr", "WR", 111.0, 8, vorp=13.0),
+    ]
+    result = best_roster(pool, budget=7, slots=2, starters={"QB": 1, FLEX: 1}, bench_weight=1.0)
+    assert result.starters, "a roster holding two FLEX-eligible players must field one"
+    assert result.objective == pytest.approx(200.0), "104 starting + 1.0 x 96 benched"
+    assert result.objective == pytest.approx(
+        sum(c.points for c in result.starters) + 1.0 * sum(c.vorp for c in result.bench)
+    ), "the reported objective must be the reported lineup's"
+
+
+def test_every_flex_slot_a_roster_can_fill_is_filled():
+    """Same defect, stated as the rule rather than the symptom."""
+    pool = [player(f"r{i}", "RB", 50.0 - i, 1, vorp=90.0) for i in range(3)]
+    result = best_roster(pool, budget=3, slots=3, starters={FLEX: 2}, bench_weight=1.0)
+    assert len(result.starters) == 2, "two FLEX slots, three eligible players held"
+    assert len(result.bench) == 1
+
+
+def test_the_exactness_precondition_is_reported_when_it_fails():
+    """`λ x vorp <= points` is what makes the DP exact, and nothing enforces it: `Candidate`
+    takes two free floats and DI-038 overrides `points` without touching `vorp`. The last
+    unstated precondition in this module was a defect, so this one is checked per call."""
+    breaks_it = [player("a", "RB", 10.0, 1, vorp=100.0), player("b", "RB", 9.0, 1, vorp=0.0)]
+    noted = best_roster(breaks_it, budget=5, slots=2, starters={"RB": 1}, bench_weight=1.0)
+    assert any("NON-DOMINANT BENCH" in note for note in noted.notes)
+
+    holds = [player("a", "RB", 100.0, 1, vorp=10.0), player("b", "RB", 90.0, 1, vorp=0.0)]
+    quiet = best_roster(holds, budget=5, slots=2, starters={"RB": 1}, bench_weight=0.2)
+    assert not any("NON-DOMINANT BENCH" in note for note in quiet.notes)

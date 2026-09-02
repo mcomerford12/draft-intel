@@ -52,6 +52,28 @@ start depends on the whole roster — so positions do not decouple. Three steps 
    the other. Sorting on the correct key removes the precondition instead of documenting it.
 3. **Knapsack the per-position tables together** over remaining slots and remaining dollars.
 
+**The one precondition, stated because the last unstated one was a defect.** Step 1 commits each
+FLEX slot to a position *before* the players are known, so a split can hand a slot to a position
+the roster then buys nobody at. :func:`_split_lineup` repairs that -- spare FLEX room goes to the
+best eligible player still benched -- and the objective is scored from the repaired lineup, so
+what is reported is always a team that could actually be fielded. But the *search* is still
+guided by the pre-repair table, and that only agrees with the repaired value while
+
+    ``λ x vorp <= points`` for every candidate
+
+holds: starting a player is then never worth less than benching them, every optimal lineup is
+already maximal, and no split can profit by stranding a slot. Under that condition the DP is
+exact, verified against a brute-force enumerator over 1,500 randomised states (1-6 slots,
+λ ∈ {0, 0.2, 1.0}, forced and excluded arms). The same sweep with VORP drawn freely produced 66
+mismatches -- among them a two-player roster scored **202 with no starters at all**, because
+benching both beat fielding either.
+
+The condition holds throughout this project by construction: ``vorp = max(0, points -
+replacement) <= points`` and λ defaults to 0.2. It is not enforced by ``Candidate``, though, and
+DI-038 lets a user override ``points`` without touching ``vorp``, so :func:`best_roster` checks
+it per call and says so in :attr:`Roster.notes` when it fails. Outside it the answer is still
+legal and still correctly scored -- it is simply no longer guaranteed optimal.
+
 **Dominance pruning is exact, not a heuristic.** A player who costs at least as much as another
 at the same position and scores no better can never appear in an optimal roster, so removing
 them changes no answer. On a real board this cuts several hundred candidates to a few dozen,
@@ -396,6 +418,23 @@ def best_roster(
         by_position.setdefault(candidate.position, []).append(candidate)
 
     notes: list[str] = []
+
+    # The exactness precondition, checked per call rather than assumed. See the module docstring:
+    # a player worth more benched than started can make a split profit by stranding a starting
+    # slot, and the search is guided by the pre-repair table.
+    dominated_bench = sum(
+        1
+        for group in (*by_position.values(), forced)
+        for c in group
+        if c.starter_priority(bench_weight) < 0
+    )
+    if dominated_bench:
+        notes.append(
+            f"NON-DOMINANT BENCH: {dominated_bench} candidate(s) score more benched than "
+            f"started at λ={bench_weight}; the roster returned is legal and correctly scored "
+            "but is no longer guaranteed optimal"
+        )
+
     pruned: dict[str, list[Candidate]] = {}
     for position, group in by_position.items():
         kept, capped = _prune(group, cap, slots)
@@ -527,13 +566,18 @@ def _solve_split(
     starters_chosen, bench = _split_lineup(
         players, base=base, split=split, bench_weight=bench_weight
     )
+    # Scored from the lineup that is reported, not from the table cell that found it. The two
+    # agree everywhere the DP is exact, and where they do not -- a split that stranded a FLEX
+    # slot, repaired above -- the table cell is the value of a team nobody could field. Reporting
+    # the cell would put a number on the page that the roster underneath it does not support.
+    objective = sum(c.points for c in starters_chosen) + bench_weight * sum(c.vorp for c in bench)
     return Roster(
         players=players,
         starters=starters_chosen,
         bench=bench,
         spent=best_spend,
         slots_used=len(players),
-        objective=round(float(row[best_spend]), 4),
+        objective=round(float(objective), 4),
         starting_points=round(sum(c.points for c in starters_chosen), 2),
         bench_weight=bench_weight,
         flex_split=dict(split),
@@ -574,17 +618,45 @@ def _split_lineup(
     the reported objective is not the one that was optimised, which is the defect the earlier
     forced-player handling had -- and sorting here on ``points`` while the DP sorted on
     ``points - λ x vorp`` would reintroduce it in a subtler form.
+
+    **The lineup is then made maximal, which the fixed split alone does not guarantee.** The
+    split commits each FLEX slot to a position before the players are known, so it can hand one
+    to a position the roster ends up buying nobody at. That slot is then unfillable while a
+    FLEX-eligible player sits on the bench -- and a lineup with an open slot and an eligible
+    player behind it is not a lineup anybody could field. Left alone the DP scores it anyway,
+    and because a benched player is worth ``λ x vorp``, that fiction can *outscore* every legal
+    lineup: on a two-player roster it returned an objective of 202 with **no starters at all**.
+    Any spare FLEX room is reassigned here to the best eligible player still on the bench.
     """
     starters: list[Candidate] = []
     bench: list[Candidate] = []
     by_position: dict[str, list[Candidate]] = {}
     for player in players:
         by_position.setdefault(player.position, []).append(player)
+
     for position, group in by_position.items():
         group.sort(key=lambda c: (-c.starter_priority(bench_weight), c.price, c.player_id))
         room = base.get(position, 0) + split.get(position, 0)
         starters.extend(group[:room])
         bench.extend(group[room:])
+
+    # Only room that came from FLEX is transferable; an unfilled base slot belongs to its own
+    # position and nobody else can stand in it. Positions the roster bought nobody at are the
+    # common case and are counted here too.
+    spare_flex = sum(
+        min(max(0, base.get(position, 0) + count - len(by_position.get(position, ()))), count)
+        for position, count in split.items()
+    )
+
+    if spare_flex > 0:
+        promotable = sorted(
+            (c for c in bench if c.position in FLEX_ELIGIBLE),
+            key=lambda c: (-c.starter_priority(bench_weight), c.price, c.player_id),
+        )[:spare_flex]
+        promoted = {c.player_id for c in promotable}
+        starters.extend(promotable)
+        bench = [c for c in bench if c.player_id not in promoted]
+
     starters.sort(key=lambda c: -c.points)
     bench.sort(key=lambda c: -c.points)
     return tuple(starters), tuple(bench)

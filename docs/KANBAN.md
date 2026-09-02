@@ -587,16 +587,18 @@ mutated in place, and the class exists for no other reason.**
 `setdefault` — 7 of the 8 mutating `dict` methods. `__ior__` is inherited unblocked:
 
 ```python
-s = fold([obs(1, 1, 'A', 1, 50)], slots=range(1, 11))
-s.teams.__ior__({99: None})          # no exception at all
+s = fold([obs(1, 1, "A", 1, 50)], slots=range(1, 11))
+s.teams.__ior__({99: None})  # no exception at all
 len(s.teams)  # 11   -- derived state silently corrupted
 
-s2 = fold([obs(1, 1, 'A', 1, 50)], slots=range(1, 11))
-s2.total_spent + s2.total_remaining          # 2000
-try: s2.teams |= {11: TeamState(slot=11, budget=200, spent=0, roster=(), total_slots=16)}
-except ValidationError: pass                 # pydantic refuses the REBINDING, after the fact
-sorted(s2.teams)                             # [1..10, 11]
-s2.total_spent + s2.total_remaining          # 2200  -- conservation broken in place
+s2 = fold([obs(1, 1, "A", 1, 50)], slots=range(1, 11))
+s2.total_spent + s2.total_remaining  # 2000
+try:
+    s2.teams |= {11: TeamState(slot=11, budget=200, spent=0, roster=(), total_slots=16)}
+except ValidationError:
+    pass  # pydantic refuses the REBINDING, after the fact
+sorted(s2.teams)  # [1..10, 11]
+s2.total_spent + s2.total_remaining  # 2200  -- conservation broken in place
 ```
 
 The `|=` form raises *after* the in-place mutation has already happened, so the model is left
@@ -788,10 +790,13 @@ override applied:
 ```python
 from draft_intel.domain.ledger import fold
 from draft_intel.models import BudgetAdjustment, Revert
-ev = [BudgetAdjustment(seq=1, slot=1, delta=-40),
-      Revert(seq=2, target_seq=1),   # undo the correction
-      Revert(seq=3, target_seq=2),   # put it back
-      Revert(seq=4, target_seq=3)]   # take it off again
+
+ev = [
+    BudgetAdjustment(seq=1, slot=1, delta=-40),
+    Revert(seq=2, target_seq=1),  # undo the correction
+    Revert(seq=3, target_seq=2),  # put it back
+    Revert(seq=4, target_seq=3),
+]  # take it off again
 s = fold(ev, slots=range(1, 11))
 # override_delta -40   budget 160   alerts ()
 # expected:     0             200
@@ -817,7 +822,8 @@ reopened by B9's fix, and it makes the suite red 1 run in 3.**
 
 ```python
 from draft_intel.sleeper.poller import parse_picks
-parse_picks([{'pick_no':1,'draft_slot':1,'player_id':'A','metadata':{'amount':'inf'}}])
+
+parse_picks([{"pick_no": 1, "draft_slot": 1, "player_id": "A", "metadata": {"amount": "inf"}}])
 # OverflowError: cannot convert float infinity to integer
 ```
 
@@ -1060,8 +1066,12 @@ budget.* `Slot` is validated `1 <= n <= 32`; nothing cross-checks it against the
 A fat-fingered "11" instead of "1" in the override UI:
 
 ```python
-ev = [PickObserved(seq=1, pick=PickSnapshot(pick_no=1, player_id='A', slot=1, amount=50, is_keeper=False)),
-      BudgetAdjustment(seq=2, slot=11, delta=-40, reason="typo: meant slot 1")]
+ev = [
+    PickObserved(
+        seq=1, pick=PickSnapshot(pick_no=1, player_id="A", slot=1, amount=50, is_keeper=False)
+    ),
+    BudgetAdjustment(seq=2, slot=11, delta=-40, reason="typo: meant slot 1"),
+]
 s = fold(ev, slots=range(1, 11))
 # total_spent + total_remaining = 2000
 # 2000 + override_delta        = 1960
@@ -1077,7 +1087,7 @@ cannot catch this: it draws `st.integers(1, 10)`, exactly the in-league range.
 `rosters.setdefault(pick.slot, [])` creates the slot; the team loop then hands it a full budget:
 
 ```python
-s = fold([obs(1,'A',1,50,1), obs(2,'B',11,5,2)], slots=range(1, 11))
+s = fold([obs(1, "A", 1, 50, 1), obs(2, "B", 11, 5, 2)], slots=range(1, 11))
 # teams = 11, total_spent + total_remaining = 2200 (expected 2000), alerts = ()
 ```
 
@@ -1088,8 +1098,12 @@ the player sits on two rosters and the money is counted twice, with no `supersed
 alert:
 
 ```python
-ev = [ManualKeeper(seq=1, slot=3, player_id='P', amount=30),
-      PickObserved(seq=2, pick=PickSnapshot(pick_no=5, player_id='P', slot=4, amount=30, is_keeper=False))]
+ev = [
+    ManualKeeper(seq=1, slot=3, player_id="P", amount=30),
+    PickObserved(
+        seq=2, pick=PickSnapshot(pick_no=5, player_id="P", slot=4, amount=30, is_keeper=False)
+    ),
+]
 s = fold(ev, slots=range(1, 11))
 # slot3 spent=30 roster=['P']      slot4 spent=30 roster=['P']
 # player P counted 2 times, $60 charged for one $30 keeper
@@ -1105,7 +1119,7 @@ entry, so the mismatch case is entirely unexercised.
 Underlying it: **there is no duplicate-player detection anywhere.**
 
 ```python
-s = fold([obs(1,'X',1,50,1), obs(2,'X',2,60,2)], slots=range(1, 11))
+s = fold([obs(1, "X", 1, 50, 1), obs(2, "X", 2, 60, 2)], slots=range(1, 11))
 # player X on slots [1, 2]   alerts=()
 ```
 
@@ -1128,7 +1142,8 @@ and is green only by fixture luck.** It asserts `max_bid + (open_slots - 1) <= r
 precondition. On a broke team:
 
 ```python
-s = fold([obs(1,'a',1,200,1)], slots=[1]); t = s.teams[1]
+s = fold([obs(1, "a", 1, 200, 1)], slots=[1])
+t = s.teams[1]
 # spent=200 remaining=0 open_slots=15 max_bid=0
 # assertion: 14 <= 0  ->  False
 ```
@@ -1148,7 +1163,9 @@ and `ledger.py:67` matches on equality, so one revert wipes every event the stor
 The shipped gate test itself constructs `ManualKeeper(seq=0, ...)`, so mixed stamped/unstamped logs
 are a real shape.
 ```python
-fold([obs_unstamped_1, obs_unstamped_2, Revert(seq=99, target_seq=0)], slots=[1]).teams[1].spent  # 0, expected 30
+fold([obs_unstamped_1, obs_unstamped_2, Revert(seq=99, target_seq=0)], slots=[1]).teams[
+    1
+].spent  # 0, expected 30
 ```
 Also: `Revert` is documented as neutralising "an earlier override event" but will happily neutralise
 a `PickObserved`, silently deleting a money fact.
@@ -1324,7 +1341,19 @@ append to. Written to schema here, retroactively for the cards already built.
   before-inflation choice confirmed; the `COMPETITIVE` filter confirmed; unpriced picks excluded
   rather than zeroed. **Closed in DI-048** — `Distribution`, `PriceBucket`, `PickSkew.edge_z`,
   `SkewBoard.by_price_bucket`, `SkewBoard.distribution`, `SkewBoard.outliers()`.
-- **Evaluator verdict:** pending (round 1 in flight).
+- **Evaluator verdict: APPROVED** (DI-EVAL-5, adversarial round 2; artifact `di-039-make-prep`
+  @ `bf93f1d`, escapes re-confirmed at `e21fb32`). Ran, did not read. Six mutants applied to
+  `skew.py` under `PYTHONPATH` precedence (proved first with a control mutant): judging each pick
+  against `step.after` instead of `step.before`; sourcing `market_value` from
+  `PlayerValue.market_value` instead of `quant.market`; counting an off-board pick instead of
+  skipping it; `stdev` 0.0 on a single pick; `MIN_VALUE_FOR_PCT` 1.0 → 0.0; edge-skew sign flip.
+  **All six killed.** The two headline claims are load-bearing, not decorative. The §4.6
+  aggregation gap the reviewer found independently (per-price-bucket, median, per-pick z-score)
+  was present in the artifact and is confirmed closed at `e21fb32`, so it is not re-litigated
+  here. Ceremonial-pick contamination audit passes: on the real 160-pick fixture, Case A
+  (`is_keeper` only, empty manifest) and Case B (manifest only, `is_keeper` false) produce
+  **bit-identical** `SkewBoard.model_dump()`; leaving one ceremonial pick `COMPETITIVE` moves
+  overall mean edge skew 4.01 → 4.21 and pick count 140 → 141, so the filter is detectable.
 
 ### [DI-034] Opponent max-bid and affordability engine
 
@@ -1343,7 +1372,21 @@ append to. Written to schema here, retroactively for the cards already built.
   user excluded from their own threat list — all verified independently. One MINOR (m4): the
   `drops_out_above` docstring said "one dollar under its max bid" and the function returns
   `max_bid`. **Closed in DI-048** — the docstring now states what the code does and why.
-- **Evaluator verdict:** pending (round 1 in flight).
+- **Evaluator verdict: APPROVED, with one verification claim disproved** (DI-EVAL-5). Seven
+  mutants applied; five killed (collective FLEX overflow, slot-keyed aggression, `None` ≠ zero
+  threat, binding-constraint label, `price_that_clears` off-by-one). **Two escaped the full
+  suite, at `bf93f1d` and still at `e21fb32`:**
+  - **e1 (criterion 1 is unenforced).** Replacing `max_bid=team.max_bid` with
+    `team.remaining - (team.open_slots - 1)` — the exact recomputation the docstring says must
+    never happen — passes every test. It is *not* an equivalent mutant: a team with a full roster
+    reports `max_bid` 1 instead of 0 and `can_afford` flips to True, putting a team that cannot
+    bid on the threat list; a team with $5 left and 11 open slots reports −$5 instead of $0.
+    Neither state is constructed anywhere in `tests/test_affordability.py`.
+  - **e2.** `MIN_AGGRESSION_SAMPLE` 3 → 1 escapes; the tests pass `min_sample` explicitly, so the
+    "three picks" in criterion 3 is pinned nowhere.
+  The **"16/17 mutation-verified"** line is therefore materially overstated. No wrong output was
+  produced from the shipped code, so this is APPROVED — but the two escapes should be closed
+  before the cockpit reads `Opponent.max_bid`.
 
 ### [DI-035] DP roster optimizer + CBC oracle equivalence test
 
@@ -1384,7 +1427,44 @@ append to. Written to schema here, retroactively for the cards already built.
   against 450ms). **Closed in DI-048** — `starter_priority`, dominance on both dimensions, an
   independently-drawn VORP in `random_pool`, the seed sweep 12 → 30, a reserved cheapest tranche
   in the cap, and the notes carried to the page.
-- **Evaluator verdict:** pending (round 1 in flight).
+- **Evaluator verdict: REJECTED** (DI-EVAL-5; artifact `bf93f1d`, all findings re-confirmed
+  present at `e21fb32`).
+  **What holds.** I wrote an *independent* brute-force enumerator (not CBC: the card records the
+  oracle was itself wrong once) that enumerates every legal roster and every legal lineup
+  assignment by permutation. Across **1,200 random states** — 1–6 slots, 5–14 candidates, λ ∈
+  {0, 0.2, 0.5, 1.0}, including forced arms, multi-forced arms and excluded arms — the DP matched
+  on objective **and** on legality (exact slot fill, no duplicates, no over-budget, forced
+  present, excluded absent, FLEX never over-issued, `starting_points` equal to the reported
+  starters). The DP is exact under its real precondition. Criterion 1 is met.
+  **B1 — the latency section measures the wrong thing, and the deliverable is 20–1000× over
+  budget.** The docstring times `best_roster` only. §4.7b budgets the *walk-away curve* at 200ms
+  and ADR-0003 budgets a per-pick precompute. Measured on the real 140-player pool at `e21fb32`:
+  one curve, 14 slots / $145, $1–$60 = **12.5 s**; `walkaway_board(top=3)` mid-draft (8 slots /
+  $120) over the full legal range = **26.3 s**, i.e. **~219 s per settled pick** at ADR-0003's own
+  `top=25`. The card's claim that the over-budget 14-slot state "is the only state that cannot
+  occur during live bidding" is backwards: 14 open slots is the state at the *first nomination*,
+  which is precisely when a walk-away number is needed.
+  **B2 — `_prune`'s exactness claim is false as written.** "Dominance pruning is exact, not a
+  heuristic. A player who costs at least as much as another at the same position and scores no
+  better can never appear in an optimal roster" — they can, as a bench player with higher VORP,
+  because `_prune` compares only `(price, points)` and the bench term is `λ × vorp`.
+  Reproducer: `RB a(100pts,100vorp,$5)`, `b(90,0,$5)`, `d(10,10,$5)`, `budget=10, slots=2,
+  starters={RB:1}, λ=1.0` → DP returns `{a,b}` at 100.0; the true optimum is `{a,d}` at 110.0.
+  It is exact only under the unstated extra precondition that VORP is non-decreasing in points
+  *within* a position, which holds today solely because `vorp = max(0, points − replacement[pos])`.
+  Nothing validates it on `Candidate`, and DI-038's per-player `points` override breaks it the
+  moment Sprint 3 wires overrides into the optimizer.
+  **B3 — the regression the module says it fixed is untested.** Reverting `_reconstruct`'s
+  `step = index` to `step = step - 1` — the back-pointer bug the docstring calls "the worse of the
+  two failures" — **escapes the entire suite**, at `bf93f1d` and still after DI-049's claimed
+  "13/13". It is not equivalent: seed 757 of my generator (14 candidates, 6 slots, $25, λ=0.5)
+  returns a roster containing `p5` **twice**. No test asserts that `Roster.players` holds distinct
+  ids.
+  **B4 — the safety cap is unobservable end to end.** `MAX_CANDIDATES_PER_POSITION` 60 → 8 leaves
+  the suite green; nothing asserts `is_exact` on any real-board solve.
+  **m1 — the CBC oracle never exercises `forced` or `excluded`**, which is where two of the card's
+  own three "defects found" lived. `random_pool` also sets `vorp == points`, so no oracle state can
+  distinguish the two terms of ADR-0004's objective.
 
 ### [DI-036] Walk-away curves, precomputed per player
 
@@ -1411,7 +1491,25 @@ append to. Written to schema here, retroactively for the cards already built.
   correct; no double-buy, and the baseline arm confirmed to genuinely exclude the player.
   **Closed in DI-048** — binary search over the delta, plus `max_legal_bid` and
   `worth_it_at_any_legal_price`.
-- **Evaluator verdict:** pending (round 1 in flight).
+- **Evaluator verdict: REJECTED** (DI-EVAL-5; artifact `bf93f1d`, re-confirmed at `e21fb32`).
+  **B1 — criterion 3 ("monotonicity checked, not assumed") is not verified, and the two tests
+  named for it cannot fail.** Replacing `_is_monotone`'s body with `return True` **escapes the
+  full suite**. `test_the_curve_falls_as_the_price_rises` builds a board whose deltas are
+  `[100.0] × 10` — a perfectly flat line — so it demonstrates nothing about the curve *falling*;
+  `test_at_lambda_zero_the_walk_away_price_is_just_the_budget_ceiling` asserts that same flatness
+  two screens later. `test_no_walk_away_curve_on_the_real_board_is_broken` is
+  `assert "BROKEN" not in report`, which also passes for a report containing zero curves.
+  **B2 — `test_the_forced_arm_never_buys_the_player_twice` names a protection that does not
+  exist.** Deleting `excluded=frozenset({player.player_id})` from `walkaway._forced` changes
+  nothing in **500/500** random solves, because `best_roster` already skips `forced_ids`. The test
+  passes for the wrong reason.
+  **B3 — latency.** Shared with DI-035 B1: 12.5 s for one 60-point curve at 14 slots against a
+  200 ms budget, and ADR-0003's "precomputed after each settled pick" costs ~219 s per pick at
+  `top=25`. Neither `walkaway.py` nor the card reports a curve timing at all.
+  **m1 — the walk-away price is taken off the wrong axis.** §4.7b and this module's own docstring
+  put Δ *starting points* on the y-axis, but `walk_away_price` is selected from `delta` (the
+  ADR-0004 objective). `starting_points_delta` is computed, displayed and never used for the
+  crossing, and its monotonicity is never checked.
 
 ### [DI-037] Manager tendency profiles (keyed on `competitive_seq`)
 
@@ -1437,7 +1535,36 @@ append to. Written to schema here, retroactively for the cards already built.
   deviation is judged SOUND — verified against the actual pick payload keys and corroborated by
   charter §2 — and is correctly surfaced through `Profile.unavailable` rather than left in a
   docstring.
-- **Evaluator verdict:** pending (round 1 in flight).
+- **Evaluator verdict: REJECTED** (DI-EVAL-5; artifact `bf93f1d`, B1 and B3 still present at
+  `e21fb32`).
+  **B1 — the card's headline criterion is untestable as written, and its test is a tautology.**
+  `test_the_aggression_slope_is_fitted_on_competitive_seq_not_pick_no` gives one manager eight
+  *consecutive* picks, so `competitive_seq` and `enumerate(picks)` are the same sequence up to a
+  shift and both are offset-invariant. Fitting on `enumerate(picks)` instead of `competitive_seq`
+  **escapes the full suite**. It is not equivalent: in a three-manager interleaved draft (manager
+  2 holding seqs 2, 5, 8, 11, 14, 17) the true slope is **0.6897/pick** and the mutant's is
+  **2.0691/pick** — exactly 3×; in the real ten-team draft it would be ~10×. `aggression_slope` is
+  documented as "dollars of edge skew per competitive pick" and could silently be per *own* pick.
+  **B2 — the least-squares formula's magnitude was unpinned** at `bf93f1d`: replacing
+  `numerator/denominator` with `numerator/len(xs)` (covariance, not slope) escaped, turning 0.6897
+  into 18.105 with only the sign preserved. Confirmed closed at `e21fb32`.
+  **B3 — the "nomination behaviour is unavailable" claim is factually false, and is contradicted
+  by a fixture committed in this repository.** `fixtures/draft.json` `metadata` carries
+  `nominated_player_id: '4227'`, **`nominating_slot: '5'`**, `offering_slot: '5'`,
+  `offering_user_id`, `highest_offer: '1'` and `last_action_at` — real values from the real draft
+  endpoint the app already fetches. The shipped string, which reaches the user through
+  `Profile.unavailable` and `describe()`, asserts "no field anywhere in the payload carries it".
+  Two consequences beyond this card: (a) `docs/api-findings.md` never records these fields despite
+  Sprint 0's mandate to map and fixture the response shapes; (b) they also contradict §2's hard
+  constraint ("no documented endpoint for the player currently on the block / the current high bid
+  / who is currently bidding"). Per the charter's standing instruction this contradiction must be
+  **flagged to the orchestrator, not silently resolved**. Building nomination history needs
+  polling and is a scope call — declaring it impossible on a false premise is not.
+  **What holds.** `_gini` matches an independent reference implementation
+  (`Σ|xi−xj| / (2n²·x̄)`) to four decimals on five distributions including the degenerate ones.
+  The `par_skew` helper genuinely does hold inflation at exactly 1.0000 for at-value bids (I
+  suspected it did not; it does), so no spurious trend is injected. Run detection, sample floors
+  and `None`-vs-zero are all mutation-covered.
 
 ### [DI-038] Value override plumbing
 
@@ -1457,7 +1584,18 @@ append to. Written to schema here, retroactively for the cards already built.
   an unknown player raise. Carried forward to Sprint 3: `OverriddenValue` carries no `vorp`, so
   overriding `points` decouples the two — which is precisely the invariant DI-035's M1 depended
   on, and the reason that fix could not be deferred.
-- **Evaluator verdict:** pending (round 1 in flight).
+- **Evaluator verdict: APPROVED** (DI-EVAL-5; artifact `bf93f1d`). Six mutants applied to
+  `overrides.py`, **all six killed**: scaling a manual override by the positional multiplier
+  (precedence backwards); blacklisting zeroing `baseline_value` but not `market_value`; silently
+  renormalising `sum_baseline_after` to `total_live_money`; dropping the model's number out of
+  `deltas()`; swallowing an override that names nobody; accepting a non-positive multiplier. Both
+  claims verified by running: no implicit renormalisation (`renormalise()` returns a preview and
+  applies nothing, and returns `None` rather than a factor of 1.0 when the board reconciles), and
+  the model's figures are structurally inseparable from the user's on `OverriddenValue`.
+  **One forward-looking note, not blocking here:** `apply_overrides` can lower a player's `points`
+  while leaving `vorp` untouched, which breaks the unstated precondition the DP relies on (see
+  DI-035 B2). Harmless today because nothing feeds overridden values to the optimizer; it becomes
+  reachable the moment Sprint 3's inline value editing does.
 
 ### [DI-039] `make prep` — the priced board and printable report
 
@@ -1494,7 +1632,71 @@ append to. Written to schema here, retroactively for the cards already built.
   content. **Closed in DI-048** — `_retention_prices` with a provenance section, a signed
   scenario-named band, everything derived from config, league-wide divisor, and a shared
   largest-remainder `allocate_flex`.
-- **Evaluator verdict:** pending (round 1 in flight).
+- **Evaluator verdict: REJECTED** (DI-EVAL-5; artifact `bf93f1d`. B2 and B4 confirmed closed at
+  `e21fb32`; B1, B3, B5, B6, B7, m1 and m2 all still present).
+  **B1 — `prep.py` has 97% line coverage and ~8% mutation coverage, and the keeper double-count
+  audit does not reach it.** Eleven of twelve mutations to `prep.py` escaped the full 444-test
+  suite at `bf93f1d`; ten of twelve still escape at `e21fb32` after DI-049's claimed "39/41".
+  Both halves of the §10-Critical keeper double-count are among them, and both produce a
+  materially wrong printed board with a green suite:
+  - `roster_live = roster_full` (keepers not removed from **supply**) → the report prints
+    "**160** roster spots remain", QB/RB/WR/TE startable counts all shift, and the top asset
+    re-prices **$26.60 → $22.01**, a 17% under-price.
+  - `seat_keepers({})` (keeper slots not removed from **demand**) → "**100** starting slots
+    remain" and QB need 20 instead of 13.
+  The underlying functions *are* asserted (`tests/test_quant.py` pins 80 and 140 on the real
+  fixture), but `prep.py` re-wires the pipeline by hand in ~55 lines and that wiring is asserted
+  nowhere. Also escaping: `price=1` for every optimizer candidate (destroying sections 6 and 7),
+  and printing `board.available()[-30:]` — the **worst** 30 players — as "THE PRICED BOARD".
+  **B2 — arithmetic defect in the `_priced_board` band (closed at `e21fb32`).** At `bf93f1d` the
+  band was `[base, base × (high_ratio/low_ratio)]` irrespective of which scenario the board was
+  priced under, so it ran the wrong way whenever loaded keeper prices come in *below* the 75%
+  rule — the charter's expected case. Reproduced by scaling the fixture's keeper amounts to 40%:
+  as-loaded 1.1839×, under-rule 1.0747×, top player LIVE $33.18, correct band **$29.96–$33.18**,
+  printed band **$33–$37** — both ends too high and the top corresponding to no scenario the model
+  computed.
+  **B3 — section 3 mixes two different market-value bases inside one block, and a human cannot
+  reconcile it by hand.** `KeeperLine.book_value` comes from `PlayerValue.market_value` (our
+  model) while `rule_price` comes from the `MarketValues` provider. The user's own row prints
+  "Allen, London book **50**" — built from a $26.17 model value — directly above
+  "ALERT Me: Josh Allen loaded at $39, **rule implies $27**", which requires a $36 book value. The
+  same split moves the headline under-rule keeper surplus from **+$113** (model book − provider
+  rule prices) to **+$135** (provider on both sides), a 20% swing on the number §1.1 calls "the
+  single most actionable pre-draft output of the whole system". §4.9 exists so the user can argue
+  with the board; these two numbers cannot be reconciled from the page.
+  **B4 — section 4's own arithmetic contradicted itself (closed at `e21fb32`).** Needs printed as
+  QB 13 / RB 20 / WR 19 / TE 16 / K 10 = **78**, three lines above "**80** starting slots …
+  remain", because `demand.remaining_flex // len(FLEX_ELIGIBLE)` dropped two FLEX slots to
+  integer division.
+  **B5 — §4.9 item 1 is not fully rendered.** It requires tier and positional rank *per player*
+  and the board "sorted and sliced by position". The report prints one unsegmented top-30 with
+  neither column. Criterion 1 ("all seven sections render") is met only at heading granularity —
+  which is also all `test_every_charter_section_is_present` checks.
+  **B6 — the `low` column is degenerate.** On all 30 rows of the shipped report `low ==
+  round(LIVE)`, so a three-column "range" carries two identical numbers on every line.
+  **B7 — target walk-away prices are sampled on a $3 grid and presented as exact.** Section 7 says
+  "the MOST you should pay" with no disclosure of the grid; six of twelve targets land on the same
+  $22 rung, and the top target reads **$25** against **$26** at $1 resolution.
+  **m1 — prose contradicts the data directly beneath it:** "surplus by position (§4.6:
+  concentration at QB confirms the scarcity thesis)" prints immediately above `QB $-51`, the most
+  negative of the three positions.
+  **m2 — section 4 prints K supply 6 against demand 10 (ratio 0.60) with no flag**, in a report
+  whose §4.2 mandate is to hard-error when supply falls below demand without prices responding.
+  **What holds, verified by running.** All seven headings render; tiers are genuinely derived from
+  the board rather than declared; the config tripwire prints above the board; the report is
+  written to `reports/prep.txt`; `make prep` completes in **46 s** (the ~90 s claim is
+  conservative); `ruff`, `ruff format --check` and `mypy --strict` are clean. The **2QB check
+  passes on substance**: base QB 20, keeper-occupied 7, remaining 13, live rostered QB 18 (inside
+  §4.2's 17–21 band), and a 1QB counterfactual on the same fixture moves QB replacement 227.8 →
+  262.7 and the top available QB $17.74 → $11.98, a 48% 2QB premium. Every §4.3 invariant
+  reconciles by hand: `Σ market = 1999.93`, `Σ baseline = 1451 = total_live_money`, `549 + 1451 =
+  2000`; `keeper_inflation = 1451/1510.24 = 0.9608`; `1623/1510.24 = 1.0747`; surplus `489.69 −
+  377 = +113` and `489.69 − 549 = −59`; and `SK $377` reproduces exactly as
+  `Σ floor(0.75 × round(provider market value))` over the 20 keepers.
+  **Cross-cutting (not this card's, raised here because the report renders it):** the tier
+  thresholds are unpinned — `BREAK_MULTIPLE` 2.5 → 1.2, `MIN_TIER_SAMPLE` 6 → 2, `>=` → `>`, and
+  dropping the first gap from the median all escape the suite — so the printed tier sheet's actual
+  content is unverified even though the mechanism is well tested on synthetic gaps.
 
 ---
 

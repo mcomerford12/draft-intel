@@ -7,7 +7,12 @@ import pytest
 from draft_intel.quant import walkaway
 from draft_intel.quant.optimizer import Candidate
 from draft_intel.quant.slots import FLEX
-from draft_intel.quant.walkaway import walkaway_board, walkaway_curve
+from draft_intel.quant.walkaway import (
+    CurvePoint,
+    _is_monotone,
+    walkaway_board,
+    walkaway_curve,
+)
 
 
 def player(pid: str, position: str, points: float, price: int) -> Candidate:
@@ -35,15 +40,67 @@ STARTERS = {"RB": 1}
 # ------------------------------------------------------------------- the curve
 
 
+def falling_board() -> list[Candidate]:
+    """A star plus a field priced along a real quality ladder.
+
+    `board()` cannot show a curve falling: its alternatives all cost $1, so paying more for the
+    star displaces nothing worth having and every delta comes out identical. A constant list is
+    `sorted(reverse=True)`, so the assertion below passed against a flat line.
+    """
+    return [
+        player("star", "RB", 200.0, 1),
+        player("f1", "RB", 100.0, 10),
+        player("f2", "RB", 90.0, 7),
+        player("f3", "RB", 80.0, 5),
+        player("f4", "RB", 70.0, 3),
+        player("f5", "RB", 60.0, 1),
+        player("f6", "RB", 50.0, 1),
+    ]
+
+
 def test_the_curve_falls_as_the_price_rises():
     """Paying more for the same player cannot leave a better team: every roster affordable at a
-    higher price is also affordable at a lower one."""
+    higher price is also affordable at a lower one. Each extra dollar spent on the star is a
+    dollar off the bench, and on a priced field that is a real downgrade."""
     curve = walkaway_curve(
-        board(), board()[0], budget=12, slots=3, starters=STARTERS, bench_weight=0.0
+        falling_board(),
+        falling_board()[0],
+        budget=20,
+        slots=3,
+        starters={"RB": 1},
+        bench_weight=0.2,
     )
     assert curve.monotone
     deltas = [p.delta for p in curve.points if p.feasible]
     assert deltas == sorted(deltas, reverse=True)
+    assert len(set(deltas)) > 1, "a flat line satisfies the assertion above without falling"
+    assert deltas[0] > deltas[-1]
+
+
+def test_the_monotonicity_predicate_itself_rejects_a_rising_curve():
+    """`monotone` is the tripwire proving the optimizer returned optima -- `make prep` prints
+    BROKEN off it. Every curve the optimizer can produce is monotone, so nothing built from the
+    optimizer can exercise the False branch, and replacing the whole predicate body with
+    `return True` survived the suite. Fed directly instead."""
+    falling = [
+        CurvePoint(price=1, delta=5.0, starting_points_delta=5.0, feasible=True),
+        CurvePoint(price=2, delta=3.0, starting_points_delta=3.0, feasible=True),
+    ]
+    rising = [
+        CurvePoint(price=1, delta=3.0, starting_points_delta=3.0, feasible=True),
+        CurvePoint(price=2, delta=5.0, starting_points_delta=5.0, feasible=True),
+    ]
+    assert _is_monotone(falling) is True
+    assert _is_monotone(rising) is False
+    assert _is_monotone([]) is True, "nothing to contradict"
+    # An infeasible price is the absence of a value, not a lower one, and must not read as a
+    # rise when the curve resumes above it.
+    gapped = [
+        falling[0],
+        CurvePoint(price=2, delta=0.0, starting_points_delta=0.0, feasible=False),
+        falling[1],
+    ]
+    assert _is_monotone(gapped) is True
 
 
 def test_the_walk_away_price_is_the_highest_price_still_worth_paying():

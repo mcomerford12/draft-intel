@@ -8,10 +8,23 @@ Charter §4.6 asks for a profile per manager:
 * stars-and-scrubs vs balanced — the Gini coefficient of their roster spend;
 * nomination behaviour — do they nominate their own targets.
 
-Four of the five are computable from the picks feed and are here. **Nomination behaviour is
-not**, and is reported as unavailable rather than approximated: Sleeper's picks endpoint records
-who *won* each player, never who put them up. There is no field for it anywhere in the payload,
-so any figure this module produced for it would be invented. See :attr:`Profile.unavailable`.
+Four of the five are computable from the picks feed and are here. **Nomination behaviour is not
+computable from a completed draft**, and is reported as unavailable rather than approximated:
+Sleeper's picks endpoint records who *won* each player and carries no nominator field on the
+pick or in its metadata. A profile fitted over history would be invented.
+
+**An earlier version of this note said "there is no field for it anywhere in the payload". That
+was false and is corrected here.** The public draft object's ``metadata`` carries
+``nominating_slot``, ``nominated_player_id``, ``offering_slot``, ``offering_user_id`` and
+``highest_offer`` -- a live snapshot of the nomination in progress, overwritten by the next one.
+So the figure is not recoverable *backwards* from a finished draft, but it is recordable
+*forwards*: a poller that samples those fields from the first nomination onwards accumulates
+exactly the history this module wants.
+
+Whether to do that is not this module's call, and is deliberately not made here. Those fields
+are three of the five things charter §2's ⛔ Hard Constraint states have no public feed, so
+building on them contradicts the charter and is flagged for the orchestrator in
+``docs/api-findings.md`` rather than resolved in a docstring. See :attr:`Profile.unavailable`.
 
 ----
 
@@ -274,8 +287,10 @@ def profiles(
             run_picks=len(during_runs),
             unavailable=(
                 (
-                    "nomination behaviour: Sleeper's picks feed records who WON each player, "
-                    "never who nominated them, and no field anywhere in the payload carries it",
+                    "nomination behaviour: the picks feed records who WON each player, never "
+                    "who nominated them, so it cannot be fitted over a finished draft. The "
+                    "live draft object does carry the current nomination, so recording it "
+                    "from pick 1 would make this measurable next time -- see api-findings.md",
                 )
                 if reportable
                 else ()
