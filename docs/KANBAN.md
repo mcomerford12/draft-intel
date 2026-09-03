@@ -2408,6 +2408,66 @@ append to. Written to schema here, retroactively for the cards already built.
   things that happen during a draft, so they get no seq and no revert. Money and picks stay in
   the event log where reversal is free. Recorded here because it is a real asymmetry.
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+- **Superseded in part by DI-062.** Two acceptance criteria above are now *wrong* and are struck
+  rather than quietly rewritten: "renders every available player" was 140 of 160, and "keepers are
+  absent from the page" turned out to hide the one auction value the league's retention rule
+  actually reads. See DI-062.
+
+---
+
+### [DI-062] Override every value, for every player
+
+- **Sprint:** 3 (pulled forward) · **Owner:** backend-engineer · **Size:** M
+  · **Branch:** `di-062-override-every-value`
+- **Why:** the user asked whether DI-061 was "the ability to override all of the project auction
+  values." It was not, and three of the four ways it fell short were invisible from the page:
+  1. **20 of 160 players were missing.** Keepers were excluded deliberately — you cannot bid on
+     one — but their *market* value is the input to `floor(0.75 × auction_value)`, the league's
+     actual retention rule. The single most consequential auction value in the league was
+     unreachable.
+  2. **A points override did nothing.** It was stored, displayed, and applied downstream of the
+     valuation, so VORP and every dollar figure kept following the model's projection. The store's
+     own header claimed it "moves VORP and every price derived from it." That claim was false.
+  3. **A market override did nothing.** It was written beside `PlayerValue.market_value`, the
+     model's book value, while the keeper rule reads the *provider* market value from
+     `quant/market.py`. The user could type a keeper's auction value and watch the rule price
+     not move.
+  4. **`overridden` and `delta` never reached the JSON.** Both were plain `@property`, which
+     pydantic does not serialise, so `/api/prices` omitted the two fields carrying §4.8's whole
+     point — that a typed number is distinguishable from a measured one.
+- **Acceptance criteria:**
+  - [x] all 160 priced players on the page, keepers included and marked, keepers sorted last
+  - [x] four editable fields per row — live $, market $, pts, blacklist — with a name/position
+        filter, because 160 rows is past the point of scrolling
+  - [x] **a points override is applied upstream of `compute_baselines`**, so it re-derives VORP,
+        the replacement baseline and every dollar figure, including other players' by a little
+  - [x] **a market override enters as `ManualMarketValues`**, the top-priority provider, so it
+        reaches the 75% keeper rule and moves rule price and surplus
+  - [x] a market override clears the ESTIMATE badge *for that player* — a number a person
+        asserted is an observation; `OBSERVED_SOURCES` names which sources count
+  - [x] a keeper cannot be given a live price: 422, not a silently stored bid recommendation for
+        somebody already rostered
+  - [x] the blacklist zeroes the bid but **not** the valuation — "never bid" is not "worthless",
+        and zeroing book value would move keeper surplus and inflation on a personal read
+  - [x] omitting a field means "leave it"; sending it as `null` means "clear it" — read from
+        `model_fields_set`, since `None` alone cannot express the difference
+  - [x] `make prep` reads the same file the page writes, by default rather than by discipline
+  - [x] the report prints a **YOUR OVERRIDES** section naming every changed figure with the
+        model's own beside it, the §4.8 deviation, and any override matching nobody
+  - [x] a stored override naming nobody is *reported, not raised* — the API refuses to create
+        one, but the hand-editable file is read by `make prep` at 8am on draft day and a player
+        who left the projection feed overnight must not take the report down
+- **`OverrideStore` moved `api/store.py` → `store/overrides.py`.** Overrides are a pipeline
+  input, not a web concern: `prep.py` reads them, and `api/` importing into `prep/` was backwards.
+- **The model's whole board is retained, not per-player originals.** A points override moves
+  replacement level, so it changes dollars for players the user never touched; only a second full
+  run can say by how much. Hence `Pipeline.model_board` and `Pipeline.model_market`.
+- **What is still not covered, stated rather than implied:** `config/auction_values.csv` remains
+  the bulk path for provider auction values and is still absent, so the board-level ESTIMATE badge
+  stays lit until it exists or every player is overridden by hand. Positional multipliers
+  (`quant/overrides.py` implements them; §4.8 calls them the highest-leverage live knob) have no
+  surface yet — carded separately.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
 ---
 

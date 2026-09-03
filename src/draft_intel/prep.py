@@ -43,15 +43,18 @@ from draft_intel.quant.market import (
     AdpMarketValues,
     CsvMarketValues,
     InternalMarketValues,
+    ManualMarketValues,
     resolve_market_values,
 )
 from draft_intel.quant.optimizer import Candidate, best_roster
+from draft_intel.quant.overrides import PlayerOverride
 from draft_intel.quant.replacement import compute_baselines
-from draft_intel.quant.scoring import build_projections
+from draft_intel.quant.scoring import PlayerProjection, build_projections
 from draft_intel.quant.slots import allocate_flex, seat_keepers
 from draft_intel.quant.tiers import tier_sheet
 from draft_intel.quant.valuation import ValueBoard, value_board
 from draft_intel.quant.walkaway import walkaway_board
+from draft_intel.store.overrides import OverrideStore
 
 RULE = "=" * 78
 
@@ -84,9 +87,60 @@ class Pipeline(NamedTuple):
     unreliable: Mapping[str, float]
     prices: Mapping[str, int]
 
+    model_market: Any
+    """The resolved market with the user's typed values taken back out. Equal to ``market``
+    when nothing was typed."""
 
-def build_pipeline(root: Path) -> Pipeline:
-    """Run everything up to the priced board. No rendering, no optimizer."""
+    model_board: ValueBoard
+    """The board as the model computed it, before any override. Never dropped.
+
+    §4.8 requires the model's figure to stay displayable beside the user's, permanently. Keeping
+    a whole second board rather than a per-player original is what makes that true for the
+    *derived* numbers too: a points override moves replacement level, so it changes VORP and
+    dollars for players the user never touched, and only a second full run can say by how much.
+    """
+
+    overrides: Mapping[str, PlayerOverride]
+    """What the user changed, keyed on ``player_id``. Empty when nothing is overridden."""
+
+    orphan_overrides: tuple[str, ...]
+    """Stored overrides matching nobody on the board -- reported, never raised.
+
+    ``apply_overrides`` raises on these, and is right to: an override naming nobody is a typo,
+    and dropping it silently leaves the user believing a correction was applied. But the same
+    file is read by ``make prep`` at 8am on draft day, and a player who fell out of the
+    projection feed overnight must not take the report down. So the pipeline carries them out to
+    be displayed, and the API refuses to create one in the first place.
+    """
+
+
+def build_pipeline(root: Path, *, overrides: OverrideStore | None = None) -> Pipeline:
+    """Run everything up to the priced board. No rendering, no optimizer.
+
+    Args:
+        root: Repository root, holding ``config/`` and ``fixtures/``.
+        overrides: Where the user's manual values live. Defaults to
+            ``<root>/config/value_overrides.yaml``, which is what makes ``make prep`` and
+            ``/prices`` quote the same numbers *by default rather than by discipline*. Pass a
+            store on a scratch path to run the model untouched.
+
+    **Overrides enter at two different depths, and the difference is not cosmetic** (DI-062):
+
+    * a **points** override is applied to the projection, *before* :func:`compute_baselines`. It
+      is a claim about the player, so everything derived from points has to be rebuilt on top of
+      it -- VORP, the replacement baseline, and therefore every other player's dollars by a
+      little. Applying it downstream would leave a board whose points and VORP disagree.
+    * a **market value** override enters as the highest-priority market provider, so it reaches
+      ``floor(0.75 * auction_value)`` and moves the keeper's rule price and surplus. This is the
+      only path to a real keeper rule price short of assembling the whole CSV.
+    * a **live value** override and the **blacklist** replace the model's derived dollars
+      outright, after everything above. They are the last word by construction, per §4.8's
+      ``manual > API-derived > model``.
+
+    Values are never renormalised to absorb an edit. ``sum_baseline_value`` on the returned board
+    will stop matching ``total_live_money`` once anything is overridden; that gap is a fact to
+    display, not an error to correct.
+    """
 
     config_dir, fixtures = root / "config", root / "fixtures"
     config = load_league_config(config_dir / "league.yaml")
@@ -99,7 +153,14 @@ def build_pipeline(root: Path) -> Pipeline:
 
     warnings = assert_startable(validate(config, league, real_draft))
 
-    projections, unreliable = build_projections(projections_raw, league["scoring_settings"])
+    store = overrides or OverrideStore(config_dir / "value_overrides.yaml")
+    manual = store.as_player_overrides()
+
+    model_projections, unreliable = build_projections(projections_raw, league["scoring_settings"])
+    # Points first, upstream of everything. See the docstring: a points override is a claim about
+    # the player, and replacement level is computed *from* points, so a board built before the
+    # override and patched after it would carry a VORP that no longer follows from its own points.
+    projections = _override_points(model_projections, manual)
     manifest = load_manifest(config_dir / "keepers.yaml")
     resolved = resolve_manifest(manifest, players_map)
     keeper_ids = frozenset(pid for _owner, pid in resolved)
@@ -121,37 +182,58 @@ def build_pipeline(root: Path) -> Pipeline:
     roster_full = config.auction_pool
     roster_live = roster_full - len(keeper_ids)
     keeper_spend = sum(int(p["metadata"]["amount"]) for p in picks if p["player_id"] in keeper_ids)
-    baselines = compute_baselines(
-        projections,
-        keeper_ids=keeper_ids,
-        demand=demand,
-        roster_spots_full=roster_full,
-        roster_spots_live=roster_live,
-        kicker_slots=config.starters.get("K", 0) * config.teams,
-    )
-    board = value_board(
-        projections,
-        baselines=baselines,
-        keeper_ids=keeper_ids,
-        keeper_spend=keeper_spend,
-        total_budget=config.teams * config.budget,
-        roster_spots_full=roster_full,
-        roster_spots_live=roster_live,
-    )
 
-    market = resolve_market_values(
-        [
-            CsvMarketValues(config_dir / "auction_values.csv", players_map),
-            AdpMarketValues(
-                projections_raw, [p.market_value for p in board.players if p.in_pool_full]
+    def price(source: Sequence[Any]) -> ValueBoard:
+        return value_board(
+            source,
+            baselines=compute_baselines(
+                source,
+                keeper_ids=keeper_ids,
+                demand=demand,
+                roster_spots_full=roster_full,
+                roster_spots_live=roster_live,
+                kicker_slots=config.starters.get("K", 0) * config.teams,
             ),
-            InternalMarketValues(
-                {p.player_id: p.market_value for p in board.players if p.in_pool_full}
-            ),
-        ],
-        projections,
-        required=roster_full,
-    )
+            keeper_ids=keeper_ids,
+            keeper_spend=keeper_spend,
+            total_budget=config.teams * config.budget,
+            roster_spots_full=roster_full,
+            roster_spots_live=roster_live,
+        )
+
+    # Two runs when points were overridden, one when they were not. The second is not a
+    # convenience: a points override moves the replacement baseline, so it moves dollars for
+    # players the user never touched, and "what would the model have said" is unrecoverable from
+    # the overridden board alone.
+    board = price(projections)
+    model_board = board if projections is model_projections else price(model_projections)
+    # Dollars last, and they replace rather than adjust: §4.8's `manual > API-derived > model`
+    # means a number the user typed is not scaled, renormalised or reconciled afterwards.
+    board = _override_money(board, manual)
+
+    typed_market = {pid: o.market_value for pid, o in manual.items() if o.market_value is not None}
+
+    def resolve(providers: Sequence[Any]) -> Any:
+        return resolve_market_values(
+            [
+                *providers,
+                CsvMarketValues(config_dir / "auction_values.csv", players_map),
+                AdpMarketValues(
+                    projections_raw, [p.market_value for p in board.players if p.in_pool_full]
+                ),
+                InternalMarketValues(
+                    {p.player_id: p.market_value for p in board.players if p.in_pool_full}
+                ),
+            ],
+            projections,
+            required=roster_full,
+        )
+
+    market = resolve([ManualMarketValues(typed_market)] if typed_market else [])
+    # The same layer with the user's numbers taken back out, so the page can show what the
+    # market said before they touched it. §4.8 again: a figure without the one it replaced is a
+    # figure with no provenance. Built only when there is something to compare against.
+    model_market = resolve([]) if typed_market else market
     prices, price_source = _retention_prices(resolved, picks, keeper_ids)
     keepers = keeper_board(
         board,
@@ -179,6 +261,10 @@ def build_pipeline(root: Path) -> Pipeline:
         keeper_spend=keeper_spend,
         unreliable=unreliable,
         prices=prices,
+        model_market=model_market,
+        model_board=model_board,
+        overrides=manual,
+        orphan_overrides=tuple(sorted(set(manual) - {p.player_id for p in board.players})),
     )
 
 
@@ -204,6 +290,7 @@ def build_report(root: Path, *, targets: int = 12) -> str:
         resolved_count=sum(1 for _o, pid in resolved if identity.slot_for(_o) is not None),
         expected_count=config.teams * config.keepers_per_team,
     )
+    out += _override_section(built)
     out += _inflation_section(keepers, unreliable)
     out += _keeper_section(keepers, config.teams)
     out += _positional_map(board, demand, roster_live)
@@ -222,6 +309,71 @@ def build_report(root: Path, *, targets: int = 12) -> str:
     out += _targets(board, config, limit=targets, keeper_spend=my_keeper_spend)
     out += _affordability_preview(config, my_slot, manifest.user_team)
     return "\n".join(out) + "\n"
+
+
+def _override_points(
+    projections: Sequence[PlayerProjection], manual: Mapping[str, PlayerOverride]
+) -> Sequence[PlayerProjection]:
+    """Substitute the user's projected points, upstream of replacement level.
+
+    Returns the input object unchanged when nothing is overridden, so ``build_pipeline`` can tell
+    by identity whether a second model run is needed at all.
+    """
+    changed = {pid: o.points for pid, o in manual.items() if o.points is not None}
+    if not changed:
+        return projections
+    return [
+        p.model_copy(update={"points": changed[p.player_id]}) if p.player_id in changed else p
+        for p in projections
+    ]
+
+
+def _override_money(board: ValueBoard, manual: Mapping[str, PlayerOverride]) -> ValueBoard:
+    """Replace the model's live auction value with the user's, and re-add up the board.
+
+    **A market-value override deliberately does not land here.** ``PlayerValue.market_value`` is
+    the *model's* book value -- what our own valuation says a player is worth in a keeper-free
+    auction -- and ``keeper_board`` reads it as exactly that, alongside the separate provider
+    figure from :mod:`draft_intel.quant.market`. Mixing the two value bases is the defect E8
+    found in the report's section 3, and writing a number the user typed into the model's own
+    book value would reintroduce it one layer down. So a typed market value enters as
+    :class:`~draft_intel.quant.market.ManualMarketValues`, where market opinions belong, and the
+    model's book value stays the model's.
+
+    For the same reason the blacklist zeroes the live value only. "Never bid" is a statement
+    about this auction, not a claim that the player is worthless; zeroing book value there would
+    silently move keeper surplus and the inflation figure.
+
+    ``sum_baseline_value`` is recomputed because it is a statement about the players in *this*
+    board. ``total_live_money`` is not: it is a property of the room, and an opinion about a
+    player's worth does not change how many dollars are in it. That is precisely why the board
+    stops reconciling after an edit -- §4.8 says to show that gap rather than close it.
+    """
+    if not manual:
+        return board
+
+    players = []
+    for player in board.players:
+        override = manual.get(player.player_id)
+        if override is None:
+            players.append(player)
+            continue
+        update: dict[str, float] = {}
+        if override.baseline_value is not None:
+            update["baseline_value"] = round(override.baseline_value, 2)
+        if override.blacklisted:
+            # "Never bid" is not "bid this much", so the blacklist wins over a typed price too.
+            update["baseline_value"] = 0.0
+        players.append(player.model_copy(update=update) if update else player)
+
+    return board.model_copy(
+        update={
+            "players": tuple(players),
+            "sum_baseline_value": round(
+                sum(p.baseline_value for p in players if p.in_pool_live), 2
+            ),
+        }
+    )
 
 
 def _retention_prices(
@@ -287,6 +439,61 @@ def _price_provenance(source: str, *, resolved_count: int, expected_count: int) 
             "\n     Fix: fill in `price` and `price_source` in config/keepers.yaml. The manifest\n"
             "     is consulted first and wins wherever it has a value."
         )
+    return [*out, ""]
+
+
+def _override_section(built: Pipeline) -> list[str]:
+    """What the user changed, printed before any figure that depends on it.
+
+    §4.8: *never let the user forget they are looking at a number they typed rather than a number
+    that was measured.* A report that silently prints overridden dollars is exactly that
+    forgetting, four days early and in a form they will bring to the draft. So the section sits
+    directly under the provenance block and is skipped entirely when nothing is overridden --
+    a heading reading "0 overrides" is noise every other week of the year.
+    """
+    if not built.overrides and not built.orphan_overrides:
+        return []
+
+    model = {p.player_id: p for p in built.model_board.players}
+    now = {p.player_id: p for p in built.board.players}
+    out = [RULE, "YOUR OVERRIDES — these numbers are yours, not the model's", RULE]
+
+    for player_id, override in sorted(
+        built.overrides.items(), key=lambda kv: -(now[kv[0]].baseline_value if kv[0] in now else 0)
+    ):
+        if player_id not in now:
+            continue
+        was, is_now = model[player_id], now[player_id]
+        parts = []
+        if override.points is not None:
+            parts.append(f"pts {was.points:.1f} -> {is_now.points:.1f}")
+        if override.baseline_value is not None:
+            parts.append(f"live ${was.baseline_value:.2f} -> ${is_now.baseline_value:.2f}")
+        if override.market_value is not None:
+            model_market = built.model_market.get(player_id) or was.market_value
+            parts.append(f"market ${model_market:.2f} -> ${override.market_value:.2f}")
+        if override.blacklisted:
+            parts.append("BLACKLISTED, never bid")
+        out.append(
+            _line(is_now.name, "; ".join(parts) + (f"  [{override.note}]" if override.note else ""))
+        )
+
+    if built.orphan_overrides:
+        out.append("")
+        out.append(
+            f"  !! {len(built.orphan_overrides)} override(s) name nobody on the board and are\n"
+            f"     being ignored: {', '.join(built.orphan_overrides)}.\n"
+            "     A player who left the projection feed, or a hand-edit with a bad player_id."
+        )
+
+    # §4.8's visible number. Nothing is renormalised after an edit, so the board stops summing to
+    # the money in the room; that gap is stated rather than closed.
+    deviation = round(built.board.sum_baseline_value - built.board.total_live_money, 2)
+    if abs(deviation) >= 0.01:
+        out.append("")
+        out.append(_line("board now sums to", f"${built.board.sum_baseline_value:,.0f}"))
+        out.append(_line("against live money of", f"${built.board.total_live_money:,}"))
+        out.append(_line("deviation", f"${deviation:+,.0f}  <-- NOT renormalised, deliberately"))
     return [*out, ""]
 
 

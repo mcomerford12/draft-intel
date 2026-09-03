@@ -32,7 +32,10 @@ is priced from.
 
 Nothing downstream is allowed to forget which it got. ``MarketValues.sources`` records the
 provider per player, ``is_estimate_for`` answers it one player at a time, and the board-level
-``is_estimate`` stays true unless every single value is real market data.
+``is_estimate`` stays true unless every single value is real market data. What counts as real is
+:data:`OBSERVED_SOURCES`: a number a person asserted, from the CSV or typed into the price table.
+An ADP curve and our own model are inferences, and an inference badged as an observation is how
+edge becomes the difference between the model and itself.
 
 **These values do not replace the model's own ``market_value``.** That is the single most
 tempting wrong move here and it breaks the charter's §4.3 invariants on contact: our
@@ -79,6 +82,14 @@ ADP_SENTINEL = 900.0
 # auction values for the twenty keepers counted for nothing. See `resolve_market_values`.
 MIN_COVERAGE_FRACTION = 0.5
 
+# Provider names whose dollars are *observed* rather than derived, so a board carrying only
+# these is not an estimate and does not wear the ESTIMATE badge. The CSV is the user
+# transcribing a published auction-value list; a manual override is the user typing one number
+# from the same knowledge. Both are a person asserting a market price. The model's own figure
+# (`internal_model`) and an ADP curve (`adp`) are inferences and are never in this set --
+# treating an inference as an observation is what makes edge circular.
+OBSERVED_SOURCES = frozenset({"csv", "manual"})
+
 _NAME_COLUMNS = ("name", "player", "player_name")
 _POSITION_COLUMNS = ("pos", "position")
 _VALUE_COLUMNS = ("value", "price", "auction", "auction_value", "cost", "dollars", "$")
@@ -113,12 +124,12 @@ class MarketValues(BaseModel):
         estimated board. Use :meth:`is_estimate_for` for the per-player answer.
         """
         if self.sources:
-            return any(source != CsvMarketValues.name for source in self.sources.values())
-        return self.source != CsvMarketValues.name
+            return any(source not in OBSERVED_SOURCES for source in self.sources.values())
+        return self.source not in OBSERVED_SOURCES
 
     def is_estimate_for(self, player_id: str) -> bool:
         """Whether *this player's* number is an estimate rather than an observed market price."""
-        return self.sources.get(player_id, self.source) != CsvMarketValues.name
+        return self.sources.get(player_id, self.source) not in OBSERVED_SOURCES
 
     def source_for(self, player_id: str) -> str | None:
         """Which provider supplied this player's value, or ``None`` if nothing did."""
@@ -229,6 +240,44 @@ def _column(fieldnames: Iterable[str], candidates: Sequence[str]) -> str | None:
         if candidate in lookup:
             return lookup[candidate]
     return None
+
+
+class ManualMarketValues:
+    """Market values the user typed, one player at a time. Outranks every other provider.
+
+    DI-062. The CSV is the bulk path: assemble a whole auction-value list and drop it in. This is
+    the retail path, and the two are wanted for different reasons. Before a draft you sit down
+    with a published list and fill the file. *During* the week before it, you notice one number
+    is wrong -- a keeper whose value the room clearly disagrees with, a player whose price moved
+    on news -- and you want to fix that one number without rebuilding the file.
+
+    It is first in the layer because §4.8's precedence is ``manual > API-derived > model``, and a
+    hand-typed value that lost to a CSV row would be precedence backwards. It carries its own
+    source name so provenance survives: the board can say this figure came from you rather than
+    from the file, which is a different thing to know even though neither is an estimate.
+
+    Keyed on ``player_id`` and never on name: resolution already happened at the point the user
+    picked a row off the price table.
+    """
+
+    name = "manual"
+
+    def __init__(self, values: Mapping[str, float]) -> None:
+        self._values = dict(values)
+
+    def market_values(self, players: Sequence[PlayerProjection]) -> MarketValues:
+        # Unlike the CSV, an override for somebody unprojected is not dropped quietly: the user
+        # typed it against a row that existed, so if it no longer resolves that is worth saying.
+        eligible = {p.player_id for p in players}
+        return MarketValues(
+            source=self.name,
+            values={pid: v for pid, v in self._values.items() if pid in eligible},
+            unmatched=tuple(
+                f"{pid}: override for a player with no projection"
+                for pid in sorted(self._values)
+                if pid not in eligible
+            ),
+        )
 
 
 class CsvMarketValues:
@@ -518,7 +567,7 @@ def resolve_market_values(
             )
         )
 
-    real = [pid for pid, source in sources.items() if source == CsvMarketValues.name]
+    real = [pid for pid, source in sources.items() if source in OBSERVED_SOURCES]
     threshold = max(1, int(required * min_fraction))
     notes.insert(
         0,

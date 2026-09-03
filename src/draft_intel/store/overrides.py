@@ -7,6 +7,14 @@ permanently, because "the model said $26 and I said $40" is a different fact fro
 What was missing is somewhere to keep it. This is that, and it is a **YAML file rather than a
 row in the event log**, deliberately:
 
+.. note::
+
+   This module lives under ``store/`` rather than ``api/`` because :mod:`draft_intel.prep`
+   reads it. Overrides are a *pipeline input*, not a web-layer concern: the priced board
+   ``make prep`` prints and the table ``/prices`` renders must be the same board, and that is
+   only true if both read the overrides from the same place. It moved here in DI-062, when
+   ``build_pipeline`` started applying them.
+
 * the user asked to come back and change these later, and a file they can open in an editor at
   11pm is a better answer than a table they need the app running to reach;
 * every other authored input in this project is a config file -- ``keepers.yaml``,
@@ -38,13 +46,24 @@ HEADER = """\
 # overwritten -- it is kept and shown beside yours, so a correction stays legible as a
 # correction. Delete an entry to fall back to the model.
 #
+#   points:       projected points. Applied UPSTREAM, before replacement level is computed, so
+#                 it moves VORP and every dollar figure derived from it -- including this
+#                 player's live value, and (very slightly) everybody else's, because it moves
+#                 the replacement baseline they are all measured against.
 #   live_value:   what the player should cost in THIS auction. The number you bid against.
-#   market_value: full-market value, used to price keepers and their surplus.
-#   points:       projected points. Changing this moves VORP and every price derived from it.
-#   blacklisted:  never bid, whatever the model says.
+#                 Replaces whatever the model derived, points override included. Meaningless
+#                 for a keeper: they are off the board and cannot be bid on.
+#   market_value: full-market value -- a keeper-free $2,000 auction. This is the number the
+#                 league's floor(0.75 x auction value) keeper rule reads, so overriding it for
+#                 a keeper changes their rule price, their surplus, and the keeper inflation
+#                 figure. It is also how you clear the ESTIMATE badge one player at a time
+#                 without assembling the whole auction_values.csv.
+#   blacklisted:  never bid, whatever the model says. Zeroes both dollar figures.
 #   note:         why. Worth having at 9pm on draft night when the reason has gone.
 #
-# Anything you leave out keeps the model's value for that field.
+# Anything you leave out keeps the model's value for that field. Values are NOT renormalised
+# after an edit: one correction must not silently move every other price. The board's total
+# will stop matching the money in the room, and that deviation is displayed rather than hidden.
 """
 
 

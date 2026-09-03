@@ -453,3 +453,53 @@ def test_the_page_states_how_many_keepers_actually_resolved(report: str) -> None
     short = "\n".join(_price_provenance("somewhere", resolved_count=10, expected_count=20))
     assert "10 of 20" in short
     assert "INCOMPLETE" in short and "DI-043" in short
+
+
+# ---------------------------------------------------------- DI-062: overrides
+
+
+def test_the_report_says_nothing_about_overrides_when_there_are_none(report: str) -> None:
+    """A heading reading "0 overrides" is noise every week of the year but one."""
+    assert "YOUR OVERRIDES" not in report
+
+
+def test_the_report_declares_every_number_the_user_typed(tmp_path: Path) -> None:
+    """§4.8: *never let the user forget they are looking at a number they typed rather than a
+    number that was measured.* A printed board that silently uses overridden dollars is exactly
+    that forgetting — four days early, and in the form they will carry to the draft.
+
+    Built against a copied tree so the real ``config/`` is never written to.
+    """
+    import shutil
+
+    from draft_intel.api.app import price_rows
+    from draft_intel.prep import build_report
+    from draft_intel.store.overrides import OverrideStore, ValueOverride
+
+    root = tmp_path / "repo"
+    shutil.copytree(
+        ROOT, root, ignore=shutil.ignore_patterns(".git", ".venv", "__pycache__", "*.pyc")
+    )
+    store = OverrideStore(root / "config" / "value_overrides.yaml")
+    rows = price_rows(root, store)
+    target = next(row for row in rows if not row.is_keeper)
+    store.set(
+        ValueOverride(
+            player_id=target.player_id,
+            name=target.name,
+            live_value=target.model_live_value + 20,
+            note="my read",
+        )
+    )
+    store.set(ValueOverride(player_id="ghost", name="Nobody", live_value=3.0))
+
+    text = build_report(root, targets=2)
+    section = text[text.index("YOUR OVERRIDES") :]
+
+    assert target.name in section
+    assert f"${target.model_live_value:.2f}" in section, "what the model said is kept beside it"
+    assert "my read" in section
+    assert "ghost" in section, "an override naming nobody is reported, not silently dropped"
+    # Values are not renormalised, so the board stops summing to the money in the room. That gap
+    # is stated rather than closed: one edit must not silently move every other price.
+    assert "NOT renormalised" in section
