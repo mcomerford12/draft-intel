@@ -2370,6 +2370,45 @@ append to. Written to schema here, retroactively for the cards already built.
   that their own baselines did not describe. Each now states the roster it means.
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
+### [DI-061] The price table route, and manual price overrides
+
+- **Sprint:** 3 (pulled forward at the user's request) · **Owner:** backend-engineer · **Size:** M
+  · **Branch:** `di-061-price-route`
+- **Why now, out of order:** the user read the board, disagreed with the QB pricing — the top QB
+  prices at $17.74, 25th overall, in a league that starts twenty of them — and asked for a way to
+  change prices themselves. Charter §4.8 has required per-player overrides since Sprint 0 and
+  `quant/overrides.py` has implemented them since DI-038; nothing ever called it. This is the
+  surface, and the disagreement it exists to capture is the Sprint 2 gate working as designed.
+- **Acceptance criteria:**
+  - [x] `GET /prices` renders every available player, sorted by live value, editable in place
+  - [x] `GET /api/prices`, `POST /api/prices/{player_id}`, `DELETE /api/prices/{player_id}`
+  - [x] **the model's number is retained beside the user's, permanently** (§4.8). "The model said
+        $17.74 and I said $40" is a different fact from "$40", and on the night the difference is
+        what makes the figure trustworthy or not
+  - [x] clearing an override falls back to the model, never to zero — a zero price is a bid
+        recommendation
+  - [x] an override naming nobody is refused, the same rule `apply_overrides` already enforces;
+        a negative price is refused by validation
+  - [x] only the named player moves; nothing is renormalised behind the user's back (§4.8)
+  - [x] keepers are absent from the page — they are off the board, and pricing them invites a bid
+        on somebody already held
+  - [x] edits persist to `config/value_overrides.yaml` and survive a restart, verified through a
+        *new* store on the same file rather than the one that wrote it
+  - [x] the file is a first-class interface: header documenting every field, stable sort order so
+        a diff shows the edit rather than a reshuffle, and every read goes to disk so a hand edit
+        is never silently ignored
+- **`build_pipeline` extracted from `prep.py`** so the page and the printed report are built from
+  one chain. Two surfaces computing the same board separately is how they start quoting different
+  numbers for the same player — which this project has already done once, in the two value bases
+  section 3 was mixing. All 30 prep tests pass unchanged, which is what says the extraction moved
+  nothing.
+- **Deliberately not the cockpit.** No draft state: no picks, no budgets, no bidding, no
+  websocket. Sprint 3 owns those, and this route holds none of them.
+- **Storage is a file, not an event.** Overrides are standing corrections to a projection, not
+  things that happen during a draft, so they get no seq and no revert. Money and picks stay in
+  the event log where reversal is free. Recorded here because it is a real asymmetry.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
 ---
 
 ## Ready — Sprint 2 (Intelligence Core)

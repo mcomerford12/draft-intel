@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -60,15 +60,34 @@ def _line(label: str, value: object) -> str:
     return f"  {label:<26} {value}"
 
 
-def build_report(root: Path, *, targets: int = 12) -> str:
-    """Run the whole pipeline and render the printable report.
+class Pipeline(NamedTuple):
+    """Everything the priced board is built from, produced once and shared.
 
-    Args:
-        root: Repository root, holding ``config/`` and ``fixtures/``.
-        targets: How many players get a walk-away price on the target list. Each costs two
-            optimizer solves per price point, so this is the knob that decides how long
-            ``make prep`` takes; it is not a claim about how many players matter.
+    ``build_report`` and the price table both need the whole chain -- config, projections,
+    resolved keepers, baselines, the value board, market values, retention prices. Building it
+    twice is how two surfaces start quoting different numbers for the same player, which is the
+    defect this project has already had once, in the two value bases section 3 was mixing.
     """
+
+    config: LeagueConfig
+    board: ValueBoard
+    keepers: KeeperBoard
+    market: Any
+    warnings: list[Any]
+    price_source: str
+    resolved: Mapping[tuple[str, str], Any]
+    identity: Any
+    manifest: Any
+    demand: Any
+    roster_live: int
+    keeper_spend: int
+    unreliable: Mapping[str, float]
+    prices: Mapping[str, int]
+
+
+def build_pipeline(root: Path) -> Pipeline:
+    """Run everything up to the priced board. No rendering, no optimizer."""
+
     config_dir, fixtures = root / "config", root / "fixtures"
     config = load_league_config(config_dir / "league.yaml")
     league = json.loads((fixtures / "league.json").read_text())
@@ -78,9 +97,7 @@ def build_report(root: Path, *, targets: int = 12) -> str:
     mock_draft = json.loads((fixtures / "draft.json").read_text())
     picks = json.loads((fixtures / "picks.json").read_text())
 
-    out: list[str] = []
     warnings = assert_startable(validate(config, league, real_draft))
-    out += _header(config, warnings)
 
     projections, unreliable = build_projections(projections_raw, league["scoring_settings"])
     manifest = load_manifest(config_dir / "keepers.yaml")
@@ -147,6 +164,41 @@ def build_report(root: Path, *, targets: int = 12) -> str:
         minimum_retention_price=manifest.league.minimum_retention_price,
     )
 
+    return Pipeline(
+        config=config,
+        board=board,
+        keepers=keepers,
+        market=market,
+        warnings=warnings,
+        price_source=price_source,
+        resolved=resolved,
+        identity=identity,
+        manifest=manifest,
+        demand=demand,
+        roster_live=roster_live,
+        keeper_spend=keeper_spend,
+        unreliable=unreliable,
+        prices=prices,
+    )
+
+
+def build_report(root: Path, *, targets: int = 12) -> str:
+    """Run the whole pipeline and render the printable report.
+
+    Args:
+        root: Repository root, holding ``config/`` and ``fixtures/``.
+        targets: How many players get a walk-away price on the target list. Each costs two
+            optimizer solves per price point, so this is the knob that decides how long
+            ``make prep`` takes; it is not a claim about how many players matter.
+    """
+    built = build_pipeline(root)
+    config, board, keepers = built.config, built.board, built.keepers
+    resolved, identity, manifest = built.resolved, built.identity, built.manifest
+    demand, roster_live, price_source = built.demand, built.roster_live, built.price_source
+    unreliable, prices = built.unreliable, built.prices
+
+    out: list[str] = []
+    out += _header(config, built.warnings)
     out += _price_provenance(
         price_source,
         resolved_count=sum(1 for _o, pid in resolved if identity.slot_for(_o) is not None),

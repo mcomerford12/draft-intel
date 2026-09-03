@@ -2,7 +2,11 @@
 resolves ROOT from its own __file__ — so a snapshot holding only `src` makes any test that
 touches the CLI fail for reasons unrelated to the mutation, and `-x` then reports that as
 'CAUGHT'."""
-import os, pathlib, shutil, subprocess
+
+import os
+import pathlib
+import shutil
+import subprocess
 
 REPO = pathlib.Path("/home/user/draft-intel")
 
@@ -22,8 +26,12 @@ def run(snap, suite="", timeout=1200):
     if suite:
         args.insert(5, suite)
     return subprocess.run(
-        args, capture_output=True, text=True, cwd=REPO,
-        env={**os.environ, "PYTHONPATH": str(snap / "src")}, timeout=timeout,
+        args,
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+        env={**os.environ, "PYTHONPATH": str(snap / "src")},
+        timeout=timeout,
     )
 
 
@@ -32,7 +40,7 @@ def verify(name, muts, suite=""):
     base = snap / "src/draft_intel"
     clean = run(snap, suite)
     if clean.returncode != 0:
-        print(f"!! BASELINE IS RED under this harness — every result below is meaningless")
+        print("!! BASELINE IS RED under this harness — every result below is meaningless")
         print(clean.stdout[-600:])
         return
     print(f"baseline green ({clean.stdout.strip().splitlines()[-1]})")

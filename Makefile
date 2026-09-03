@@ -1,4 +1,4 @@
-.PHONY: install lint types test ci replay smoke prep
+.PHONY: install lint types test ci replay smoke prep serve
 
 install:
 	uv sync
@@ -25,3 +25,6 @@ smoke:
 # three days before the draft.
 prep:
 	uv run python -m draft_intel.cli prep
+
+serve:
+	uv run uvicorn draft_intel.api.app:app --reload --port 8000

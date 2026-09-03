@@ -9,6 +9,8 @@ dependencies = [
     "sqlalchemy>=2.0",
     "pyyaml>=6.0",
     "numpy>=2.5.2",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.4",
 ]
 
 [dependency-groups]
@@ -76,6 +78,11 @@ filterwarnings = [
     # Scoped to the one message so every other DeprecationWarning stays an error.
     "ignore:Constructing LpVariable:DeprecationWarning",
     "ignore:PULP_CBC_CMD is deprecated:DeprecationWarning",
+    # Starlette's TestClient warns that it runs on httpx rather than httpx2. The project already
+    # depends on httpx for the Sleeper client (charter §3), and adding a second HTTP library to
+    # silence a warning in test-only code is a worse trade than scoping the warning. Same rule as
+    # the two above: one message, so every other DeprecationWarning stays an error.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:",
 ]
 
 [tool.coverage.run]
