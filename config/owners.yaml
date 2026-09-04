@@ -5,22 +5,32 @@
 # league draft object carries NO slot_name_* keys, so the roster/user join is the only path
 # that works in production (docs/api-findings.md Finding 9, and DI-EVAL-1 B1).
 #
-# Sleeper display names, for the five managers who have joined so far. The remaining five
+# Sleeper display names, for the seven managers who have joined so far. The remaining three
 # cannot be mapped until they join the league; manifest_keys(require=20) raises loudly rather
 # than silently classifying their keepers as competitive bids.
 #
-# `Jake: jswilliams5` was confirmed by the commissioner on 2026-09-02, not inferred. The
-# display name resembles more than one manifest owner and the account carries no `team_name`,
-# so there was nothing in the API to read it off. A wrong mapping here is not a cosmetic error:
-# it classifies that team's two keepers as competitive bids, which poisons skew, inflation and
-# every tendency profile for the whole draft. Confirm any future mapping the same way.
+# EVERY MAPPING HERE IS CONFIRMED BY A HUMAN, NEVER INFERRED FROM A RESEMBLANCE. A wrong
+# mapping is not a cosmetic error: it classifies that team's two keepers as competitive bids,
+# which poisons skew, inflation and every tendency profile for the whole draft. The reverse is
+# just as bad -- it hands another manager's keepers to the wrong seat, moving both that seat's
+# positional demand and its surplus.
+#
+#   Jake:   jswilliams5   confirmed by the commissioner, 2026-09-02. The display name
+#                         resembles more than one manifest owner and the account carries no
+#                         `team_name`, so there was nothing in the API to read it off.
+#   Keenan: keenankid17   confirmed by the user, 2026-09-04, on joining at slot 6.
+#   Willie: willdeann     confirmed by the user, 2026-09-04, on joining at slot 7.
+#
+# Confirm any future mapping the same way, and record who confirmed it and when.
 aliases:
   Me: mattchupiccu
   AJ: ajthebeard
   Mason: MasonWAlpert
   Steve: steeveegee300
   Jake: jswilliams5
-  # Unjoined, display names unknown: Connor, Keenan, Willie, Burt, TD.
+  Keenan: keenankid17
+  Willie: willdeann
+  # Unjoined, display names unknown: Connor, Burt, TD -- draft slots 8, 9, 10.
   # The mock draft used short names, which the join above also covers via slot_name_*.
 
 # Fallback aliases for the mock draft fixture, which carries short slot names.
