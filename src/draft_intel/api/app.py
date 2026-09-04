@@ -55,6 +55,7 @@ from draft_intel.cli import LEAGUE_ID, REAL_DRAFT_ID
 from draft_intel.prep import build_pipeline
 from draft_intel.sleeper.client import SleeperClient
 from draft_intel.store.overrides import OverrideStore, ValueOverride
+from draft_intel.store.seats import SeatAssignment
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -174,6 +175,20 @@ def price_rows(root: Path, store: OverrideStore) -> list[PriceRow]:
     ]
     rows.sort(key=lambda row: (row.is_keeper, -row.live_value, -row.market_value, row.name))
     return rows
+
+
+class SeatRequest(BaseModel):
+    """Who is sitting in a draft slot, asserted by a person looking at the draft room.
+
+    The owner is the name from ``config/keepers.yaml`` — *not* a Sleeper display name. The
+    whole point is to bypass display-name resolution, which is what fails when a manager joins
+    under a name nobody predicted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    owner: str = Field(min_length=1)
+    note: str = ""
 
 
 class NominateRequest(BaseModel):
@@ -327,9 +342,69 @@ def create_app(
         live.nominate(request.player_id)
         return live.snapshot()
 
+    @app.get("/api/live/seats")
+    def api_seats() -> dict[str, object]:
+        """What is assigned, what is still unplaced, and who there is to place."""
+        resolved, expected, unplaced = live.unresolved_keepers()
+        teams = live.config.teams
+        identity = live.identity
+        return {
+            "assigned": [s.model_dump() for _slot, s in sorted(live.seats.load().items())],
+            "unmapped_slots": (
+                identity.unmapped_slots(teams)
+                if identity is not None
+                else list(range(1, teams + 1))
+            ),
+            "unplaced_owners": list(unplaced),
+            "keepers_resolved": resolved,
+            "keepers_expected": expected,
+            # What the seats on disk would give once the next poll picks them up. Without this
+            # a correct assignment reads as a no-op: the live count cannot move until the
+            # classifier is rebuilt, which is a poll away.
+            "keepers_if_seated": live.keepers_if_seated(),
+        }
+
+    @app.post("/api/live/seats/{slot}")
+    def set_seat(slot: int, request: SeatRequest) -> dict[str, object]:
+        if not 1 <= slot <= live.config.teams:
+            raise HTTPException(422, f"slot {slot} is outside this league's 1..{live.config.teams}")
+        known = {owner for owner, _pid in live.pipeline.resolved}
+        if request.owner not in known:
+            # A seat naming nobody in the manifest silently places nothing, and the user walks
+            # away believing six keepers are fixed. Same rule the price table applies to an
+            # override naming nobody.
+            raise HTTPException(
+                404,
+                f"{request.owner!r} is not an owner in config/keepers.yaml. "
+                f"Known: {', '.join(sorted(known))}",
+            )
+        live.seats.assign(SeatAssignment(slot=slot, owner=request.owner, note=request.note))
+        return {
+            "assigned": request.owner,
+            "slot": slot,
+            "keepers_if_seated": live.keepers_if_seated(),
+            "effective": "next poll",
+        }
+
+    @app.delete("/api/live/seats/{slot}")
+    def clear_seat(slot: int) -> dict[str, object]:
+        live.seats.clear(slot)
+        return {"cleared": slot}
+
     @app.get("/live", response_class=HTMLResponse)
     def live_page() -> str:
-        return _render_live(live.snapshot())
+        identity = live.identity
+        _resolved, _expected, unplaced = live.unresolved_keepers()
+        return _render_live(
+            live.snapshot(),
+            unmapped=(
+                identity.unmapped_slots(live.config.teams)
+                if identity is not None
+                else list(range(1, live.config.teams + 1))
+            ),
+            unplaced=list(unplaced),
+            assigned={slot: s.owner for slot, s in live.seats.load().items()},
+        )
 
     return app
 
@@ -503,7 +578,13 @@ def _row_html(row: PriceRow) -> str:
     )
 
 
-def _render_live(snap: LiveSnapshot) -> str:
+def _render_live(
+    snap: LiveSnapshot,
+    *,
+    unmapped: list[int] | None = None,
+    unplaced: list[str] | None = None,
+    assigned: dict[int, str] | None = None,
+) -> str:
     """The cockpit. Read at a glance, mid-nomination, while somebody is shouting numbers.
 
     Every layout decision here follows from that: the block sits at the top at display size, the
@@ -558,6 +639,17 @@ def _render_live(snap: LiveSnapshot) -> str:
   .wa-chart svg {{ width:100%; height:auto; display:block }}
   .wa-lbl {{ font:10px ui-monospace,monospace }}
   .wa-cap {{ font-size:12px; color:var(--muted); margin-top:2px }}
+  .seats {{ background:var(--surface); border:1px solid var(--warn); border-radius:5px;
+    padding:13px 16px; margin:0 0 12px }}
+  .seats-hd {{ font:600 10px ui-monospace,monospace; letter-spacing:.09em;
+    text-transform:uppercase; color:var(--warn) }}
+  .seats-lede {{ margin:5px 0 10px; font-size:13.5px; color:var(--ink-2); max-width:78ch }}
+  .seat-form {{ display:flex; gap:8px; align-items:center; flex-wrap:wrap }}
+  .seat-is {{ color:var(--muted); font-size:13px }}
+  select {{ font:inherit; font-size:14px; padding:4px 7px; border:1px solid var(--line);
+    border-radius:3px; background:var(--ground); color:var(--ink) }}
+  .seat-list {{ margin:10px 0 0; font-size:13.5px }}
+  .seat-list li {{ border-bottom:0; padding:3px 0 }}
   table {{ width:100%; border-collapse:collapse; background:var(--surface);
     border:1px solid var(--line) }}
   th,td {{ padding:6px 10px; text-align:right; border-bottom:1px solid var(--line);
@@ -580,7 +672,7 @@ def _render_live(snap: LiveSnapshot) -> str:
   .hits button:hover {{ border-color:var(--accent); color:var(--accent) }}
 </style></head><body><div class="wrap">
 <h1>Cockpit</h1>
-<div id="app">{_live_body(snap)}</div>
+<div id="app">{_live_body(snap, unmapped or [], unplaced or [], assigned or {})}</div>
 <h2>who is up</h2>
 <input id="q" autocomplete="off"
   placeholder="type a name, then pick" aria-label="nominate a player">
@@ -596,6 +688,23 @@ async function repaint() {{
   }} catch (e) {{ /* a failed repaint leaves the last reading and its age on screen */ }}
 }}
 setInterval(repaint, 2000);
+
+document.addEventListener("click", async (event) => {{
+  const target = event.target;
+  if (target && target.id === "seat-go") {{
+    const slot = document.getElementById("seat-slot").value;
+    const owner = document.getElementById("seat-owner").value;
+    await fetch(`/api/live/seats/${{slot}}`, {{
+      method: "POST",
+      headers: {{ "Content-Type": "application/json" }},
+      body: JSON.stringify({{ owner, note: "assigned from the cockpit" }}),
+    }});
+    repaint();
+  }} else if (target && target.dataset && target.dataset.unseat) {{
+    await fetch(`/api/live/seats/${{target.dataset.unseat}}`, {{ method: "DELETE" }});
+    repaint();
+  }}
+}});
 
 const q = document.getElementById("q"), hits = document.getElementById("hits");
 let timer = null;
@@ -625,12 +734,21 @@ q.addEventListener("input", () => {{
 </div></body></html>"""
 
 
-def _live_body(snap: LiveSnapshot) -> str:
+def _live_body(
+    snap: LiveSnapshot,
+    unmapped: list[int],
+    unplaced: list[str],
+    assigned: dict[int, str],
+) -> str:
     """The part that repaints. Kept separate so the poll loop replaces only what changed."""
     out: list[str] = []
 
     for blocker in snap.blockers:
         out.append(f'<div class="bar bad">{escape(blocker)}</div>')
+    # Directly under the blocker, because it is the fix for it. A banner naming three managers
+    # you cannot place is a worse experience than no banner if the remedy is editing YAML and
+    # restarting mid-auction.
+    out.append(_seats_html(unmapped, unplaced, assigned))
     if snap.stale:
         # The failure this module exists to prevent: numbers that stopped updating and look
         # exactly like numbers that did not.
@@ -689,6 +807,50 @@ def _live_body(snap: LiveSnapshot) -> str:
         out.append("</ul>")
 
     return "\n".join(out)
+
+
+def _seats_html(unmapped: list[int], unplaced: list[str], assigned: dict[int, str]) -> str:
+    """The seat-assignment panel. Shown only when there is something to fix or something fixed.
+
+    A manager who joins under a display name `owners.yaml` has never seen is invisible to the
+    tool, and their two keepers classify as competitive bids. That already happened once and
+    went unnoticed for days. Here it is a dropdown and a button.
+    """
+    if not unmapped and not unplaced and not assigned:
+        return ""
+
+    rows: list[str] = []
+    if unplaced:
+        options = "".join(f'<option value="{escape(o)}">{escape(o)}</option>' for o in unplaced)
+        slots = "".join(f'<option value="{s}">slot {s}</option>' for s in (unmapped or []))
+        rows.append(
+            f'<div class="seat-form">'
+            f'<select id="seat-slot" aria-label="draft slot">{slots}</select>'
+            f'<span class="seat-is">is</span>'
+            f'<select id="seat-owner" aria-label="manager">{options}</select>'
+            f'<button id="seat-go">assign</button>'
+            f"</div>"
+        )
+    if assigned:
+        placed = "".join(
+            f"<li>slot {slot} is <strong>{escape(owner)}</strong> "
+            f'<button data-unseat="{slot}">clear</button></li>'
+            for slot, owner in sorted(assigned.items())
+        )
+        rows.append(f'<ul class="plain seat-list">{placed}</ul>')
+
+    lede = (
+        f"{len(unplaced)} manager(s) in the keeper manifest have no seat: "
+        f"<strong>{escape(', '.join(unplaced))}</strong>. Sleeper does not know them by a name "
+        f"<code>owners.yaml</code> recognises, so their keepers will classify as competitive "
+        f"bids. Say who is sitting where and it is fixed on the next poll."
+        if unplaced
+        else "Seats you have assigned by hand. These override what Sleeper resolved."
+    )
+    return (
+        f'<div class="seats"><div class="seats-hd">seating</div>'
+        f'<p class="seats-lede">{lede}</p>{"".join(rows)}</div>'
+    )
 
 
 def _block_html(snap: LiveSnapshot) -> str:

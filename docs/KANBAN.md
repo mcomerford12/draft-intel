@@ -2692,6 +2692,58 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-068] Live seat assignment — the fix for a manager the alias table has never seen
+
+- **Sprint:** 3 · **Owner:** backend-engineer · **Size:** M · **Branch:** `di-068-live-seats`
+- **Why, and it is not hypothetical.** `keenankid17` and `willdeann` sat in the draft room,
+  drafting, **for days** — and were invisible to the tool, because `config/owners.yaml` maps
+  manifest owners to Sleeper *display names* and nobody had told it those two. Four keepers
+  stayed unresolved the whole time while the page looked healthy.
+- **It is guaranteed to repeat on the night.** Burt, Connor and TD have **no alias at all**.
+  Whatever display names they pick when they join at 6:55pm, the alias table will not know
+  them, six keepers will classify as competitive bids, and inflation, skew and every threat
+  read inherits it. Before this card the only remedy was editing YAML and restarting the
+  process, mid-auction.
+- **What it does:** a seat assignment is a direct statement — *slot 9 is Burt* — applied after
+  `build_identity` and winning over it, because a person looking at the draft room knows who is
+  in seat 9 and the API demonstrably may not. Persisted to `config/seats.yaml`, hand-editable,
+  every read to disk.
+- **Verified against the exact Saturday scenario** (three managers under names `owners.yaml` has
+  never seen):
+
+  ```
+  BEFORE  keepers 14/20   unplaced: Burt, Connor, TD   slot 9 shows: bigburt2011
+  AFTER   keepers 20/20   blockers: NONE               slot 9 shows: Burt
+          competitive picks 140 — the keepers classify correctly again
+  ```
+- **A seat lands on the next poll, not up to 60 seconds later.** Identity refreshes on a timer,
+  which is right for managers drifting in over a week and wrong for a seat typed while staring
+  at the blocker naming that manager. The seats file's mtime bypasses the timer, the same trick
+  the priced board uses for `value_overrides.yaml`.
+- **Two counts are reported, and neither substitutes for the other.** `keepers_resolved` is
+  what the ledger is classifying against *right now*; `keepers_if_seated` is what the seats on
+  disk would give once the next poll picks them up. Report only the first and a correct
+  assignment looks like it failed — the count cannot move until the classifier is rebuilt.
+  Report only the second and the blocker clears a poll before the classifier agrees, which is
+  the optimistic direction and the one that lies.
+- **The defect the tests caught.** The first `apply_seats` asserted an owner into a new seat
+  without vacating the old one, so `slot_to_owner` had Connor in **two** slots while
+  `owner_to_slot` had one — precisely the disagreement the docstring said must not happen. The
+  keeper classifier reads one map and the threat ladder the other, so they would have described
+  different drafts: two rows on the ladder under one manager's name. A vacated seat now becomes
+  *unknown* rather than inheriting anybody, because if the assertion is right then whatever the
+  API said about that seat was wrong and there is no second source.
+- **Acceptance criteria:**
+  - [x] `GET/POST/DELETE /api/live/seats`, and a panel on `/live` directly under the blocker
+  - [x] a seat naming nobody in the manifest is refused (404), a slot outside 1..teams is 422
+  - [x] assignments survive a restart
+  - [x] an owner can only occupy one seat; the vacated one reads as unknown
+  - [x] `apply_seats` with no seats is the identity function, not a rebuild that happens to agree
+  - [x] 9 tests, driven by the real fixture under display names the alias table does not know
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.

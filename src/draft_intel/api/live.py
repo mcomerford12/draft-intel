@@ -52,6 +52,7 @@ from draft_intel.quant.valuation import PlayerValue
 from draft_intel.quant.walkaway import WalkAway, WalkAwayBoard, walkaway_board
 from draft_intel.sleeper.poller import parse_picks
 from draft_intel.store.overrides import OverrideStore
+from draft_intel.store.seats import SeatStore, apply_seats
 
 STALE_AFTER_SECONDS = 8.0
 """How old a poll may get before the page stops presenting it as live.
@@ -252,6 +253,7 @@ class LiveDraft:
         league_id: str,
         draft_id: str,
         store: OverrideStore | None = None,
+        seats: SeatStore | None = None,
         client: DraftFeed | None = None,
         precompute: bool = False,
     ) -> None:
@@ -268,6 +270,7 @@ class LiveDraft:
         self.league_id = league_id
         self.draft_id = draft_id
         self.store = store or OverrideStore(root / "config" / "value_overrides.yaml")
+        self.seats = seats or SeatStore(root / "config" / "seats.yaml")
         self.client = client
 
         self._pipeline: Pipeline | None = None
@@ -280,6 +283,7 @@ class LiveDraft:
         self._nominated: str | None = None
         self._identity: Identity | None = None
         self._identity_at = float("-inf")
+        self._seats_mtime: float | None = None
         """When identity was last resolved, on the monotonic clock.
 
         ``-inf`` rather than ``0.0`` because ``time.monotonic()``'s epoch is arbitrary -- on a
@@ -407,13 +411,26 @@ class LiveDraft:
         identity standing; it does not fail the poll, and it never falls back to the mock.
         """
         now = time.monotonic()
-        if self._identity is not None and now - self._identity_at < IDENTITY_REFRESH_SECONDS:
+        # A seat typed at 7:10pm must land on the next poll, not up to a minute later -- the
+        # user is staring at a blocker that names the manager they just placed. Watching the
+        # file's mtime is the same trick the priced board uses for `value_overrides.yaml`.
+        seats_mtime = self.seats.path.stat().st_mtime if self.seats.path.exists() else None
+        seats_changed = seats_mtime != self._seats_mtime
+        self._seats_mtime = seats_mtime
+        if (
+            self._identity is not None
+            and not seats_changed
+            and now - self._identity_at < IDENTITY_REFRESH_SECONDS
+        ):
             return
         rosters = await client.rosters(self.league_id) or []
         users = await client.users(self.league_id) or []
         aliases = yaml.safe_load((self.root / "config" / "owners.yaml").read_text()) or {}
-        resolved = build_identity(
-            draft, rosters=rosters, users=users, aliases=aliases.get("aliases") or {}
+        resolved = apply_seats(
+            build_identity(
+                draft, rosters=rosters, users=users, aliases=aliases.get("aliases") or {}
+            ),
+            self.seats.load(),
         )
         if resolved.slot_to_owner != (self._identity.slot_to_owner if self._identity else None):
             # Seating changed, so every `(slot, player_id)` keeper key built from the old one is
@@ -645,6 +662,23 @@ class LiveDraft:
             }
         )
         return len(self._manifest_keys_now()), expected, tuple(unmapped)
+
+    def keepers_if_seated(self) -> int:
+        """How many keepers would place **with the seats currently on disk applied**.
+
+        Distinct from :meth:`unresolved_keepers`, deliberately. That one reports the identity
+        the ledger is actually classifying against right now; this one reports what the user
+        has just asserted, which does not reach the classifier until the next poll.
+
+        Both are needed and neither substitutes for the other. Reporting only the live figure
+        makes a correct assignment look like it failed — the user clicks "assign" and the count
+        does not move. Reporting only the projected one clears the blocker a poll before the
+        classifier agrees with it, which is the optimistic direction and the one that lies.
+        """
+        if self._identity is None:
+            return 0
+        seated = apply_seats(self._identity, self.seats.load())
+        return len(manifest_keys(dict(self.pipeline.resolved), seated))
 
     def _manifest_keys_now(self) -> frozenset[tuple[int, str]]:
         """``(slot, player_id)`` keeper keys against the **live** seating.
