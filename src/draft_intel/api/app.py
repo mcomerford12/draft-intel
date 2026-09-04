@@ -50,10 +50,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from draft_intel.api.live import BlockView, LiveDraft, LiveSnapshot
+from draft_intel.api.live import BlockView, LiveDraft, LiveSnapshot, TeamLine
 from draft_intel.cli import LEAGUE_ID, REAL_DRAFT_ID
 from draft_intel.prep import build_pipeline
 from draft_intel.sleeper.client import SleeperClient
+from draft_intel.store.corrections import Correction
 from draft_intel.store.overrides import OverrideStore, ValueOverride
 from draft_intel.store.seats import SeatAssignment
 
@@ -189,6 +190,25 @@ class SeatRequest(BaseModel):
 
     owner: str = Field(min_length=1)
     note: str = ""
+
+
+class CorrectionRequest(BaseModel):
+    """A correction to a team's money, or a keeper the feed has not delivered.
+
+    For a budget, give **either** ``remaining`` (what the room says the team actually has, which
+    is what a person says out loud) **or** ``delta``. ``remaining`` is turned into a delta once,
+    against the ledger as it stands at that moment, and never recomputed — §4.8's rule that a
+    correction must not fight the next poll.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    slot: int = Field(ge=1)
+    remaining: int | None = Field(default=None, ge=0)
+    delta: int | None = None
+    player_id: str | None = None
+    amount: int | None = Field(default=None, ge=0)
+    reason: str = ""
 
 
 class NominateRequest(BaseModel):
@@ -391,12 +411,69 @@ def create_app(
         live.seats.clear(slot)
         return {"cleared": slot}
 
+    @app.get("/api/live/corrections")
+    def api_corrections() -> list[dict[str, object]]:
+        return [{**c.model_dump(), "describe": c.describe()} for c in live.corrections.load()]
+
+    @app.post("/api/live/corrections/budget")
+    def correct_budget(request: CorrectionRequest) -> dict[str, object]:
+        team = _team(live, request.slot)
+        if request.remaining is None and request.delta is None:
+            raise HTTPException(422, "give either `remaining` (what the room says) or `delta`")
+        if request.remaining is not None and request.delta is not None:
+            # Both would need a rule about which wins, and any such rule is a coin toss the
+            # user did not ask for.
+            raise HTTPException(422, "give `remaining` or `delta`, not both")
+
+        delta = (
+            request.delta
+            if request.delta is not None
+            else int(request.remaining or 0) - team.remaining
+        )
+        if delta == 0:
+            raise HTTPException(
+                422, f"{team.owner} already reads ${team.remaining}; nothing to correct"
+            )
+        entry = live.corrections.add(
+            kind="budget",
+            slot=request.slot,
+            delta=delta,
+            observed=request.remaining,
+            reason=request.reason,
+        )
+        return {"correction": entry.model_dump(), "was": team.remaining, "effective": "next poll"}
+
+    @app.post("/api/live/corrections/keeper")
+    def correct_keeper(request: CorrectionRequest) -> dict[str, object]:
+        _team(live, request.slot)
+        if not request.player_id or request.amount is None:
+            raise HTTPException(422, "a manual keeper needs `player_id` and `amount`")
+        if not any(p.player_id == request.player_id for p in live.pipeline.board.players):
+            raise HTTPException(404, f"no player {request.player_id!r} on the board")
+        entry = live.corrections.add(
+            kind="keeper",
+            slot=request.slot,
+            player_id=request.player_id,
+            amount=request.amount,
+            reason=request.reason,
+        )
+        return {"correction": entry.model_dump(), "effective": "next poll"}
+
+    @app.delete("/api/live/corrections/{correction_id}")
+    def revert_correction(correction_id: int) -> dict[str, object]:
+        undone = live.corrections.revert(correction_id)
+        if undone is None:
+            raise HTTPException(404, f"no correction {correction_id}")
+        return {"correction": undone.model_dump(), "effective": "next poll"}
+
     @app.get("/live", response_class=HTMLResponse)
     def live_page() -> str:
         identity = live.identity
         _resolved, _expected, unplaced = live.unresolved_keepers()
         return _render_live(
             live.snapshot(),
+            corrections=[c for c in live.corrections.load() if not c.reverted],
+            teams={t.slot: t.owner for t in live.snapshot().teams},
             unmapped=(
                 identity.unmapped_slots(live.config.teams)
                 if identity is not None
@@ -584,6 +661,8 @@ def _render_live(
     unmapped: list[int] | None = None,
     unplaced: list[str] | None = None,
     assigned: dict[int, str] | None = None,
+    corrections: list[Correction] | None = None,
+    teams: dict[int, str] | None = None,
 ) -> str:
     """The cockpit. Read at a glance, mid-nomination, while somebody is shouting numbers.
 
@@ -650,6 +729,12 @@ def _render_live(
     border-radius:3px; background:var(--ground); color:var(--ink) }}
   .seat-list {{ margin:10px 0 0; font-size:13.5px }}
   .seat-list li {{ border-bottom:0; padding:3px 0 }}
+  .corr {{ background:var(--surface); border:1px solid var(--line); border-radius:5px;
+    padding:10px 16px; margin:0 0 12px }}
+  .corr summary {{ font:600 10px ui-monospace,monospace; letter-spacing:.09em;
+    text-transform:uppercase; color:var(--muted); cursor:pointer }}
+  .corr-on {{ border-color:var(--edit) }}
+  .corr-on .seats-hd {{ color:var(--edit) }}
   table {{ width:100%; border-collapse:collapse; background:var(--surface);
     border:1px solid var(--line) }}
   th,td {{ padding:6px 10px; text-align:right; border-bottom:1px solid var(--line);
@@ -672,7 +757,11 @@ def _render_live(
   .hits button:hover {{ border-color:var(--accent); color:var(--accent) }}
 </style></head><body><div class="wrap">
 <h1>Cockpit</h1>
-<div id="app">{_live_body(snap, unmapped or [], unplaced or [], assigned or {})}</div>
+<div id="app">{
+        _live_body(
+            snap, unmapped or [], unplaced or [], assigned or {}, corrections or [], teams or {}
+        )
+    }</div>
 <h2>who is up</h2>
 <input id="q" autocomplete="off"
   placeholder="type a name, then pick" aria-label="nominate a player">
@@ -699,6 +788,22 @@ document.addEventListener("click", async (event) => {{
       headers: {{ "Content-Type": "application/json" }},
       body: JSON.stringify({{ owner, note: "assigned from the cockpit" }}),
     }});
+    repaint();
+  }} else if (target && target.id === "corr-go") {{
+    const slot = Number(document.getElementById("corr-slot").value);
+    const raw = document.getElementById("corr-amt").value.trim();
+    if (raw === "") return;
+    await fetch("/api/live/corrections/budget", {{
+      method: "POST",
+      headers: {{ "Content-Type": "application/json" }},
+      body: JSON.stringify({{
+        slot, remaining: Number(raw),
+        reason: document.getElementById("corr-why").value,
+      }}),
+    }});
+    repaint();
+  }} else if (target && target.dataset && target.dataset.uncorrect) {{
+    await fetch(`/api/live/corrections/${{target.dataset.uncorrect}}`, {{ method: "DELETE" }});
     repaint();
   }} else if (target && target.dataset && target.dataset.unseat) {{
     await fetch(`/api/live/seats/${{target.dataset.unseat}}`, {{ method: "DELETE" }});
@@ -739,6 +844,8 @@ def _live_body(
     unmapped: list[int],
     unplaced: list[str],
     assigned: dict[int, str],
+    corrections: list[Correction],
+    teams: dict[int, str],
 ) -> str:
     """The part that repaints. Kept separate so the poll loop replaces only what changed."""
     out: list[str] = []
@@ -749,6 +856,7 @@ def _live_body(
     # you cannot place is a worse experience than no banner if the remedy is editing YAML and
     # restarting mid-auction.
     out.append(_seats_html(unmapped, unplaced, assigned))
+    out.append(_corrections_html(corrections, teams))
     if snap.stale:
         # The failure this module exists to prevent: numbers that stopped updating and look
         # exactly like numbers that did not.
@@ -809,6 +917,21 @@ def _live_body(
     return "\n".join(out)
 
 
+def _team(live: LiveDraft, slot: int) -> TeamLine:
+    """The team in this slot, or a 422 naming the range. Never an invented row.
+
+    A correction against a slot outside the league would sit in the file forever, applying to
+    nobody — and the fold reports it as an orphan whose money is deliberately not minted. Better
+    to refuse it where the user can still see the typo.
+    """
+    team = next((t for t in live.snapshot().teams if t.slot == slot), None)
+    if team is None:
+        raise HTTPException(
+            422, f"slot {slot} is not in this league's ledger (1..{live.config.teams})"
+        )
+    return team
+
+
 def _seats_html(unmapped: list[int], unplaced: list[str], assigned: dict[int, str]) -> str:
     """The seat-assignment panel. Shown only when there is something to fix or something fixed.
 
@@ -850,6 +973,49 @@ def _seats_html(unmapped: list[int], unplaced: list[str], assigned: dict[int, st
     return (
         f'<div class="seats"><div class="seats-hd">seating</div>'
         f'<p class="seats-lede">{lede}</p>{"".join(rows)}</div>'
+    )
+
+
+def _corrections_html(corrections: list[Correction], teams: dict[int, str]) -> str:
+    """Every correction in force, and the box to add one.
+
+    **A corrected budget must never look like an uncorrected one.** That is §4.8's rule about
+    typed numbers applied to the money column: the room's figures and the tool's diverge for
+    real reasons, and the moment a $5 adjustment stops being visible it becomes indistinguishable
+    from a bug. So this panel is always present once anything is in force, listing what you said
+    alongside what the system derived from it.
+    """
+    options = "".join(
+        f'<option value="{slot}">{escape(owner)}</option>' for slot, owner in sorted(teams.items())
+    )
+    form = (
+        f'<div class="seat-form">'
+        f'<select id="corr-slot" aria-label="team">{options}</select>'
+        f'<span class="seat-is">actually has $</span>'
+        f'<input id="corr-amt" inputmode="numeric" style="width:70px" aria-label="dollars">'
+        f'<input id="corr-why" placeholder="why" style="width:190px;text-align:left" '
+        f'aria-label="reason">'
+        f'<button id="corr-go">correct</button>'
+        f"</div>"
+    )
+    if not corrections:
+        return (
+            f'<details class="corr"><summary>corrections</summary>'
+            f'<p class="seats-lede">None in force. Use this when the room and the tool disagree '
+            f"about a team's money — it is stored as a difference, not a fixed figure, so the "
+            f"next pick will not undo it.</p>{form}</details>"
+        )
+    rows = "".join(
+        f"<li><strong>{escape(teams.get(c.slot, f'slot {c.slot}'))}</strong> "
+        f"{escape(c.describe().split(': ', 1)[1])}"
+        f"{f' — {escape(c.reason)}' if c.reason else ''} "
+        f'<button data-uncorrect="{c.id}">undo</button></li>'
+        for c in corrections
+    )
+    return (
+        f'<div class="seats corr-on"><div class="seats-hd">corrections in force</div>'
+        f'<p class="seats-lede">These numbers are yours, not the feed\'s.</p>'
+        f'<ul class="plain seat-list">{rows}</ul>{form}</div>'
     )
 
 
