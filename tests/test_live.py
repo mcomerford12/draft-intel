@@ -22,6 +22,7 @@ import pytest
 
 from draft_intel.api.live import STALE_AFTER_SECONDS, LiveDraft
 from draft_intel.store.overrides import OverrideStore, ValueOverride
+from draft_intel.store.seats import SeatAssignment, SeatStore
 
 ROOT = Path(__file__).resolve().parents[1]
 PICKS = sorted(
@@ -774,3 +775,163 @@ def test_a_failed_precompute_is_reported_and_does_not_take_the_cockpit_down(
     assert snap.walkaway.state == "absent"
     assert "solver exploded" in snap.walkaway.detail
     assert snap.total_remaining > 0, "the ledger still reports"
+
+
+# ------------------------------------------------------- DI-068: live seat assignment
+
+
+# Three managers joining under display names `config/owners.yaml` has never seen. This is the
+# Saturday scenario, not a hypothetical: `keenankid17` and `willdeann` were in the draft room
+# and invisible to the tool for days for exactly this reason, and Burt, Connor and TD have no
+# alias at all.
+UNKNOWN_SEATING = {
+    1: "ajthebeard",
+    2: "jswilliams5",
+    3: "mattchupiccu",
+    4: "MasonWAlpert",
+    5: "someguy_92",
+    6: "keenankid17",
+    7: "steeveegee300",
+    8: "willdeann",
+    9: "bigburt2011",
+    10: "td_the_legend",
+}
+
+
+def _unseated(store: OverrideStore, tmp_path: Path) -> LiveDraft:
+    live = make(PICKS, store, seating=UNKNOWN_SEATING)
+    live.seats = SeatStore(tmp_path / "seats.yaml")
+    return live
+
+
+def test_a_manager_under_an_unknown_display_name_leaves_their_keepers_unplaced(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """The baseline the fix exists for. Without it the page is correct and useless: it names
+    the three managers and offers nothing to do about them."""
+    live = _unseated(store, tmp_path)
+    asyncio.run(live.poll_once())
+
+    resolved, expected, unplaced = live.unresolved_keepers()
+    assert (resolved, expected) == (14, 20)
+    assert set(unplaced) == {"Burt", "Connor", "TD"}
+    assert live.owner_for(9) == "bigburt2011", "the display name, which resolves to nobody"
+
+
+def test_assigning_seats_places_every_keeper_without_a_restart(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """The whole point. Three assertions from a person looking at the draft room, and the
+    blocker clears on the next poll — no YAML edit, no restart, mid-auction."""
+    live = _unseated(store, tmp_path)
+    asyncio.run(live.poll_once())
+    assert live.snapshot().blockers, "there is a blocker to clear"
+
+    for slot, owner in ((5, "Connor"), (9, "Burt"), (10, "TD")):
+        live.seats.assign(SeatAssignment(slot=slot, owner=owner, note="confirmed in the room"))
+    asyncio.run(live.poll_once())
+
+    assert live.unresolved_keepers()[0] == 20
+    assert live.snapshot().blockers == ()
+    assert live.owner_for(9) == "Burt"
+    assert live.snapshot().competitive_picks == 140, "and the keepers classify correctly"
+
+
+def test_a_seat_lands_on_the_next_poll_not_a_minute_later(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """Identity is re-resolved on a 60s timer, which is right for managers drifting in and
+    wrong for a seat the user just typed while staring at the blocker naming that manager."""
+    live = _unseated(store, tmp_path)
+    asyncio.run(live.poll_once())
+    assert live.unresolved_keepers()[0] == 14
+
+    live.seats.assign(SeatAssignment(slot=9, owner="Burt"))
+    asyncio.run(live.poll_once())  # well inside the 60s refresh window
+
+    assert live.unresolved_keepers()[0] == 16, "the file changed, so the timer was bypassed"
+
+
+def test_the_projected_count_moves_immediately_and_the_live_one_does_not(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """Both figures are needed and neither substitutes for the other.
+
+    Report only the live one and a correct assignment looks like it failed — the count cannot
+    move until the classifier is rebuilt a poll later. Report only the projected one and the
+    blocker clears before the classifier agrees, which is the optimistic direction and the one
+    that lies about what the ledger is currently doing.
+    """
+    live = _unseated(store, tmp_path)
+    asyncio.run(live.poll_once())
+
+    live.seats.assign(SeatAssignment(slot=9, owner="Burt"))
+    assert live.keepers_if_seated() == 16, "what you just asserted"
+    assert live.unresolved_keepers()[0] == 14, "what the ledger is still classifying against"
+
+    asyncio.run(live.poll_once())
+    assert live.unresolved_keepers()[0] == 16, "and now they agree"
+
+
+def test_an_assigned_owner_does_not_also_keep_their_resolved_seat(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """Moving somebody must not leave them in two places. `owner_to_slot` and `slot_to_owner`
+    are read by different consumers — the keeper classifier one, the threat ladder the other —
+    so a disagreement between them means the two describe different drafts."""
+    live = make(PICKS, store, seating=FIXTURE_SEATING)
+    live.seats = SeatStore(tmp_path / "seats.yaml")
+    asyncio.run(live.poll_once())
+    identity = live.identity
+    assert identity is not None and identity.slot_for("Connor") == 5
+
+    live.seats.assign(SeatAssignment(slot=8, owner="Connor"))
+    asyncio.run(live.poll_once())
+
+    moved = live.identity
+    assert moved is not None
+    assert moved.slot_for("Connor") == 8, "the assertion wins"
+    assert moved.slot_to_owner[8] == "Connor"
+    assert list(moved.owner_to_slot.values()).count(8) == 1, "one owner in that seat"
+    assert moved.slot_to_owner.get(5) != "Connor", "and not still in the old one"
+
+
+def test_seats_survive_a_restart(store: OverrideStore, tmp_path: Path) -> None:
+    """Typed at 7:10, still true at 8:00 after the process died. Same promise the price
+    overrides make, for the same reason."""
+    live = _unseated(store, tmp_path)
+    live.seats.assign(SeatAssignment(slot=9, owner="Burt", note="he confirmed"))
+
+    reopened = SeatStore(tmp_path / "seats.yaml").load()
+    assert reopened[9].owner == "Burt"
+    assert reopened[9].note == "he confirmed"
+
+    fresh = _unseated(store, tmp_path)
+    asyncio.run(fresh.poll_once())
+    assert fresh.owner_for(9) == "Burt"
+
+
+def test_the_seat_file_is_editable_by_hand(tmp_path: Path) -> None:
+    """It is an interface, so it explains itself and a hand-written entry loads."""
+    seats = SeatStore(tmp_path / "seats.yaml")
+    seats.assign(SeatAssignment(slot=9, owner="Burt"))
+    text = seats.path.read_text()
+
+    assert "edit by hand" in text
+    assert "NOT their Sleeper display name" in text
+    assert seats.load()[9].owner == "Burt"
+
+
+def test_no_seats_leaves_the_resolved_identity_untouched(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """`apply_seats` on an empty map must be the identity function, not a rebuild that happens
+    to agree — the rebuild is where an owner could silently lose their seat."""
+    live = make(PICKS, store, seating=FIXTURE_SEATING)
+    live.seats = SeatStore(tmp_path / "absent.yaml")
+    asyncio.run(live.poll_once())
+
+    identity = live.identity
+    assert identity is not None
+    assert identity.slot_to_owner[3] == "mattchupiccu"
+    assert live.unresolved_keepers()[0] == 20
