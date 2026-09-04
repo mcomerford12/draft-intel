@@ -2744,6 +2744,54 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-069] The budget correction surface
+
+- **Sprint:** 3 · **Owner:** backend-engineer · **Size:** M · **Branch:** `di-069-corrections`
+- **Why:** the ledger has taken `BudgetAdjustment`, `ManualKeeper` and `Revert` since Sprint 1
+  and **nothing on the live path emitted any of them.** When the tool says AJ has $47 and the
+  room says $42, there was no way to say so. Charter §2 makes manual entry the *primary* price
+  path rather than a fallback, because Sleeper publishes no auction value at all (Finding 3).
+- **A correction is a delta, never a pin** (§4.8), and the distinction is the whole card. Pin
+  slot 1 to $81 and the moment they buy somebody for $79 the pin drags them back to $81 while
+  the room sees $2. Measured on the fixture: correction applied at pick 60, twenty more picks
+  land, slot 1 spends $79 — reads **$2**, exactly right. A pin would read $81.
+
+  The *interface* still asks for the absolute, because "AJ has $42" is what a person says at a
+  table. The delta is computed once, at that moment, and never recomputed.
+- **Sequence numbers are stable across folds.** Feed picks are numbered 1..N and N grows with
+  every pick, so a correction numbered after them would change identity every poll and a
+  `Revert` aimed at one would silently drift onto whatever event now holds that number.
+  Corrections are numbered from `CORRECTION_SEQ_BASE = 1_000_000`, from an id assigned once and
+  never reused — which also puts them after every pick in fold order, which is right: a
+  correction is the user's last word on a team.
+- **What the user said is kept beside what the system derived.** §4.8 applied to the money
+  column: `observed: 81` sits next to `delta: -5`, so "I told it AJ had $81" stays recoverable
+  an hour later from "-$5". A stored delta alone cannot answer that.
+- **A revert emits a real `Revert` rather than deleting the row**, so *"corrected then undone"*
+  stays legible at 9pm when somebody asks why a number moved twice. Verified: money restored,
+  record retained reading `slot 1: -5, you said $81 (reverted)`.
+- **The ledger's own guards still fire through this path**, which matters because it is a new
+  route into the same ledger and must not be a way around them. A -$400 fat finger produces
+  `IMPLAUSIBLE CORRECTION slot 3: -400 takes this team's budget to $-200 in a $200 league;
+  applied as entered, but check it` — applied as entered rather than silently clamped, because
+  a bounded-but-wrong figure is more dangerous than an absurd one.
+- **A corrected budget must never look like an uncorrected one.** The panel is always present
+  once anything is in force, listing what you said alongside what was derived from it. The
+  moment a $5 adjustment stops being visible it is indistinguishable from a bug.
+- **Acceptance criteria:**
+  - [x] `GET/POST/DELETE /api/live/corrections`, budget and keeper, and a panel on `/live`
+  - [x] absolute in, delta stored; both or neither is 422, a no-op correction is 422, a slot
+        outside the league is 422, a keeper naming nobody is 404
+  - [x] survives a restart
+  - [x] correction seqs do not drift as the feed grows — asserted directly, not inferred
+  - [x] 9 tests including the baseline that no corrections changes nothing, without which the
+        rest prove only that *something* moved
+- **Not built, and stated rather than implied:** the keeper form is API-only on the page; the
+  budget form is the one with a UI. `Reclassify` still has no producer (DI-057).
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.

@@ -51,6 +51,7 @@ from draft_intel.quant.optimizer import Candidate
 from draft_intel.quant.valuation import PlayerValue
 from draft_intel.quant.walkaway import WalkAway, WalkAwayBoard, walkaway_board
 from draft_intel.sleeper.poller import parse_picks
+from draft_intel.store.corrections import CorrectionStore
 from draft_intel.store.overrides import OverrideStore
 from draft_intel.store.seats import SeatStore, apply_seats
 
@@ -254,6 +255,7 @@ class LiveDraft:
         draft_id: str,
         store: OverrideStore | None = None,
         seats: SeatStore | None = None,
+        corrections: CorrectionStore | None = None,
         client: DraftFeed | None = None,
         precompute: bool = False,
     ) -> None:
@@ -271,6 +273,7 @@ class LiveDraft:
         self.draft_id = draft_id
         self.store = store or OverrideStore(root / "config" / "value_overrides.yaml")
         self.seats = seats or SeatStore(root / "config" / "seats.yaml")
+        self.corrections = corrections or CorrectionStore(root / "config" / "corrections.yaml")
         self.client = client
 
         self._pipeline: Pipeline | None = None
@@ -615,7 +618,11 @@ class LiveDraft:
             [
                 PickObserved(seq=index + 1, pick=snapshot)
                 for index, snapshot in enumerate(parsed.picks.values())
-            ],
+            ]
+            # Corrections carry sequence numbers from CORRECTION_SEQ_BASE, so they sort after
+            # every pick however many have landed -- a correction is the user's last word on a
+            # team, and its identity must not drift as the feed grows.
+            + self.corrections.events(),
             slots=range(1, built.config.teams + 1),
             budget=built.config.budget,
             total_slots=built.config.draft_rounds,

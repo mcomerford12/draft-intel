@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from draft_intel.api.live import STALE_AFTER_SECONDS, LiveDraft
+from draft_intel.store.corrections import CORRECTION_SEQ_BASE, CorrectionStore
 from draft_intel.store.overrides import OverrideStore, ValueOverride
 from draft_intel.store.seats import SeatAssignment, SeatStore
 
@@ -935,3 +936,169 @@ def test_no_seats_leaves_the_resolved_identity_untouched(
     assert identity is not None
     assert identity.slot_to_owner[3] == "mattchupiccu"
     assert live.unresolved_keepers()[0] == 20
+
+
+# ------------------------------------------------------- DI-069: budget corrections
+
+
+def _correcting(store: OverrideStore, tmp_path: Path, cursor: int = 60) -> LiveDraft:
+    live = make(PICKS[:cursor], store, seating=FIXTURE_SEATING)
+    live.corrections = CorrectionStore(tmp_path / "corrections.yaml")
+    return live
+
+
+def _money(live: LiveDraft, slot: int) -> int:
+    return next(t.remaining for t in live.snapshot().teams if t.slot == slot)
+
+
+def test_a_budget_correction_reaches_the_ledger(store: OverrideStore, tmp_path: Path) -> None:
+    """The whole gap. The ledger has taken BudgetAdjustment since Sprint 1 and nothing on the
+    live path emitted one, so "the tool says $47 and the room says $42" had no answer."""
+    live = _correcting(store, tmp_path)
+    asyncio.run(live.poll_once())
+    before = _money(live, 1)
+
+    live.corrections.add(kind="budget", slot=1, delta=-5, observed=before - 5, reason="room")
+    asyncio.run(live.poll_once())
+
+    assert _money(live, 1) == before - 5
+
+
+def test_a_correction_is_a_delta_so_the_next_pick_does_not_undo_it(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """§4.8's reason for storing a delta rather than a pin, checked rather than asserted.
+
+    Pin slot 1 to $81 and the moment they buy somebody for $79 the pin drags them back to $81
+    while the room sees $2. The delta rides along instead. This is the single behaviour that
+    makes a correction survive contact with a live draft.
+    """
+    live = _correcting(store, tmp_path)
+    asyncio.run(live.poll_once())
+    before = _money(live, 1)
+    live.corrections.add(kind="budget", slot=1, delta=-5, observed=before - 5)
+    asyncio.run(live.poll_once())
+
+    client = live.client
+    assert isinstance(client, FakeClient)
+    client.picks_payload = PICKS[:80]
+    asyncio.run(live.poll_once())
+
+    spent = sum(int(p["metadata"]["amount"]) for p in PICKS[60:80] if int(p["draft_slot"]) == 1)
+    assert spent > 0, "slot 1 really does buy somebody in this window"
+    assert _money(live, 1) == before - 5 - spent, "the correction rode along; a pin would not"
+
+
+def test_the_figure_the_user_typed_is_kept_beside_the_delta_it_produced(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """§4.8 again: "I told it AJ had $42" must stay recoverable from "-$5". A stored delta
+    alone cannot answer "what did I actually say?" an hour later."""
+    live = _correcting(store, tmp_path)
+    asyncio.run(live.poll_once())
+    live.corrections.add(kind="budget", slot=1, delta=-5, observed=81, reason="room says 81")
+
+    entry = live.corrections.load()[0]
+    assert entry.delta == -5 and entry.observed == 81
+    assert "you said $81" in entry.describe()
+
+
+def test_a_manual_keeper_reaches_the_ledger(store: OverrideStore, tmp_path: Path) -> None:
+    """Charter §2 makes this the *primary* price path, not a fallback: Sleeper publishes no
+    auction value at all, so retention prices are typed from the draft room."""
+    live = _correcting(store, tmp_path, cursor=30)
+    asyncio.run(live.poll_once())
+    taken = {p["player_id"] for p in PICKS[:30]}
+    free = next(
+        p.player_id
+        for p in live.pipeline.board.players
+        if p.in_pool_live and p.player_id not in taken
+    )
+    before = next(t for t in live.snapshot().teams if t.slot == 2)
+
+    live.corrections.add(kind="keeper", slot=2, player_id=free, amount=30, reason="from the room")
+    asyncio.run(live.poll_once())
+
+    after = next(t for t in live.snapshot().teams if t.slot == 2)
+    assert after.remaining == before.remaining - 30
+    assert after.filled_slots == before.filled_slots + 1
+
+
+def test_reverting_a_correction_restores_the_money_and_keeps_the_record(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """A revert emits a real Revert event rather than deleting the row, so "corrected then
+    undone" stays legible at 9pm when somebody asks why a number moved twice."""
+    live = _correcting(store, tmp_path)
+    asyncio.run(live.poll_once())
+    before = _money(live, 1)
+    entry = live.corrections.add(kind="budget", slot=1, delta=-5, observed=before - 5)
+    asyncio.run(live.poll_once())
+    assert _money(live, 1) == before - 5
+
+    live.corrections.revert(entry.id)
+    asyncio.run(live.poll_once())
+
+    assert _money(live, 1) == before, "the money came back"
+    kept = live.corrections.load()
+    assert len(kept) == 1 and kept[0].reverted, "and the record did not vanish"
+
+
+def test_correction_sequence_numbers_do_not_drift_as_the_feed_grows(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """The reason corrections are numbered from CORRECTION_SEQ_BASE rather than after the picks.
+
+    Feed events are numbered 1..N and N grows with every pick. Number a correction after them
+    and its identity changes every poll — so a Revert aimed at it silently drifts onto whatever
+    event now holds that number. The seq must be a function of the correction, not of how much
+    of the draft has happened.
+    """
+    live = _correcting(store, tmp_path)
+    entry = live.corrections.add(kind="budget", slot=1, delta=-5)
+    first = [e.seq for e in live.corrections.events()]
+
+    client = live.client
+    assert isinstance(client, FakeClient)
+    client.picks_payload = PICKS  # the whole draft lands
+    asyncio.run(live.poll_once())
+
+    assert [e.seq for e in live.corrections.events()] == first
+    assert first == [CORRECTION_SEQ_BASE + entry.id]
+    assert first[0] > len(PICKS), "above every pick, so corrections apply last"
+
+
+def test_the_ledgers_own_guards_still_fire_through_this_path(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """A correction is not exempt from the checks. `IMPLAUSIBLE CORRECTION` exists because a
+    bounded-but-wrong figure is more dangerous than an absurd one, and this is a new route into
+    the same ledger — it must not be a way around them."""
+    live = _correcting(store, tmp_path)
+    live.corrections.add(kind="budget", slot=3, delta=-400, reason="fat finger")
+    asyncio.run(live.poll_once())
+
+    alerts = live.snapshot().alerts
+    assert any("IMPLAUSIBLE CORRECTION" in a and "slot 3" in a for a in alerts)
+    assert _money(live, 3) < 0, "applied as entered rather than silently clamped"
+
+
+def test_corrections_survive_a_restart(store: OverrideStore, tmp_path: Path) -> None:
+    live = _correcting(store, tmp_path)
+    asyncio.run(live.poll_once())
+    before = _money(live, 1)
+    live.corrections.add(kind="budget", slot=1, delta=-7)
+
+    fresh = _correcting(store, tmp_path)
+    asyncio.run(fresh.poll_once())
+    assert _money(fresh, 1) == before - 7
+
+
+def test_no_corrections_changes_nothing(store: OverrideStore, tmp_path: Path) -> None:
+    """The baseline. Without it every test above proves only that *something* moved."""
+    live = _correcting(store, tmp_path)
+    asyncio.run(live.poll_once())
+    assert live.corrections.events() == []
+    assert live.snapshot().total_remaining == 2000 - sum(
+        int(p["metadata"]["amount"]) for p in PICKS[:60]
+    )
