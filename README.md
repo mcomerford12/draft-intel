@@ -11,11 +11,16 @@ Pre-implementation. This repo currently holds the charter and the refined build 
 
 | Document | What it is |
 |---|---|
+| **`docs/HANDOFF.md`** | **Start here.** Complete context for picking this build up cold. |
 | `docs/CHARTER.md` | The original charter as supplied. Source of truth for **scope**. |
 | `docs/PLAN.md` | Refined context and build plan. Source of truth for **how**. Resolves four contradictions in the charter and corrects three technical impossibilities. |
 | `docs/DECISIONS_FOR_REVIEW.md` | Open rulings and decisions taken, per charter §11. |
 | `config/keepers.yaml` | The keeper manifest. Expected state, **never** ledger truth. |
 | `config/keepers.original.yaml` | The manifest as originally supplied, kept for diffing. |
+| `docs/KANBAN.md` | Board state, per charter §7. Single source of truth for what is done. |
+| `docs/adr/` | Architecture decisions, including every deviation from the charter. |
+| `docs/api-findings.md` | Sprint 0 discovery: 9 findings against the live 2026 API. |
+| `.claude/agents/` | Subagent roster per charter §6, with independence rules. |
 
 ## Read the plan first
 

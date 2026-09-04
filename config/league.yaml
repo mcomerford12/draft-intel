@@ -1,0 +1,77 @@
+# Expected league shape. A TRIPWIRE, not a source of truth.
+#
+# Everything is derived from the API at boot and compared against this file. A commissioner
+# changing a setting the night before the draft is a realistic and catastrophic failure mode,
+# so a disagreement here is loud by design.
+#
+# Severity is graded (ADR-0002), and the grading now turns on ONE question: does the field
+# change what a player costs?
+#
+#   BLOCKING - starting slots, budget, team count. These scale every price in the model and
+#              have an unambiguous API source. Refuse to start.
+#   WARNING  - roster_size, bench depth, draft.settings staleness, start_time drift. Loud,
+#              persistent banner, but the tool boots.
+#
+#   draft_rounds is CONDITIONAL. It scales every price, but has no unambiguous API source
+#   today: draft.settings.rounds says 15 (stale, Finding 1) and roster length stops being
+#   evidence about the draft once the two are decoupled. So it BLOCKS when those two API
+#   fields agree with each other and disagree with this file, and WARNS when the API
+#   disagrees with itself. See ADR-0005.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY roster_size AND draft_rounds ARE SEPARATE FIELDS (ADR-0005)
+#
+# They were one field, `total_slots: 16`, which happened to be correct only because the
+# league drafts every roster spot. It is the number of PLAYERS BOUGHT that scales prices:
+#
+#   auction pool = teams * draft_rounds = 10 * 16 = 160
+#
+# Roster size beyond that is waiver capacity. It costs nothing at auction, so it must not be
+# able to move a single price -- and it must not be able to refuse the boot either. A
+# commissioner adding two bench spots the night before is a shrug, not an outage.
+#
+# The user reports 18 roster positions with 16 draft rounds. The API today reports 16 roster
+# positions (10 starters + 6 BN, no IR, no taxi) and 16 is what the mock drafted. Whichever
+# lands, the auction is 160 picks and no price moves. Flagged in docs/api-findings.md
+# Finding 10; `roster_size` below tracks what the API actually says today.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The real league is ALREADY internally inconsistent: roster_positions says 2 QB / 0 DEF /
+# 6 BN / 16 slots, draft.settings says 1 QB / 1 DEF / 5 BN / 15 rounds, and max_keepers is 1
+# rather than 2. See docs/api-findings.md Finding 1 and KANBAN DI-004. roster_positions wins,
+# corroborated by draft.metadata.scoring_type == "2qb", by the user's own mock draft, and
+# by the user directly (2QB, 0 DEF, 6 bench, 16 rounds).
+teams: 10
+budget: 200
+
+# Players each team buys at auction. Scales every price. Conditionally blocking (above).
+draft_rounds: 16
+
+# The ONE value draft.settings.rounds is known to be wrong with. Finding 1 diagnosed the draft
+# object as holding stale defaults from before roster settings were finalised, and 15 is what it
+# holds. That discrepancy is understood, so it warns. Any OTHER value there is unexplained and
+# BLOCKS -- an undiagnosed 14 against our 16 looks exactly like the known-stale 15 in a warning,
+# and would price a 160-spot pool for a 140-pick draft while every 4.3 invariant still passed.
+# When DI-004 lands and the commissioner re-saves, set this to null.
+draft_rounds_api_known_stale: 15
+
+# Total roster capacity per team. Anything above draft_rounds is waiver space and costs
+# nothing at auction. WARNING only -- but a roster_size BELOW draft_rounds is incoherent
+# (you cannot seat what you drafted) and blocks.
+roster_size: 16
+
+keepers_per_team: 2
+bench: 6
+starters:
+  QB: 2
+  RB: 2
+  WR: 2
+  TE: 1
+  FLEX: 2
+  K: 1
+
+# Confirmed by the user as 2026-09-05 19:00 MT, and corroborated exactly by the real draft
+# object's start_time (1788656400000 == 2026-09-06T01:00:00Z == 19:00 MDT). A draft that
+# moves is a real hazard -- every "how long do I have" answer depends on it -- so drift is
+# surfaced, but it never blocks: the tool must still run if the commissioner nudges the time.
+draft_start: "2026-09-06T01:00:00Z"
