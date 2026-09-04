@@ -289,11 +289,47 @@ def test_seating_that_changes_rebuilds_the_keeper_classifier(store: OverrideStor
     client = live.client
     assert isinstance(client, FakeClient)
     client.seating = FIXTURE_SEATING
-    live._identity_at = 0.0  # force the refresh timer
+    # `-inf`, not `0.0`. `time.monotonic()`'s epoch is arbitrary and starts near zero on a
+    # container, so `0.0` reads as "a minute ago" only after the process has been alive a
+    # minute -- this line used `0.0` and the test failed whenever the suite ran inside that
+    # window. `-inf` is epoch-independent and says what it means.
+    live._identity_at = float("-inf")  # force the refresh timer
     asyncio.run(live.poll_once())
 
     assert live.unresolved_keepers()[0] != before, "new seating, new keys"
     assert live.snapshot().competitive_picks == 140, "and the keepers classify correctly again"
+
+
+def test_seating_refreshes_on_a_clock_that_starts_near_zero(
+    store: OverrideStore, monkeypatch: Any
+) -> None:
+    """DI-067, the regression. `time.monotonic()`'s epoch is arbitrary — on a container it
+    starts near zero at boot, so a young process reports single- or double-digit seconds.
+
+    The test above forced a refresh by setting `_identity_at = 0.0`, which reads as "over a
+    minute ago" **only once the process has been alive a minute**. Run the suite inside that
+    window and the refresh silently did not happen: seating never changed, keeper keys stayed at
+    14, and the assertion failed. Reproduced deterministically at `monotonic() == 30`.
+
+    Pinning a small clock here is what makes the fix hold: `-inf` is epoch-independent, `0.0`
+    is not, and nothing else in the suite would tell the difference.
+    """
+    monkeypatch.setattr("draft_intel.api.live.time.monotonic", lambda: 30.0)
+
+    live = make(PICKS, store, seating=LIVE_SEATING)
+    asyncio.run(live.poll_once())
+    before = live.unresolved_keepers()[0]
+
+    client = live.client
+    assert isinstance(client, FakeClient)
+    client.seating = FIXTURE_SEATING
+    live._identity_at = float("-inf")
+    asyncio.run(live.poll_once())
+
+    assert live.unresolved_keepers()[0] != before, (
+        "the refresh must not depend on how long the process has been alive"
+    )
+    assert live.snapshot().competitive_picks == 140
 
 
 def test_keepers_that_cannot_be_placed_are_a_blocker_not_a_footnote(tmp_path: Path) -> None:
@@ -566,23 +602,35 @@ def test_the_precompute_runs_off_the_poll_path(store: OverrideStore) -> None:
     Held open by a fake that blocks until released, so "still computing" is observable — with a
     real board at one open slot it finishes too fast to catch, and at many open slots the test
     would take minutes.
+
+    The gate is a ``threading.Event`` and it is released in a ``finally``. The fake runs in a
+    worker thread via ``asyncio.to_thread``, so an ``asyncio.Event`` would be the wrong
+    primitive twice over: it belongs to a loop that thread is not running, and a fake left
+    blocked forever leaks a non-daemon thread out of the test.
     """
-    released = asyncio.Event()
+    import threading
+
+    released = threading.Event()
 
     async def scenario() -> None:
         def blocking(*_a: Any, **_k: Any) -> Any:
-            asyncio.run(released.wait())  # pragma: no cover - released before it matters
+            released.wait(timeout=30)
+            raise RuntimeError("released")  # ends the task rather than returning a fake board
 
         live = _at(100, store)
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr("draft_intel.api.live.walkaway_board", blocking)
-            await live.poll_once()
+        try:
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr("draft_intel.api.live.walkaway_board", blocking)
+                await live.poll_once()
 
-            assert live._walkaway_task is not None and not live._walkaway_task.done()
-            assert live.snapshot().walkaway.state == "computing"
-            assert live.snapshot().total_remaining > 0, "the ledger answers while it computes"
-
-            live._walkaway_task.cancel()
+                assert live._walkaway_task is not None and not live._walkaway_task.done()
+                assert live.snapshot().walkaway.state == "computing"
+                assert live.snapshot().total_remaining > 0, "the ledger answers while computing"
+        finally:
+            released.set()
+            task = live._walkaway_task
+            if task is not None:
+                await task  # drains the worker thread rather than orphaning it
 
     asyncio.run(scenario())
 
