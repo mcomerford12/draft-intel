@@ -38,7 +38,7 @@ you cannot sanity-check. The draft is 2026-09-05 19:00 MDT.
 
 ## Blocked
 
-### [DI-043] Six managers have not joined the league — manifest cannot fully resolve
+### [DI-043] Three managers have not joined the league — manifest cannot fully resolve
 - **Sprint:** 1 · **Owner:** user/commissioner · **Size:** S · **Surfaced by:** DI-EVAL-1 B1
 - **Live check 2026-09-02: 5 of 10 have now joined.** `jswilliams5` holds roster 5, up from the
   four this card was written against. Still 8 of 20 keeper keys resolved, because a joined
@@ -49,12 +49,19 @@ you cannot sanity-check. The draft is 2026-09-05 19:00 MDT.
   classifies that team's two keepers as competitive bids, poisoning skew, inflation and every
   tendency profile for the whole draft. Asked rather than guessed; the reasoning is recorded in
   `config/owners.yaml` so the next mapping is confirmed the same way.
-- **Keeper resolution 8/20 → 10/20.** Verified against the live league, not the fixture.
+- **Live check 2026-09-04: 7 of 10 have now joined.** `keenankid17` holds draft slot 6 and
+  `willdeann` slot 7. Both were joined but *unmapped* — the alias table did not know their
+  display names — so their four keepers were still counted as unresolved while the managers
+  themselves were sitting in the draft room. Confirmed by the user, not inferred, and recorded
+  in `config/owners.yaml` with who confirmed and when, per the rule the `jswilliams5` episode
+  established.
+- **Keeper resolution 8/20 → 10/20 → 14/20.** Verified against the live league, not the fixture.
 - Mapped: `mattchupiccu`→Me, `ajthebeard`→AJ, `MasonWAlpert`→Mason, `steeveegee300`→Steve,
-  `jswilliams5`→Jake.
-- Still unjoined, blocking the remaining 10 keys: **Connor, Keenan, Willie, Burt, TD** — draft
-  slots 6-10. `manifest_keys(require=20)` raises loudly rather than silently classifying their
-  keepers as competitive bids.
+  `jswilliams5`→Jake, `keenankid17`→Keenan, `willdeann`→Willie.
+- Still unjoined, blocking the remaining 6 keys: **Connor, Burt, TD** — draft slots 8, 9, 10.
+  `manifest_keys(require=20)` raises loudly rather than silently classifying their keepers as
+  competitive bids; the cockpit (DI-064) instead runs and raises a persistent blocker naming
+  them, per ADR-0002's D4.
 - **Acceptance criteria:**
   - [ ] All 10 managers joined; `build_identity(...).is_complete(10)` is true
   - [ ] `config/owners.yaml` maps all 10 manifest owners to display names
@@ -2555,7 +2562,7 @@ is now held to.
 
 1. **`make prep` produces the priced board** against the real keeper manifest, the real
    projections and the real scoring settings. Running it against the *live league* additionally
-   requires DI-043 — five managers have not joined — which is outside this sprint's control and is
+   requires DI-043 — three managers have not joined — which is outside this sprint's control and is
    named as a dependency rather than held as a gate.
 2. **Money-conservation invariants hold.** *(Unamended.)*
 3. **A human has reviewed the board.** *(Unamended, and deliberately not softened.)* §4.9's premise
@@ -2564,6 +2571,13 @@ is now held to.
    another draft entirely — none of which substitutes for the person who knows this league reading
    it and disagreeing. Under the amendment this is now the **only** whole-model review, so its
    stakes went up, not down.
+
+   **✅ MET 2026-09-03.** The user read the board and disagreed with it: the top QB priced at
+   **$17.74, 25th overall, in a league that starts twenty of them.** That is the clause working
+   exactly as §4.9 intended — a person who knows this league finding something six audit rounds
+   did not, because it is not a defect in the code. It produced DI-061 and then DI-062, and DI-062
+   in turn found that three of the four override fields were inert. **The disagreement was worth
+   more than the review rounds that preceded it.**
 4. **The live walk-away lookup is O(1)** against a board precomputed between settled picks; the
    precompute completes inside 30 seconds at 8 or fewer open slots, and its cost at more open slots
    is stated on the page rather than hidden. *(Replaces "walk-away recompute p99 < 200ms", which
