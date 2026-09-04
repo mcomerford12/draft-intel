@@ -492,3 +492,105 @@ def test_the_cockpit_and_the_price_table_agree_on_a_players_value(
 
     block = client.post("/api/live/nominate", json={"player_id": target.player_id}).json()["block"]
     assert block["my_value"] == 64.0, "the cockpit bids off the number the price table shows"
+
+
+# --------------------------------------- DI-070: forms must survive the repaint
+
+
+def _cockpit_at(store: OverrideStore, cursor: int) -> tuple[TestClient, Any]:
+    import asyncio
+    import json
+
+    from draft_intel.api.live import LiveDraft
+    from draft_intel.store.corrections import CorrectionStore
+    from draft_intel.store.seats import SeatStore
+    from tests.test_live import FIXTURE_SEATING, FakeClient
+
+    picks = sorted(
+        json.loads((ROOT / "fixtures" / "picks.json").read_text()), key=lambda p: p["pick_no"]
+    )
+    # Every writable store on the scratch path beside `store`. Omitting these let a test POST a
+    # correction into the repo's own config/corrections.yaml, which every later test and the
+    # rehearsal then folded -- six failures and a rehearsal that died at pick 1.
+    scratch = store.path.parent
+    live = LiveDraft(
+        ROOT,
+        league_id="L",
+        draft_id="D",
+        store=store,
+        seats=SeatStore(scratch / "seats.yaml"),
+        corrections=CorrectionStore(scratch / "corrections.yaml"),
+        client=FakeClient(picks[:cursor], seating=FIXTURE_SEATING),
+    )
+    asyncio.run(live.poll_once())
+    return TestClient(create_app(ROOT, store, live_draft=live)), live
+
+
+def _split(page: str) -> tuple[str, str]:
+    """The repainted region and the stable shell, split exactly as the page's own JS does."""
+    body, tail = page.split('<div id="app">', 1)[1].split("</div>\n<h2>who is up", 1)
+    return body, tail
+
+
+def test_the_repaint_boundary_the_javascript_relies_on_still_splits(
+    store: OverrideStore,
+) -> None:
+    """`repaint()` slices the page on these two literals. Move either and the cockpit silently
+    stops updating — the fetch succeeds, the split yields nothing useful, and the board freezes
+    while the connection line keeps saying `live`."""
+    client, _ = _cockpit_at(store, 60)
+    body, tail = _split(client.get("/live").text)
+    assert len(body) > 100 and len(tail) > 100
+
+
+def test_every_form_lives_outside_the_repainted_region(store: OverrideStore) -> None:
+    """The defect this card fixes. `#app` is replaced wholesale every two seconds, so an input
+    inside it loses what you were typing on a timer — mid-auction, while the room waits.
+
+    Asserted on *where the markup is* rather than by driving a browser, because that is the
+    property: a form in `#app` is unusable no matter how it behaves in isolation.
+    """
+    client, _ = _cockpit_at(store, 60)
+    body, tail = _split(client.get("/live").text)
+
+    for control in ("corr-slot", "corr-amt", "corr-why", "corr-go", "seat-slot", "seat-go"):
+        assert control not in body, f"{control} would be wiped every repaint"
+        assert control in tail, f"{control} is missing from the stable shell"
+
+
+def test_the_keeper_form_is_on_the_page_and_outside_the_repaint(store: OverrideStore) -> None:
+    """Charter §2's primary price path, with a surface at last: pick a team, search a player,
+    type what they were kept for."""
+    client, _ = _cockpit_at(store, 60)
+    body, tail = _split(client.get("/live").text)
+
+    for control in ("keeper-slot", "keeper-q", "keeper-amt", "keeper-hits", "keeper-go"):
+        assert control in tail and control not in body
+    assert "add keeper" in tail
+
+
+def test_what_should_refresh_stays_inside_the_repainted_region(store: OverrideStore) -> None:
+    """The other half. Corrections in force and seat assignments must update as the draft moves
+    — putting *them* in the shell would freeze them at page load."""
+    client, live = _cockpit_at(store, 60)
+    import asyncio
+
+    slot = live.snapshot().teams[0].slot
+    client.post(
+        "/api/live/corrections/budget",
+        json={"slot": slot, "remaining": 50, "reason": "room says 50"},
+    )
+    asyncio.run(live.poll_once())
+
+    body, _tail = _split(client.get("/live").text)
+    assert "corrections in force" in body.lower()
+    assert "you said $50" in body
+    assert "room says 50" in body
+
+
+def test_the_keeper_button_starts_disabled(store: OverrideStore) -> None:
+    """A keeper needs a player, and a player needs picking from the search. An enabled button
+    with nothing selected posts a keeper for nobody."""
+    client, _ = _cockpit_at(store, 60)
+    _body, tail = _split(client.get("/live").text)
+    assert 'id="keeper-go" disabled' in tail

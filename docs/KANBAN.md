@@ -2792,6 +2792,53 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-070] The keeper form — and the defect that adding it exposed
+
+- **Sprint:** 3 · **Owner:** frontend-engineer · **Size:** S · **Branch:** `di-070-keeper-form`
+- **The ask:** put the manual-keeper path on the page. DI-069 shipped it API-only.
+- **What building it found, before writing a line of it.** `repaint()` replaces `#app`'s
+  innerHTML **every two seconds**, and both the seats form (DI-068) and the budget form
+  (DI-069) were inside it. **Anything you typed into them was wiped on a two-second timer** —
+  mid-auction, while the room waits. Shipped twice, in two cards, and neither card's tests
+  caught it, because they assert on rendered markup and never on interaction.
+- **Fix:** every form moves below `#app` into the stable shell; `#app` keeps only what *should*
+  refresh — blockers, the corrections-in-force list, seat assignments, the block, the ledger.
+  The dropdowns are populated from `/api/live` and `/api/live/seats` rather than rendered
+  server-side, so they sit outside the repaint and still follow the draft: a manager who joins
+  changes both the team list and the unplaced list.
+- **The keeper form itself:** pick a team, search a player (same endpoint the nomination box
+  uses), type what they were kept for. The button starts **disabled** and only enables once a
+  player is picked from the search — an enabled button with nothing selected posts a keeper for
+  nobody. A refusal from the API is flashed on the button rather than swallowed.
+- **Tests pin the boundary, which is the actual property.** A form in `#app` is unusable however
+  it behaves in isolation, so the assertions are on *where the markup is*: every control must be
+  absent from the repainted region and present in the shell, and the corrections list must be
+  the other way round. Plus a test that the two string literals `repaint()` slices on still
+  split the page — move either and the cockpit silently stops updating while the connection
+  line keeps saying `live`.
+- **A second defect, self-inflicted while writing the tests for the first.** The new test helper
+  built a `LiveDraft` against the repo root without passing scratch stores for seats and
+  corrections, so a POST wrote a **-$36 budget correction into the project's own
+  `config/corrections.yaml`**. Six later tests and `make rehearsal` then folded it and failed —
+  none of them near the culprit, and the rehearsal reporting *"first failure at pick 1 of 160"*
+  for a reason with nothing to do with pick 1.
+
+  The individual fix is to pass the stores. The general fix is `tests/conftest.py`: an autouse
+  guard that fingerprints `config/` before and after **every** test and fails the one that
+  dirtied it, naming the file and the remedy. Every writable store takes an injectable path
+  precisely so tests can point it somewhere harmless; this turns that from a convention into a
+  rule. Verified by reintroducing the bug — the guard fires on the offending test rather than on
+  six innocent ones.
+- **Acceptance criteria:**
+  - [x] keeper form on the page: team, player search, price, disabled until a player is picked
+  - [x] every form outside the repainted region; every live list inside it
+  - [x] the repaint split literals are asserted, not assumed
+  - [x] pickers refresh from the live snapshot without a page reload
+  - [x] no test can modify the real `config/` — enforced, not documented
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.
