@@ -1,4 +1,4 @@
-.PHONY: install lint types test ci replay smoke prep serve cockpit
+.PHONY: install lint types test ci replay smoke prep serve cockpit rehearsal
 
 install:
 	uv sync
@@ -34,3 +34,9 @@ serve:
 # deliberate, so opening the price table never opens a socket to Sleeper.
 cockpit:
 	uv run uvicorn --factory "draft_intel.api.app:cockpit" --port 8000
+
+# Sprint 4's gate: the completed mock draft fed through the cockpit one poll at a time, with
+# every invariant checked after every pick, then the four chaos cases. Exits non-zero on any
+# violation, so it can gate a release.
+rehearsal:
+	uv run python tools/rehearsal.py

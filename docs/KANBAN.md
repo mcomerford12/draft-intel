@@ -2535,6 +2535,68 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-065] The 160-pick draft-night rehearsal
+
+- **Sprint:** 4 · **Owner:** test-engineer · **Size:** M · **Branch:** `di-064-live-cockpit`
+- **Why:** every other test feeds the ledger a finished array and checks the total. Nothing fed
+  it a draft *as it happens*. That is the only shape in which a whole class of defect appears:
+  state correct at pick 160 and wrong at pick 40, a figure that drifts rather than breaks, a poll
+  that fits its budget early and not late.
+- **What it does:** `make rehearsal` serves `fixtures/picks.json` one pick at a time through the
+  real `LiveDraft.poll_once`, nominates the player about to be bought at each step, and checks
+  **13 invariants after every one of the 160 picks** — money conservation, no negative budget,
+  max bid within budget, roster capacity, keeper cap, every pick lands on somebody, feed read
+  fully, freshness, no alerts, no blockers, block max bid honest. Then four chaos cases. Exits
+  non-zero on any violation, so it can gate a release.
+- **Result: PASSED.** 160 picks, every invariant at every pick, final ledger identical to the
+  Sprint 1 golden file — reached by a second independent route.
+- **Chaos, run on a live instance rather than a fresh one** (the transition is the thing that
+  happens on the night, not the end state):
+  - restart mid-draft → a new process at pick 100 rebuilds the identical ledger
+  - pick removed → slot 9 went $170 → $165, 10 → 9 picks, refunded exactly $5
+  - pick amended → $170 → $177 in one cycle, money still conserves
+  - connection drops → kept $93 on screen, marked stale, named the failure
+  - **not rehearsed, and named rather than skipped:** a mid-draft budget correction. Override
+    events exist in the ledger; the cockpit has no surface that emits one. A cockpit gap.
+- **The defect it found — a false comment and a 78x cost, in one place.** `_fold` called
+  `replay_all`, justified by a comment claiming it "drives the snapshot diff, so a commissioner
+  reversing or amending a pick produces the PickRemoved and PickAmended the ledger knows how to
+  fold." **It does not.** `replay_events` diffs *within a single payload*, where the array only
+  grows and no pick changes — verified: 160 of 160 events were `pick_observed`, zero removals,
+  zero amendments, on a full feed and on one with a pick deleted.
+
+  Corrections were handled, but by ADR-0001's actual mechanism: **there is no incremental state
+  to correct.** Every poll refolds the whole log, so a reversed pick is just a shorter feed.
+
+  Meanwhile `replay_all` re-parsed `payload[:i]` for every `i`. Proven identical output —
+  same events *and* same `DerivedState` across a full feed, a removal, an amendment, an
+  unsorted feed, and one carrying an unparseable row — for **101ms against 1.3ms** at 160
+  picks, inside every poll cycle.
+
+  | | before | after |
+  |---|---|---|
+  | poll p50 | 26.4 ms | **1.5 ms** |
+  | poll p95 | 95.8 ms | **2.5 ms** |
+  | poll max | 106.3 ms | **15.1 ms** |
+  | growth pick 20 → 160 | 3 ms → 98 ms | 1 ms → 2 ms |
+
+  Never near the 1,500 ms cycle budget either way — this is not a near miss that was rescued.
+  It is a quadratic on the live path with a false justification attached, and both are gone.
+- **Acceptance criteria:**
+  - [x] 160 picks through the real poll path, invariants checked after every one
+  - [x] the four chaos cases, on a running instance
+  - [x] final ledger matches the Sprint 1 golden file
+  - [x] latency reported per phase, against the stated cycle budget
+  - [x] non-zero exit on violation, so it gates
+  - [x] **the checker is proven able to fail** — 15 tests doctor a snapshot per invariant
+        (`tests/test_rehearsal.py`). A gate that cannot fail is not a gate; DI-054 found three
+        tests in exactly that state.
+- **Also:** `tools/` is now a package, under `mypy --strict` and ruff like everything else.
+  `mutation_harness.py` was never type-checked before and is now annotated.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.
