@@ -279,7 +279,16 @@ class LiveDraft:
         self._picks_raw: list[dict[str, Any]] = []
         self._nominated: str | None = None
         self._identity: Identity | None = None
-        self._identity_at = 0.0
+        self._identity_at = float("-inf")
+        """When identity was last resolved, on the monotonic clock.
+
+        ``-inf`` rather than ``0.0`` because ``time.monotonic()``'s epoch is arbitrary -- on a
+        container it starts near zero at boot, so ``0.0`` means "over a minute ago" only once
+        the process has been alive a minute. That made ``now - 0.0 < REFRESH`` accidentally true
+        early in a container's life. Here it only ever meant "never resolved", which the
+        ``_identity is not None`` guard already covered, so nothing changes behaviourally -- but
+        the same literal in a test *was* load-bearing and failed exactly that way (DI-067).
+        """
         self._walkaway: WalkAwayBoard | None = None
         self._walkaway_task: asyncio.Task[None] | None = None
         self._walkaway_signature: tuple[int, int, frozenset[str]] | None = None

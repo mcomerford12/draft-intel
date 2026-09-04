@@ -2652,6 +2652,46 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-067] The seating-refresh test depended on the wall clock
+
+- **Sprint:** 3 · **Owner:** test-engineer · **Size:** S · **Surfaced by:** a single failing run
+  on `main` immediately after merging PR #27
+- **Symptom:** `test_seating_that_changes_rebuilds_the_keeper_classifier` failed once, then
+  passed 6/6 in isolation and 5/5 on the full suite. Rare, order-independent, and guarding the
+  logic that stops all twenty keepers being misfiled.
+- **Root cause, reproduced deterministically.** The test forced an identity refresh with
+  `live._identity_at = 0.0`, and the refresh guard is
+  `now - self._identity_at < IDENTITY_REFRESH_SECONDS`. **`time.monotonic()`'s epoch is
+  arbitrary** — on a container it starts near zero at boot, so `0.0` reads as "over a minute
+  ago" only once the process has been alive a minute. Inside that window the refresh silently
+  did not happen: seating never changed, keeper keys stayed at 14 of 20, and the assertion
+  failed. Pinned the clock and confirmed both directions:
+
+  | `time.monotonic()` | keeper keys | outcome |
+  |---|---|---|
+  | 733 | 14 → 20 | passes |
+  | 30 | 14 → 14 | **fails** |
+- **Fix:** `float("-inf")` in both the test and `LiveDraft.__init__`, which is epoch-independent
+  and says what it means. **Production was never affected** — the `_identity is not None` guard
+  already forced the first refresh, so the `0.0` there was inert. It was load-bearing only in
+  the test. Changed anyway so the same literal cannot become load-bearing later.
+- **Regression test** pins `monotonic()` at 30 and runs the seating change. Verified by
+  reintroducing `0.0` and watching it fail on `assert 14 != 14`; nothing else in the suite tells
+  the difference.
+- **A second defect fixed in passing.** The precompute test held its fake open with an
+  `asyncio.Event` awaited from inside `asyncio.to_thread` — the wrong primitive twice over: the
+  event belongs to a loop that thread is not running, and the fake was never released, leaking
+  a non-daemon worker thread out of every run. Now a `threading.Event` released in a `finally`,
+  with the task awaited so the thread is drained rather than orphaned.
+- **⚠️ Honest limit on this card.** The proven defect fires only when the container is under
+  60 seconds old. The observed failure was at roughly 130 seconds of container uptime, so
+  **this fix does not explain the failure that surfaced it.** One real, deterministic defect
+  found and closed; the original remains unreproduced across 14 full-suite runs. The suite
+  stays under observation rather than being declared clean.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.
