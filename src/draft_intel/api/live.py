@@ -1,0 +1,609 @@
+"""The draft-night cockpit: the live ledger, and what to do about the player on the block.
+
+Everything under this module was built and tested across Sprints 1 and 2 and had no surface.
+The poller parses picks, the ledger folds them, the valuation prices the board, the
+affordability engine ranks who can outbid you — and until now the only way to see any of it was
+a printed report from before the draft started. This is the thing that runs *during* the
+auction.
+
+**The nominated player is entered by hand, and that is a design decision, not a gap.** Sleeper
+publishes completed picks over REST and nothing else; the current nomination and the live bid
+clock exist only on its internal websocket, which charter §2 forbids reverse-engineering in
+terms that leave no room to negotiate. So the room tells you who is up, you type the name, and
+the tool answers the question you actually have: *what is this worth to me, and who can outbid
+me?* Every figure behind that answer is derived from the picks feed, which is public.
+
+**Staleness is treated as a first-class failure.** A cockpit whose numbers quietly freeze is
+worse than no cockpit: you keep bidding against a board that stopped updating four minutes ago.
+So every snapshot carries the age of the poll it came from, :attr:`LiveSnapshot.stale` turns
+true well before the figures could mislead anybody, and the page says so at the top rather than
+in a corner.
+
+The pipeline — projections, baselines, the priced board — is expensive and is built once, then
+rebuilt only when ``config/value_overrides.yaml`` changes on disk. That is what lets you retune
+a price at 7:40pm from ``/prices`` and have the cockpit pick it up without a restart.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any, Protocol, runtime_checkable
+
+import yaml
+from pydantic import BaseModel, ConfigDict
+
+from draft_intel.config import LeagueConfig
+from draft_intel.domain.classify import KeeperClassifier
+from draft_intel.domain.identity import Identity, build_identity, manifest_keys
+from draft_intel.domain.ledger import fold
+from draft_intel.models import DerivedState
+from draft_intel.prep import Pipeline, build_pipeline
+from draft_intel.quant.affordability import affordability
+from draft_intel.quant.inflation import (
+    Inflation,
+    market_inflation,
+    realized_positional_inflation,
+)
+from draft_intel.quant.valuation import PlayerValue
+from draft_intel.replay.harness import replay_all, replay_rejects
+from draft_intel.store.overrides import OverrideStore
+
+STALE_AFTER_SECONDS = 8.0
+"""How old a poll may get before the page stops presenting it as live.
+
+Deliberately a few multiples of the poll interval rather than one: a single slow response is
+normal and flagging it would train the user to ignore the warning, which is the one outcome
+that makes the warning worse than useless.
+"""
+
+POLL_INTERVAL_SECONDS = 1.5
+"""Charter §3 sets a 1s floor on Sleeper requests. This sits above it with room to spare."""
+
+
+@runtime_checkable
+class DraftFeed(Protocol):
+    """The four calls the cockpit makes. :class:`SleeperClient` satisfies it.
+
+    A protocol rather than the concrete client because this is genuinely all that is needed,
+    and saying so lets the tests drive a completed draft through the real polling path instead
+    of stubbing around it. The rate floor, retry, backoff and circuit breaker live in
+    ``SleeperClient`` and are not reimplemented here.
+    """
+
+    async def draft(self, draft_id: str) -> Any: ...
+
+    async def picks(self, draft_id: str) -> Any: ...
+
+    async def rosters(self, league_id: str) -> Any: ...
+
+    async def users(self, league_id: str) -> Any: ...
+
+
+IDENTITY_REFRESH_SECONDS = 60.0
+"""How often to re-resolve slot -> owner while the cockpit runs.
+
+Not once at startup: managers are still joining, and each one who joins fills in a seat and
+places two more keepers. Not every poll either -- it is three extra requests against a rate
+floor, to answer a question that changes a few times a week.
+"""
+
+
+class TeamLine(BaseModel):
+    """One team's money, as the cockpit shows it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    slot: int
+    owner: str
+    is_me: bool
+    spent: int
+    remaining: int
+    filled_slots: int
+    open_slots: int
+    max_bid: int
+    keepers: int
+    figures_suspect: bool
+    """A negative amount reached this team's ledger, so every figure on this row is downstream
+    of a number that cannot happen. Shown, never silently corrected."""
+
+
+class BlockView(BaseModel):
+    """The player on the block, and what the tool has to say about them."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    player_id: str
+    name: str
+    position: str
+    tier_note: str = ""
+
+    my_value: float
+    """What this player is worth to me — the model's price with my overrides applied."""
+
+    inflation_adjusted: float
+    """What they should cost *right now*, given the money still chasing the board."""
+
+    my_max_bid: int
+    blacklisted: bool
+    already_drafted_by: str | None
+    """Set when the ledger already shows this player bought. Bidding is over; say so."""
+
+    ladder: tuple[str, ...]
+    """Who is still in, and above what price they drop out."""
+
+    clears_the_field: int
+    contenders: int
+
+
+class LiveSnapshot(BaseModel):
+    """One complete reading of the draft. Everything the page renders comes from here."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    polled_at: float | None
+    age_seconds: float
+    stale: bool
+    """True once the reading is too old to bid against. See :data:`STALE_AFTER_SECONDS`."""
+
+    connection: str
+    """``live``, ``never connected``, or the text of the last failure. A cockpit that hides a
+    broken connection behind a stale number is the failure mode this whole module guards."""
+
+    draft_status: str
+    picks_seen: int
+    competitive_picks: int
+
+    teams: tuple[TeamLine, ...]
+    total_remaining: int
+    total_open_slots: int
+
+    inflation: float
+    inflation_detail: str
+    positions: tuple[str, ...]
+    """Per-position realized inflation, already filtered to the readable ones."""
+
+    block: BlockView | None
+    alerts: tuple[str, ...]
+
+    blockers: tuple[str, ...] = ()
+    """Conditions that corrupt every figure on the page while they hold.
+
+    Separate from ``alerts`` because they are not the same kind of thing. An alert is something
+    that happened and is recorded; a blocker is something *wrong right now* that makes the
+    numbers beside it untrustworthy. Rendering them in one list means the one that invalidates
+    the board sits between two that do not.
+    """
+
+    @property
+    def my_team(self) -> TeamLine | None:
+        return next((team for team in self.teams if team.is_me), None)
+
+
+class LiveDraft:
+    """Polls the real draft, folds the ledger, and answers questions about the block.
+
+    One instance per process. :meth:`poll_once` is safe to call directly, which is what the
+    tests do; :meth:`run` is the loop the app starts in the background.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        league_id: str,
+        draft_id: str,
+        store: OverrideStore | None = None,
+        client: DraftFeed | None = None,
+    ) -> None:
+        self.root = root
+        self.league_id = league_id
+        self.draft_id = draft_id
+        self.store = store or OverrideStore(root / "config" / "value_overrides.yaml")
+        self.client = client
+
+        self._pipeline: Pipeline | None = None
+        self._overrides_mtime: float | None = None
+        self._state: DerivedState | None = None
+        self._polled_at: float | None = None
+        self._connection = "never connected"
+        self._draft_status = "unknown"
+        self._picks_raw: list[dict[str, Any]] = []
+        self._nominated: str | None = None
+        self._identity: Identity | None = None
+        self._identity_at = 0.0
+        self._classifier: KeeperClassifier | None = None
+
+    # ------------------------------------------------------------------ pipeline
+
+    @property
+    def pipeline(self) -> Pipeline:
+        """The priced board, rebuilt only when the override file changes underneath it.
+
+        Building it runs projections, four replacement baselines and the whole valuation, which
+        is far too slow to do per request during an auction. Watching the file's mtime rather
+        than caching outright is what lets the user retune a price on ``/prices`` at 7:40pm and
+        have the cockpit agree with them on the next poll.
+        """
+        mtime = self.store.path.stat().st_mtime if self.store.path.exists() else None
+        if self._pipeline is None or mtime != self._overrides_mtime:
+            self._pipeline = build_pipeline(self.root, overrides=self.store)
+            self._overrides_mtime = mtime
+        return self._pipeline
+
+    @property
+    def config(self) -> LeagueConfig:
+        return self.pipeline.config
+
+    @property
+    def identity(self) -> Identity | None:
+        """Slot → owner **for the real draft**, or ``None`` until it has been resolved.
+
+        **``Pipeline.identity`` must never be used here, and this returning ``None`` is the
+        point.** That one is built from ``fixtures/draft.json`` — the *mock* draft — because
+        ``make prep`` is a pre-draft report analysing the mock. The real draft seats people
+        differently: the mock has slot 1 AJ, slot 2 Jake, slot 4 Mason; the live league has
+        slot 1 Mason, slot 2 AJ, slot 4 Steve.
+
+        Using the mock's seating in the cockpit is not a cosmetic error. The keeper classifier
+        keys on ``(slot, player_id)``, so every keeper would be checked against the wrong seat,
+        match nothing, and be classified as a competitive bid — twenty of them, the most
+        expensive picks of the night, corrupting inflation, skew and every threat read. And the
+        user's own seat would be wrong, so the threat ladder would exclude somebody else.
+
+        The reason that failure is dangerous rather than obvious is that **the user is slot 3
+        in both**. The one seat a person would check by eye is the one seat that agrees.
+
+        So there is no fallback. Until the live join succeeds this is ``None``, the cockpit
+        raises a blocker, and it declines to attribute money to names it has not confirmed.
+        """
+        return self._identity
+
+    @property
+    def my_slot(self) -> int | None:
+        """Derived from the manifest's own ``user_team`` against the *live* seating.
+
+        An earlier version of the report hardcoded slot 3 and contradicted itself by $7. This
+        derives it — but from :attr:`identity`, never the pipeline's mock-derived one.
+        """
+        if self._identity is None:
+            return None
+        slot = self._identity.slot_for(self.pipeline.manifest.user_team)
+        return int(slot) if slot is not None else None
+
+    def owner_for(self, slot: int) -> str:
+        """The manager in this seat, or the seat number when it is not yet resolved.
+
+        Never a guess. An unmapped slot is a manager who has not joined, and labelling them
+        with somebody else's name is worse than labelling them with a number.
+        """
+        if self._identity is None:
+            return f"slot {slot}"
+        return str(self._identity.owner_for(slot) or f"slot {slot}")
+
+    # ------------------------------------------------------------------ polling
+
+    async def poll_once(self, client: DraftFeed | None = None) -> None:
+        """Fetch, parse and fold once. Never raises: a failed poll is a reported condition.
+
+        The previous reading is deliberately left in place on failure rather than cleared. The
+        numbers stay on screen, the connection line says what went wrong, and
+        :attr:`LiveSnapshot.stale` starts counting — which tells the user both what the board
+        last said *and* that it is no longer being confirmed. Blanking the screen mid-auction
+        would throw away the more useful of those two facts.
+        """
+        active = client or self.client
+        if active is None:  # pragma: no cover - guarded by the app that constructs us
+            self._connection = "no Sleeper client configured"
+            return
+        try:
+            draft = await active.draft(self.draft_id)
+            picks = await active.picks(self.draft_id) or []
+            await self._refresh_identity(active, draft)
+        except Exception as error:  # every failure here is reportable, none is fatal
+            self._connection = f"{type(error).__name__}: {error}"
+            return
+
+        self._draft_status = str((draft or {}).get("status", "unknown"))
+        self._picks_raw = list(picks)
+        self._state = self._fold(self._picks_raw)
+        self._polled_at = time.monotonic()
+        self._connection = "live"
+
+    async def _refresh_identity(self, client: DraftFeed, draft: Any) -> None:
+        """Resolve slot → owner from the **live** league, periodically.
+
+        The real draft object carries no ``slot_name_*`` keys at all (Sprint 0, Finding 9), so
+        the ``slot_to_roster_id`` join through ``/rosters`` and ``/users`` is the only path that
+        resolves anybody in production. It was implemented in Sprint 1 and called by nothing
+        outside ``smoke``.
+
+        Re-resolved on a timer rather than once, because managers are still joining and each
+        arrival fills a seat and places two more keepers. A failure here leaves the previous
+        identity standing; it does not fail the poll, and it never falls back to the mock.
+        """
+        now = time.monotonic()
+        if self._identity is not None and now - self._identity_at < IDENTITY_REFRESH_SECONDS:
+            return
+        rosters = await client.rosters(self.league_id) or []
+        users = await client.users(self.league_id) or []
+        aliases = yaml.safe_load((self.root / "config" / "owners.yaml").read_text()) or {}
+        resolved = build_identity(
+            draft, rosters=rosters, users=users, aliases=aliases.get("aliases") or {}
+        )
+        if resolved.slot_to_owner != (self._identity.slot_to_owner if self._identity else None):
+            # Seating changed, so every `(slot, player_id)` keeper key built from the old one is
+            # stale. Dropping the classifier forces it to be rebuilt against the new seating.
+            self._classifier = None
+        self._identity = resolved
+        self._identity_at = now
+
+    async def run(self, *, interval: float = POLL_INTERVAL_SECONDS) -> None:
+        """Poll forever. Cancelled by the app on shutdown."""
+        while True:
+            await self.poll_once()
+            await asyncio.sleep(interval)
+
+    def _fold(self, picks: Sequence[Mapping[str, Any]]) -> DerivedState:
+        built = self.pipeline
+        payload = [dict(p) for p in picks]
+        # `replay_all`, not a hand-rolled list of PickObserved: it drives the snapshot diff, so
+        # a commissioner reversing or amending a pick mid-draft produces the PickRemoved and
+        # PickAmended the ledger already knows how to fold. Constructing PickObserved directly
+        # would make every correction invisible on the one night corrections actually happen.
+        return fold(
+            replay_all(payload),
+            slots=range(1, built.config.teams + 1),
+            budget=built.config.budget,
+            total_slots=built.config.draft_rounds,
+            max_keepers=built.config.keepers_per_team,
+            classifier=self._keeper_classifier(),
+            rejects=replay_rejects(payload),
+        )
+
+    def _keeper_classifier(self) -> KeeperClassifier:
+        """The manifest-backed classifier — the only one that fires on real Sleeper data.
+
+        The ceremonial keeper picks carry ``is_keeper: false`` (Sprint 0, Finding 4), so
+        trusting the flag classifies nothing and twenty keepers enter the competitive series,
+        poisoning skew, inflation and every tendency profile for the whole draft.
+
+        **``require`` is deliberately not passed, and the incompleteness is reported instead.**
+        ``manifest_keys(require=20)`` raises when an owner has no draft slot, which is the right
+        behaviour for a pre-draft report and the wrong one for a cockpit: three managers have
+        still not joined, and a tool that refuses to start at 7pm is worth nothing. This is
+        ADR-0002's D4 decision applied one layer further in — warn loudly, do not brick — and
+        the warning is not a footnote: :meth:`unresolved_keepers` puts it at the top of the page
+        naming the owners, because every keeper it cannot place becomes a competitive bid and
+        corrupts skew, inflation and every tendency profile for the night.
+
+        Not armed, for the reason DI-055 recorded: ``arming_window`` is a hardcoded 20 rather
+        than a fact read from the feed, and ``FLAGGED`` is terminal until the ``Reclassify``
+        producer exists.
+        """
+        if self._classifier is None:
+            self._classifier = KeeperClassifier(
+                manifest_keys=self._manifest_keys_now(), armed=False
+            )
+        return self._classifier
+
+    def unresolved_keepers(self) -> tuple[int, int, tuple[str, ...]]:
+        """``(resolved, expected, owners_with_no_slot)``. The cockpit's loudest banner."""
+        built = self.pipeline
+        expected = built.config.teams * built.config.keepers_per_team
+        unmapped = sorted(
+            {
+                owner
+                for (owner, _player_id) in built.resolved
+                if self._identity is None or self._identity.slot_for(owner) is None
+            }
+        )
+        return len(self._manifest_keys_now()), expected, tuple(unmapped)
+
+    def _manifest_keys_now(self) -> frozenset[tuple[int, str]]:
+        """``(slot, player_id)`` keeper keys against the **live** seating.
+
+        Empty until the live identity resolves, which is correct and is why
+        :meth:`_blockers` refuses to let the page look healthy in that state: matching keepers
+        against the mock's seating would place twenty of them on the wrong teams.
+        """
+        if self._identity is None:
+            return frozenset()
+        return manifest_keys(dict(self.pipeline.resolved), self._identity)
+
+    # ------------------------------------------------------------------ the block
+
+    def nominate(self, player_id: str | None) -> None:
+        self._nominated = player_id
+
+    def find(self, query: str) -> list[PlayerValue]:
+        """Name search over the priced board, for typing a nomination in a hurry.
+
+        Substring, case-insensitive, ranked by live value so the obvious answer is first. Names
+        are input to a lookup here and nothing more — no name decides a price, a tier or a
+        classification anywhere in this project.
+        """
+        needle = query.strip().lower()
+        if not needle:
+            return []
+        hits = [
+            player
+            for player in self.pipeline.board.players
+            if player.in_pool_full and needle in player.name.lower()
+        ]
+        hits.sort(key=lambda p: (-p.baseline_value, p.name))
+        return hits[:12]
+
+    # ------------------------------------------------------------------ snapshot
+
+    def snapshot(self) -> LiveSnapshot:
+        """Everything the page needs, computed from the last successful poll."""
+        built = self.pipeline
+        age = 0.0 if self._polled_at is None else time.monotonic() - self._polled_at
+        state = self._state
+        my_slot = self.my_slot
+        blockers = self._blockers(my_slot)
+
+        if state is None:
+            return LiveSnapshot(
+                polled_at=None,
+                age_seconds=0.0,
+                stale=True,
+                connection=self._connection,
+                draft_status=self._draft_status,
+                picks_seen=0,
+                competitive_picks=0,
+                teams=(),
+                total_remaining=built.config.teams * built.config.budget,
+                total_open_slots=built.config.teams * built.config.draft_rounds,
+                inflation=1.0,
+                inflation_detail="no reading yet",
+                positions=(),
+                block=None,
+                alerts=("no successful poll yet — every figure below is the model's prior",),
+                blockers=blockers,
+            )
+
+        teams = tuple(
+            TeamLine(
+                slot=slot,
+                owner=self.owner_for(slot),
+                is_me=slot == my_slot,
+                spent=team.spent,
+                remaining=team.remaining,
+                filled_slots=team.filled_slots,
+                open_slots=team.open_slots,
+                max_bid=team.max_bid,
+                keepers=len(team.keepers),
+                figures_suspect=team.figures_suspect,
+            )
+            for slot, team in sorted(state.teams.items())
+        )
+
+        drafted = {entry.player_id for team in state.teams.values() for entry in team.roster}
+        available = [
+            player
+            for player in built.board.players
+            if player.in_pool_live and player.player_id not in drafted
+        ]
+        remaining_money = sum(team.remaining for team in state.teams.values())
+        remaining_slots = sum(team.open_slots for team in state.teams.values())
+        inflation = market_inflation(
+            available, remaining_money=remaining_money, remaining_slots=remaining_slots
+        )
+
+        return LiveSnapshot(
+            polled_at=self._polled_at,
+            age_seconds=round(age, 1),
+            stale=age > STALE_AFTER_SECONDS or self._connection != "live",
+            connection=self._connection,
+            draft_status=self._draft_status,
+            picks_seen=len(self._picks_raw),
+            competitive_picks=len(state.competitive_seq),
+            teams=teams,
+            total_remaining=remaining_money,
+            total_open_slots=remaining_slots,
+            inflation=inflation.inflation,
+            inflation_detail=_inflation_detail(inflation),
+            positions=_position_lines(state, built),
+            block=self._block(state, inflation, my_slot, drafted),
+            alerts=tuple(state.alerts) + tuple(state.rejects) + tuple(state.orphans),
+            blockers=blockers,
+        )
+
+    def _blockers(self, my_slot: int | None) -> tuple[str, ...]:
+        """What is wrong *right now* in a way that makes the figures beside it untrustworthy."""
+        out: list[str] = []
+        if self._identity is None:
+            # Nothing below can be trusted: with no live seating every keeper is checked against
+            # the wrong slot, so the classifier matches nothing and the money is attributed to
+            # names that were never confirmed.
+            return (
+                "slot → owner has not been resolved from the live league yet, so no keeper can "
+                "be placed and no team name below is confirmed. Every figure on this page is "
+                "provisional until the next successful poll.",
+            )
+        resolved, expected, unmapped = self.unresolved_keepers()
+        if resolved < expected:
+            out.append(
+                f"{expected - resolved} of {expected} keepers cannot be placed on a draft slot "
+                f"({', '.join(unmapped)} have not joined). Each one will be read as a "
+                f"competitive bid, which corrupts inflation, skew and every threat read below."
+            )
+        if my_slot is None:
+            out.append(
+                f"your own draft slot is unknown — {self.pipeline.manifest.user_team!r} is not "
+                "mapped to a seat, so there is no max bid and no threat ladder"
+            )
+        return tuple(out)
+
+    def _block(
+        self,
+        state: DerivedState,
+        inflation: Inflation,
+        my_slot: int | None,
+        drafted: set[str],
+    ) -> BlockView | None:
+        if self._nominated is None or my_slot is None:
+            return None
+        built = self.pipeline
+        player = next((p for p in built.board.players if p.player_id == self._nominated), None)
+        if player is None:
+            return None
+
+        owner = None
+        for slot, team in state.teams.items():
+            if any(entry.player_id == player.player_id for entry in team.roster):
+                owner = self.owner_for(slot)
+                break
+
+        ladder = affordability(
+            state,
+            position=player.position,
+            my_slot=my_slot,
+            starters=built.config.starters,
+            positions={p.player_id: p.position for p in built.board.players},
+            owners={slot: self.owner_for(slot) for slot in state.teams},
+        )
+        override = built.overrides.get(player.player_id)
+        return BlockView(
+            player_id=player.player_id,
+            name=player.name,
+            position=player.position,
+            tier_note=override.note if override else "",
+            my_value=round(player.baseline_value, 2),
+            inflation_adjusted=inflation.adjusted(player),
+            my_max_bid=ladder.my_max_bid,
+            blacklisted=bool(override and override.blacklisted),
+            already_drafted_by=owner,
+            ladder=tuple(ladder.describe()),
+            clears_the_field=ladder.price_that_clears_the_field(),
+            contenders=len(ladder.contenders),
+        )
+
+
+def _inflation_detail(inflation: Inflation) -> str:
+    direction = "over" if inflation.inflation >= 1.0 else "under"
+    return (
+        f"${inflation.discretionary_remaining} discretionary chasing "
+        f"${inflation.remaining_value:.0f} of value across {inflation.pool_size} players — "
+        f"expect the room to clear about {abs(1 - inflation.inflation) * 100:.0f}% {direction} book"
+    )
+
+
+def _position_lines(state: DerivedState, built: Pipeline) -> tuple[str, ...]:
+    """Per-position realized inflation, filtered to the positions with enough picks to read.
+
+    An unreadable position is dropped rather than shown with a blank ratio: a number computed
+    from two picks is not a market reading, and rendering one invites a bidding decision built
+    on noise. ``PositionInflation.is_reportable`` is the module's own answer to that question,
+    so the threshold is not restated here where it could drift.
+    """
+    board = {p.player_id: p for p in built.board.players}
+    realized = realized_positional_inflation(state, board)
+    return tuple(line.describe() for line in realized.values() if line.is_reportable)
+
+
+__all__ = ["BlockView", "DraftFeed", "LiveDraft", "LiveSnapshot", "TeamLine"]

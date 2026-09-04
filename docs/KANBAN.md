@@ -2471,6 +2471,63 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-064] The draft-night cockpit
+
+- **Sprint:** 3 · **Owner:** backend-engineer · **Size:** L
+  · **Branch:** `di-064-live-cockpit`
+- **Why:** everything in Sprints 1 and 2 was built, tested, and had no surface that runs
+  *during* the auction. The poller parses picks, the ledger folds them, the valuation prices the
+  board and the affordability engine ranks who can outbid you — and the only way to see any of it
+  was a report printed before the draft started.
+- **What it answers**, at a glance, mid-nomination: what is this player worth to me, what should
+  they cost at tonight's inflation, what is my max bid, who else can still bid, and above what
+  price does each of them drop out.
+- **The nomination is typed by hand.** Sleeper publishes completed picks over REST and nothing
+  else; the live nomination and bid clock exist only on the internal websocket that charter §2
+  forbids reverse-engineering. This is Finding 11's manual layer, which the user decided to keep.
+- **Acceptance criteria:**
+  - [x] `GET /live`, `GET /api/live`, `GET /api/live/search`, `POST /api/live/nominate`
+  - [x] reproduces the Sprint 1 golden ledger through its own polling path — $199/$200/$195/
+        $200/$200/$200/$200/$200/$185/$200, 140 competitive picks, zero alerts
+  - [x] **staleness is a first-class failure**: every snapshot carries its age, a failed poll
+        keeps the last reading *and* says the connection broke, and a reading that merely ages
+        out is marked NOT LIVE even while the connection string still reads healthy
+  - [x] **blockers are separate from alerts** — an alert is something that happened; a blocker
+        is something wrong now that makes the numbers beside it untrustworthy
+  - [x] a player already bought says so instead of quoting a max bid for them
+  - [x] the block uses the user's overridden price, and the pipeline rebuilds when
+        `value_overrides.yaml` changes, so a 7:40pm retune on `/prices` reaches the cockpit
+  - [x] `poll=False` by default: importing or testing the app never opens a socket to Sleeper
+- **The defect this card found, and the reason it was nearly invisible.** The first working
+  build showed slot 1 as AJ. The live league has slot 1 as Mason. `Pipeline.identity` is built
+  from `fixtures/draft.json` — the **mock** draft — which is right for `make prep` (a report
+  about the mock) and catastrophic for the cockpit. The keeper classifier keys on
+  `(slot, player_id)`, so the mock's seating would have checked all twenty keepers against the
+  wrong seats, matched none, and read them as competitive bids: the most expensive picks of the
+  night, silently poisoning inflation, skew, tendencies and every threat read — while the page
+  looked completely healthy.
+
+  | slot | mock (`fixtures/draft.json`) | live league |
+  |---|---|---|
+  | 1 | AJ | Mason |
+  | 2 | Jake | AJ |
+  | **3** | **Matt** | **Matt** |
+  | 4 | Mason | Steve |
+  | 5 | Connor | Jake |
+
+  **The user is slot 3 in both.** The one seat anybody would check by eye is the one seat that
+  agrees. Fixed by resolving `slot → owner` from the live league on a 60s timer through the
+  `slot_to_roster_id` → `/rosters` → `/users` join (the real draft object carries no
+  `slot_name_*` keys at all — Sprint 0, Finding 9), rebuilding the classifier whenever seating
+  changes, and **refusing to fall back to the mock**: before the join succeeds, `identity` is
+  `None`, slots are labelled by number, and a blocker says so.
+- **Verified against the live league**, not just the fixture: seating resolves to Mason/AJ/Matt/
+  Steve/Jake/Keenan/Willie, slots 8–10 are numbered rather than guessed, and the blocker reads
+  *"6 of 20 keepers cannot be placed (Burt, Connor, TD have not joined)"*.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.

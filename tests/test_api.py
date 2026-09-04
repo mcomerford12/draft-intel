@@ -14,6 +14,7 @@ reached the keeper rule, and twenty players who were not on the page at all.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -389,3 +390,105 @@ def test_a_missing_file_is_no_overrides_rather_than_an_error(tmp_path: Path) -> 
 
 def test_healthz(client: TestClient) -> None:
     assert client.get("/healthz").json() == {"status": "ok"}
+
+
+# ------------------------------------------------------- DI-064: cockpit routes
+
+
+def _cockpit(store: OverrideStore, picks: list) -> TestClient:
+    """The app with a fake draft wired in, and polling off.
+
+    `poll=False` is the default and is load-bearing: a test suite that quietly opens a socket to
+    the live draft is one that fails on draft night for reasons nobody can reproduce.
+    """
+    from draft_intel.api.live import LiveDraft
+    from tests.test_live import FakeClient
+
+    live = LiveDraft(ROOT, league_id="L", draft_id="D", store=store, client=FakeClient(picks))
+    return TestClient(create_app(ROOT, store, live_draft=live))
+
+
+def _cockpit_with_draft(store: OverrideStore, picks: list) -> tuple[TestClient, Any]:
+    """As above, but hands back the LiveDraft so a test can drive its polling directly."""
+    from draft_intel.api.live import LiveDraft
+    from tests.test_live import FakeClient
+
+    live = LiveDraft(ROOT, league_id="L", draft_id="D", store=store, client=FakeClient(picks))
+    return TestClient(create_app(ROOT, store, live_draft=live)), live
+
+
+def test_the_cockpit_renders_before_any_poll_without_pretending_to_be_live(
+    store: OverrideStore,
+) -> None:
+    """It boots at 6:55pm against a draft that has not started. It must render, and it must not
+    present a board it has never read as a board it has."""
+    page = _cockpit(store, []).get("/live")
+    assert page.status_code == 200
+    assert "NOT LIVE" in page.text
+    assert "never connected" in page.text
+    assert "nobody on the block" in page.text
+
+
+def test_the_cockpit_reports_the_ledger_it_polled(store: OverrideStore) -> None:
+    """The Sprint 1 golden figures, reaching the user through the HTTP surface they will use."""
+    import asyncio
+    import json
+
+    picks = json.loads((ROOT / "fixtures" / "picks.json").read_text())
+    client, live = _cockpit_with_draft(store, picks)
+    asyncio.run(live.poll_once())
+
+    snap = client.get("/api/live").json()
+    assert snap["picks_seen"] == 160
+    assert snap["competitive_picks"] == 140
+    assert snap["total_remaining"] == 21
+    assert {t["slot"]: t["spent"] for t in snap["teams"]}[3] == 195
+    assert client.get("/live").status_code == 200
+
+
+def test_nothing_is_on_the_block_until_a_poll_has_actually_succeeded(
+    store: OverrideStore, board_rows: list[PriceRow]
+) -> None:
+    """Deliberate, and the opposite of a convenience.
+
+    With no picks every team has $200 and 16 slots, so a max bid *is* computable from config
+    alone — and quoting one would be a lie. Having never reached Sleeper, the tool does not know
+    the draft has not started; forty picks may already have happened. A confident "$185" on top
+    of no reading is worse than an empty box.
+    """
+    client = _cockpit(store, [])
+    body = client.post(
+        "/api/live/nominate", json={"player_id": _available(board_rows).player_id}
+    ).json()
+    assert body["block"] is None
+    assert body["stale"] is True
+
+
+def test_nominating_an_unknown_player_is_refused(store: OverrideStore) -> None:
+    """Same rule as the price table: a nomination naming nobody is a typo, and accepting it
+    silently leaves a cockpit showing "nobody on the block" while the room bids."""
+    response = _cockpit(store, []).post("/api/live/nominate", json={"player_id": "not-a-player"})
+    assert response.status_code == 404
+
+
+def test_search_returns_candidates_to_nominate(store: OverrideStore) -> None:
+    client = _cockpit(store, [])
+    rows = client.get("/api/live/search", params={"q": "a"}).json()
+    assert rows and all({"player_id", "name", "position"} <= set(row) for row in rows)
+    assert client.get("/api/live/search", params={"q": ""}).json() == []
+
+
+def test_the_cockpit_and_the_price_table_agree_on_a_players_value(
+    store: OverrideStore, board_rows: list[PriceRow]
+) -> None:
+    """Two surfaces, one pipeline. If they can disagree, the user has no way to tell which one
+    they are bidding off."""
+    import asyncio
+
+    target = _available(board_rows)
+    client, live = _cockpit_with_draft(store, [])
+    asyncio.run(live.poll_once())
+    client.post(f"/api/prices/{target.player_id}", json={"live_value": 64.0})
+
+    block = client.post("/api/live/nominate", json={"player_id": target.player_id}).json()["block"]
+    assert block["my_value"] == 64.0, "the cockpit bids off the number the price table shows"
