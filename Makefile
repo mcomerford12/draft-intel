@@ -1,4 +1,4 @@
-.PHONY: install lint types test ci replay smoke prep serve cockpit rehearsal
+.PHONY: install lint types test ci replay smoke prep serve cockpit rehearsal rehearsal-live
 
 install:
 	uv sync
@@ -40,3 +40,10 @@ cockpit:
 # violation, so it can gate a release.
 rehearsal:
 	uv run python tools/rehearsal.py
+
+# The same 160 picks against the LIVE league: identity from Sleeper's own rosters and users,
+# the real owners.yaml, the real seats. Picks are re-attributed by owner rather than by slot,
+# because the mock and the live league seat people differently. Fails while any keeper cannot
+# be placed -- which is the point: it is telling you Saturday is not ready yet.
+rehearsal-live:
+	uv run python tools/rehearsal.py --live

@@ -2839,6 +2839,63 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-071] The rehearsal against the live league
+
+- **Sprint:** 4 · **Owner:** test-engineer · **Size:** M · **Branch:** `di-071-live-rehearsal`
+- **The ask:** run the 160-pick rehearsal against the league that is actually going to draft,
+  not the mock it was built on.
+- **Why it is not the same run.** The mock and the live league seat people differently — mock
+  slot 1 is AJ, live slot 1 is Mason. Replaying raw `draft_slot` numbers against live identity
+  would test a draft nobody is going to play. What has to carry over is *who paid*, so
+  `--live` re-attributes each pick from the seat its owner held in the mock to the seat they
+  hold now, and the final ledger is compared to the golden file **by owner** rather than by
+  slot. Identity comes from Sleeper's own `/rosters` and `/users` through the real
+  `config/owners.yaml` — the production path, start to finish, with nothing stubbed below the
+  client.
+- **What it found, which is the point of running it.** As the league is configured right now
+  the run **FAILS**: 6 of 20 keepers cannot be placed on a draft slot, and 146 picks classify
+  competitive instead of 140. Not a code defect — Burt, Connor and TD have no confirmed seat,
+  so their keepers have nowhere to land and become bids. With those three seats assigned
+  (`--seats=`, a scratch file, nothing written to `config/`) the same 160 picks **PASS**: every
+  invariant at every pick, the ledger matching the golden file by owner for all ten managers,
+  poll p50 1.5ms against a 1500ms budget. **The tool is ready; the league is not.**
+- **Three harness defects, all found by the tool refusing to agree with the harness:**
+  - matched the mock's *display* names against live identity, so the user themselves came out
+    as "has not joined" — the mock seats them as `Matt` and the manifest calls them `Me`. They
+    landed in a leftover seat that happened to be correct, by luck. Now keyed on manifest owner
+    names on both sides.
+  - rewrote `draft_slot` without `metadata.slot`, and the poller's cross-check (DI-053) reported
+    **224 PAYLOAD CONFLICTs**. The tool was right: that is a payload Sleeper would never emit.
+  - `--seats` reached the re-attribution but not the cockpit's own `SeatStore`, so the rehearsal
+    measured one seating while the ledger classified against another — the mock-vs-live confusion
+    DI-064 exists to prevent, reintroduced inside the harness meant to catch it.
+- **The chaos list is now complete.** Case 5, a mid-draft budget correction, had been printed as
+  *"not rehearsed — a cockpit gap, not a ledger gap"* since DI-065. DI-069 shipped the surface,
+  so it is rehearsed: the corrected team moves by exactly the delta, **the other nine do not
+  move**, and the revert restores it to the dollar. Money conservation is deliberately not
+  asserted there — a budget correction means the room no longer totals 10 × $200, and
+  reconciling to `2000 + Σ deltas` is the Sprint 1 property instead. Case 6 covers the same
+  surface used wrong: a correction that overdraws a team is taken **as typed** (refusing it
+  means arguing with the person who can see the room), the max bid clamps to $0, and the
+  cockpit says so out loud rather than computing off money that does not exist.
+- **Still open, and none of it is code:** `ConnorRice102` has joined at slot 8 and is unmapped —
+  `config/owners.yaml`'s own rule is that mappings are confirmed by a human, never inferred from
+  a resemblance, so it stays unmapped until the user confirms it. Two seats remain empty.
+  `draft.settings` still reports `rounds: 15` against `roster_positions`' 16 (the known ADR-0002
+  D4 mismatch) and carries no `max_keepers`.
+- **Acceptance criteria:**
+  - [x] `make rehearsal-live` drives the real `LiveDraft` over live identity, `--seats=` for a
+        seating not yet in `config/`
+  - [x] picks re-attributed by owner; golden file compared by owner; assumed seats printed, not buried
+  - [x] re-attribution unit-tested away from the network, and mutation-verified — dropping the
+        `metadata.slot` rewrite or the leftover-seat fill fails a named test
+  - [x] the chaos list has no unrehearsed entries left
+  - [x] the rehearsal reads no user-editable file it does not have to; `config/` verified clean after
+  - [x] `make ci` green — 660 tests, 95% coverage
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.

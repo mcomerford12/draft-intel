@@ -10,14 +10,24 @@ out to be incapable of failing.
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from draft_intel.api.live import LiveSnapshot, TeamLine, WalkAwayStatus
-from tools.rehearsal import GOLDEN_SPEND, ReplayFeed, check
+from tools import rehearsal
+from tools.rehearsal import (
+    GOLDEN_SPEND,
+    ReplayFeed,
+    _mock_slots,
+    _owner_at,
+    _reattribute,
+    check,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -158,4 +168,117 @@ def test_the_full_rehearsal_passes_and_exits_zero() -> None:
     assert result.returncode == 0, result.stdout[-3000:]
     assert "PASSED — 160 picks" in result.stdout
     assert "every poll fitted inside" in result.stdout
-    assert result.stdout.count("  ok ") >= 14, "10 ledger rows plus 4 chaos cases"
+    assert result.stdout.count("  ok ") >= 16, "10 ledger rows plus 6 chaos cases"
+
+
+# ------------------------------------------------------- re-attribution, for --live
+#
+# `--live` replays the mock's 160 picks against the live league's seating. The identity join
+# and the network fetch belong to production code that has its own tests; what is new here, and
+# what got three things wrong before it got them right, is the re-attribution itself. Each of
+# the tests below pins one of those three.
+
+
+class _Seating:
+    """A stand-in for the resolved live identity — ``_reattribute`` consults only ``slot_for``."""
+
+    def __init__(self, seats: dict[str, int]) -> None:
+        self._seats = seats
+
+    def slot_for(self, owner: str) -> int | None:
+        return self._seats.get(owner)
+
+
+def picks_fixture() -> list[dict[str, Any]]:
+    picks: list[dict[str, Any]] = json.loads((ROOT / "fixtures" / "picks.json").read_text())
+    return picks
+
+
+def mirrored() -> _Seating:
+    """A live seating that puts everyone somewhere else: slot n becomes slot 11-n."""
+    return _Seating({owner: 11 - slot for owner, slot in _mock_slots().items()})
+
+
+def test_every_pick_moves_to_the_seat_its_owner_holds_live() -> None:
+    """The point of the mode. Replaying raw slot numbers would test a draft nobody will play —
+    mock slot 1 is AJ, live slot 1 is Mason — so what has to carry over is *who paid*."""
+    picks = picks_fixture()
+    moved, placed, assumed = _reattribute(picks, mirrored(), teams=10)
+
+    assert assumed == [], "everyone is seated, so nothing should be assumed"
+    assert len(moved) == len(picks), "re-attribution must not drop a pick"
+    assert placed == {owner: 11 - slot for owner, slot in _mock_slots().items()}
+    for before, after in zip(picks, moved, strict=True):
+        assert after["draft_slot"] == 11 - int(before["draft_slot"])
+
+
+def test_metadata_slot_is_rewritten_in_lockstep_with_draft_slot() -> None:
+    """The harness first rewrote ``draft_slot`` alone, and the poller's cross-check (DI-053)
+    reported 224 PAYLOAD CONFLICTs. The tool was right: that payload is one Sleeper would never
+    emit. Rewriting one field and not the other must never come back."""
+    moved, _placed, _assumed = _reattribute(picks_fixture(), mirrored(), teams=10)
+    assert moved, "guard against an empty list making this vacuous"
+    assert all(int(pick["metadata"]["slot"]) == pick["draft_slot"] for pick in moved)
+
+
+def test_owners_who_have_not_joined_take_the_leftover_seats_and_are_reported() -> None:
+    """Three managers had not joined when this was written, and the run still has to happen.
+    Filling their seats is an assumption; returning it separately is what lets the run print it
+    rather than bury it."""
+    seven = {o: s for o, s in _mock_slots().items() if o not in {"Burt", "Connor", "TD"}}
+    _moved, placed, assumed = _reattribute(picks_fixture(), _Seating(seven), teams=10)
+
+    assert assumed == ["Burt", "Connor", "TD"]
+    assert placed | seven == placed, "a seated owner is never moved to make room"
+    assert sorted(placed.values()) == list(range(1, 11)), "ten owners, ten distinct seats"
+
+
+def test_re_attribution_preserves_what_each_person_bought() -> None:
+    """Money follows the person, not the seat. If this drifts, the by-owner ledger comparison at
+    the end of a live run is checking two different drafts against each other."""
+    picks = picks_fixture()
+    mock_slot = _mock_slots()
+    moved, placed, _assumed = _reattribute(picks, mirrored(), teams=10)
+
+    for owner in mock_slot:
+        was = [p for p in picks if int(p["draft_slot"]) == mock_slot[owner]]
+        now = [p for p in moved if int(p["draft_slot"]) == placed[owner]]
+        assert len(was) == len(now) == 16
+        assert {p["player_id"] for p in was} == {p["player_id"] for p in now}
+
+
+def test_owner_at_reads_the_seating_backwards() -> None:
+    assert _owner_at({"AJ": 1, "Mason": 2}, 2) == "Mason"
+    assert _owner_at({"AJ": 1}, 9) is None
+
+
+def test_the_mock_seating_still_covers_all_ten_managers() -> None:
+    """If a manifest owner ever stops resolving against the mock fixture, their picks vanish from
+    the re-attributed feed silently — ``_reattribute`` skips slots it cannot name."""
+    assert sorted(_mock_slots().values()) == list(range(1, 11))
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], (False, None)),
+        (["--live"], (True, None)),
+        (["--seats=/tmp/x.yaml"], (False, "/tmp/x.yaml")),
+        (["--live", "--seats=/tmp/x.yaml"], (True, "/tmp/x.yaml")),
+    ],
+)
+def test_the_flags_reach_the_run(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], expected: tuple[bool, str | None]
+) -> None:
+    """``--seats`` exists so a rehearsal can try a seating without writing it into the real
+    config. A flag that parses but never reaches ``run`` would silently rehearse the wrong one —
+    which is how ``--seats`` reached the re-attribution but not the cockpit's own seat store."""
+    seen: list[tuple[bool, str | None]] = []
+
+    def spy(live_league: bool = False, _seats_override: str | None = None) -> int:
+        seen.append((live_league, _seats_override))
+        return 0
+
+    monkeypatch.setattr(rehearsal, "run", spy)
+    assert rehearsal.main(argv) == 0
+    assert seen == [expected]
