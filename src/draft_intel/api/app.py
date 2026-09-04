@@ -755,6 +755,11 @@ def _render_live(
   .hits button {{ font:inherit; text-align:left; width:100%; padding:5px 9px; cursor:pointer;
     border:1px solid var(--line); border-radius:3px; background:var(--surface); color:var(--ink) }}
   .hits button:hover {{ border-color:var(--accent); color:var(--accent) }}
+  .panel {{ background:var(--surface); border:1px solid var(--line); border-radius:5px;
+    padding:14px 16px; margin:0 0 8px; display:grid; gap:9px }}
+  .panel .seats-lede {{ margin:0 }}
+  button:disabled {{ opacity:.45; cursor:not-allowed; border-color:var(--line);
+    color:var(--muted) }}
 </style></head><body><div class="wrap">
 <h1>Cockpit</h1>
 <div id="app">{
@@ -766,6 +771,47 @@ def _render_live(
 <input id="q" autocomplete="off"
   placeholder="type a name, then pick" aria-label="nominate a player">
 <ul class="hits" id="hits"></ul>
+
+<!-- Every form lives BELOW #app, deliberately. #app is replaced wholesale on each repaint,
+     so an input inside it loses whatever you were typing every two seconds. That is fine for
+     status and lists, which should refresh, and unusable for anything you type into. -->
+<h2>corrections</h2>
+<div class="panel">
+  <div class="seat-form">
+    <select id="corr-slot" aria-label="team"></select>
+    <span class="seat-is">actually has $</span>
+    <input id="corr-amt" inputmode="numeric" style="width:70px" aria-label="dollars">
+    <input id="corr-why" placeholder="why" style="width:200px;text-align:left"
+      aria-label="reason">
+    <button id="corr-go">correct the money</button>
+  </div>
+  <p class="seats-lede">Stored as a difference, not a fixed figure, so the next pick will not
+    undo it.</p>
+  <div class="seat-form">
+    <select id="keeper-slot" aria-label="team for keeper"></select>
+    <span class="seat-is">keeps</span>
+    <input id="keeper-q" autocomplete="off" placeholder="type a name, then pick"
+      style="width:210px;text-align:left" aria-label="keeper">
+    <span class="seat-is">for $</span>
+    <input id="keeper-amt" inputmode="numeric" style="width:64px" aria-label="retention price">
+    <button id="keeper-go" disabled>add keeper</button>
+  </div>
+  <ul class="hits" id="keeper-hits"></ul>
+  <p class="seats-lede">Sleeper publishes no auction value, so a retention price is typed from
+    the draft room. Superseded automatically if the real pick arrives.</p>
+</div>
+
+<h2>seating</h2>
+<div class="panel">
+  <div class="seat-form">
+    <select id="seat-slot" aria-label="draft slot"></select>
+    <span class="seat-is">is</span>
+    <select id="seat-owner" aria-label="manager"></select>
+    <button id="seat-go">assign</button>
+  </div>
+  <p class="seats-lede">For a manager who joins under a display name
+    <code>owners.yaml</code> does not know. Lands on the next poll.</p>
+</div>
 <script>
 async function repaint() {{
   try {{
@@ -778,38 +824,140 @@ async function repaint() {{
 }}
 setInterval(repaint, 2000);
 
+// The dropdowns are populated from the live snapshot rather than rendered server-side,
+// because they sit outside #app (so they survive a repaint) and their contents still have to
+// follow the draft -- a manager who joins changes both the team list and the unplaced list.
+let keeperPick = null;
+
+async function refreshPickers() {{
+  try {{
+    const [live, seats] = await Promise.all([
+      (await fetch("/api/live")).json(),
+      (await fetch("/api/live/seats")).json(),
+    ]);
+    const teamOptions = live.teams
+      .map((t) => `<option value="${{t.slot}}">${{t.owner}}</option>`).join("");
+    for (const id of ["corr-slot", "keeper-slot"]) {{
+      const el = document.getElementById(id);
+      if (el && el.innerHTML !== teamOptions) el.innerHTML = teamOptions;
+    }}
+    const slotEl = document.getElementById("seat-slot");
+    const ownerEl = document.getElementById("seat-owner");
+    const slots = (seats.unmapped_slots || [])
+      .map((s) => `<option value="${{s}}">slot ${{s}}</option>`).join("");
+    const owners = (seats.unplaced_owners || [])
+      .map((o) => `<option value="${{o}}">${{o}}</option>`).join("");
+    if (slotEl && slotEl.innerHTML !== slots) slotEl.innerHTML = slots;
+    if (ownerEl && ownerEl.innerHTML !== owners) ownerEl.innerHTML = owners;
+    const go = document.getElementById("seat-go");
+    if (go) go.disabled = !slots || !owners;
+  }} catch (e) {{ /* leave the pickers as they are rather than emptying them */ }}
+}}
+
+function flash(button, text) {{
+  const was = button.textContent;
+  button.textContent = text;
+  setTimeout(() => {{ button.textContent = was; }}, 1600);
+}}
+
 document.addEventListener("click", async (event) => {{
   const target = event.target;
-  if (target && target.id === "seat-go") {{
-    const slot = document.getElementById("seat-slot").value;
-    const owner = document.getElementById("seat-owner").value;
-    await fetch(`/api/live/seats/${{slot}}`, {{
-      method: "POST",
-      headers: {{ "Content-Type": "application/json" }},
-      body: JSON.stringify({{ owner, note: "assigned from the cockpit" }}),
-    }});
-    repaint();
-  }} else if (target && target.id === "corr-go") {{
-    const slot = Number(document.getElementById("corr-slot").value);
+  if (!target) return;
+
+  if (target.id === "corr-go") {{
     const raw = document.getElementById("corr-amt").value.trim();
     if (raw === "") return;
-    await fetch("/api/live/corrections/budget", {{
+    const res = await fetch("/api/live/corrections/budget", {{
       method: "POST",
       headers: {{ "Content-Type": "application/json" }},
       body: JSON.stringify({{
-        slot, remaining: Number(raw),
+        slot: Number(document.getElementById("corr-slot").value),
+        remaining: Number(raw),
         reason: document.getElementById("corr-why").value,
       }}),
     }});
+    if (!res.ok) {{ flash(target, (await res.json()).detail || "refused"); return; }}
+    document.getElementById("corr-amt").value = "";
+    document.getElementById("corr-why").value = "";
     repaint();
-  }} else if (target && target.dataset && target.dataset.uncorrect) {{
+  }} else if (target.id === "keeper-go") {{
+    if (!keeperPick) return;
+    const amt = document.getElementById("keeper-amt").value.trim();
+    if (amt === "") return;
+    const res = await fetch("/api/live/corrections/keeper", {{
+      method: "POST",
+      headers: {{ "Content-Type": "application/json" }},
+      body: JSON.stringify({{
+        slot: Number(document.getElementById("keeper-slot").value),
+        player_id: keeperPick.id,
+        amount: Number(amt),
+        reason: `${{keeperPick.name}}, typed from the draft room`,
+      }}),
+    }});
+    if (!res.ok) {{ flash(target, (await res.json()).detail || "refused"); return; }}
+    keeperPick = null;
+    document.getElementById("keeper-q").value = "";
+    document.getElementById("keeper-amt").value = "";
+    document.getElementById("keeper-hits").innerHTML = "";
+    target.disabled = true;
+    repaint();
+  }} else if (target.id === "seat-go") {{
+    const res = await fetch(`/api/live/seats/${{document.getElementById("seat-slot").value}}`, {{
+      method: "POST",
+      headers: {{ "Content-Type": "application/json" }},
+      body: JSON.stringify({{
+        owner: document.getElementById("seat-owner").value,
+        note: "assigned from the cockpit",
+      }}),
+    }});
+    if (!res.ok) {{ flash(target, (await res.json()).detail || "refused"); return; }}
+    refreshPickers();
+    repaint();
+  }} else if (target.dataset && target.dataset.uncorrect) {{
     await fetch(`/api/live/corrections/${{target.dataset.uncorrect}}`, {{ method: "DELETE" }});
     repaint();
-  }} else if (target && target.dataset && target.dataset.unseat) {{
+  }} else if (target.dataset && target.dataset.unseat) {{
     await fetch(`/api/live/seats/${{target.dataset.unseat}}`, {{ method: "DELETE" }});
+    refreshPickers();
     repaint();
   }}
 }});
+
+// The keeper needs a player, and a player needs a search. Same endpoint the nomination box
+// uses; the id is held in `keeperPick` so the button sends an identity rather than a name.
+let keeperTimer = null;
+document.addEventListener("input", (event) => {{
+  if (!event.target || event.target.id !== "keeper-q") return;
+  clearTimeout(keeperTimer);
+  keeperTimer = setTimeout(async () => {{
+    const box = document.getElementById("keeper-q");
+    const list = document.getElementById("keeper-hits");
+    const button = document.getElementById("keeper-go");
+    keeperPick = null;
+    button.disabled = true;
+    list.innerHTML = "";
+    if (!box.value.trim()) return;
+    const rows = await (await fetch(
+      `/api/live/search?q=${{encodeURIComponent(box.value)}}`)).json();
+    for (const row of rows) {{
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.textContent = `${{row.name}} · ${{row.position}}`
+        + (row.is_keeper === "true" ? " · already a keeper" : "");
+      b.onclick = () => {{
+        keeperPick = {{ id: row.player_id, name: row.name }};
+        box.value = row.name;
+        list.innerHTML = "";
+        button.disabled = false;
+      }};
+      li.appendChild(b);
+      list.appendChild(li);
+    }}
+  }}, 180);
+}});
+
+refreshPickers();
+setInterval(refreshPickers, 10000);
 
 const q = document.getElementById("q"), hits = document.getElementById("hits");
 let timer = null;
@@ -933,78 +1081,47 @@ def _team(live: LiveDraft, slot: int) -> TeamLine:
 
 
 def _seats_html(unmapped: list[int], unplaced: list[str], assigned: dict[int, str]) -> str:
-    """The seat-assignment panel. Shown only when there is something to fix or something fixed.
+    """What is unplaced and what has been assigned. **Display only** — the form is in the
+    stable shell below `#app`, which is replaced wholesale on every repaint.
 
     A manager who joins under a display name `owners.yaml` has never seen is invisible to the
     tool, and their two keepers classify as competitive bids. That already happened once and
-    went unnoticed for days. Here it is a dropdown and a button.
+    went unnoticed for days, so it is a banner rather than a log line.
     """
     if not unmapped and not unplaced and not assigned:
         return ""
-
-    rows: list[str] = []
-    if unplaced:
-        options = "".join(f'<option value="{escape(o)}">{escape(o)}</option>' for o in unplaced)
-        slots = "".join(f'<option value="{s}">slot {s}</option>' for s in (unmapped or []))
-        rows.append(
-            f'<div class="seat-form">'
-            f'<select id="seat-slot" aria-label="draft slot">{slots}</select>'
-            f'<span class="seat-is">is</span>'
-            f'<select id="seat-owner" aria-label="manager">{options}</select>'
-            f'<button id="seat-go">assign</button>'
-            f"</div>"
-        )
+    rows = ""
     if assigned:
-        placed = "".join(
+        rows = "".join(
             f"<li>slot {slot} is <strong>{escape(owner)}</strong> "
             f'<button data-unseat="{slot}">clear</button></li>'
             for slot, owner in sorted(assigned.items())
         )
-        rows.append(f'<ul class="plain seat-list">{placed}</ul>')
-
+        rows = f'<ul class="plain seat-list">{rows}</ul>'
     lede = (
         f"{len(unplaced)} manager(s) in the keeper manifest have no seat: "
         f"<strong>{escape(', '.join(unplaced))}</strong>. Sleeper does not know them by a name "
         f"<code>owners.yaml</code> recognises, so their keepers will classify as competitive "
-        f"bids. Say who is sitting where and it is fixed on the next poll."
+        f"bids. Assign them under <em>seating</em> below and it is fixed on the next poll."
         if unplaced
-        else "Seats you have assigned by hand. These override what Sleeper resolved."
+        else "Seats you assigned by hand. These override what Sleeper resolved."
     )
     return (
         f'<div class="seats"><div class="seats-hd">seating</div>'
-        f'<p class="seats-lede">{lede}</p>{"".join(rows)}</div>'
+        f'<p class="seats-lede">{lede}</p>{rows}</div>'
     )
 
 
 def _corrections_html(corrections: list[Correction], teams: dict[int, str]) -> str:
-    """Every correction in force, and the box to add one.
+    """Every correction in force. **Display only**; the forms are in the stable shell.
 
-    **A corrected budget must never look like an uncorrected one.** That is §4.8's rule about
-    typed numbers applied to the money column: the room's figures and the tool's diverge for
-    real reasons, and the moment a $5 adjustment stops being visible it becomes indistinguishable
-    from a bug. So this panel is always present once anything is in force, listing what you said
-    alongside what the system derived from it.
+    A corrected budget must never look like an uncorrected one — §4.8's rule about typed
+    numbers applied to the money column. The moment a $5 adjustment stops being visible it is
+    indistinguishable from a bug, so this panel is present whenever anything is in force and
+    lists what you said alongside what the system derived from it.
     """
-    options = "".join(
-        f'<option value="{slot}">{escape(owner)}</option>' for slot, owner in sorted(teams.items())
-    )
-    form = (
-        f'<div class="seat-form">'
-        f'<select id="corr-slot" aria-label="team">{options}</select>'
-        f'<span class="seat-is">actually has $</span>'
-        f'<input id="corr-amt" inputmode="numeric" style="width:70px" aria-label="dollars">'
-        f'<input id="corr-why" placeholder="why" style="width:190px;text-align:left" '
-        f'aria-label="reason">'
-        f'<button id="corr-go">correct</button>'
-        f"</div>"
-    )
     if not corrections:
-        return (
-            f'<details class="corr"><summary>corrections</summary>'
-            f'<p class="seats-lede">None in force. Use this when the room and the tool disagree '
-            f"about a team's money — it is stored as a difference, not a fixed figure, so the "
-            f"next pick will not undo it.</p>{form}</details>"
-        )
+        return ""
     rows = "".join(
         f"<li><strong>{escape(teams.get(c.slot, f'slot {c.slot}'))}</strong> "
         f"{escape(c.describe().split(': ', 1)[1])}"
@@ -1015,7 +1132,7 @@ def _corrections_html(corrections: list[Correction], teams: dict[int, str]) -> s
     return (
         f'<div class="seats corr-on"><div class="seats-hd">corrections in force</div>'
         f'<p class="seats-lede">These numbers are yours, not the feed\'s.</p>'
-        f'<ul class="plain seat-list">{rows}</ul>{form}</div>'
+        f'<ul class="plain seat-list">{rows}</ul></div>'
     )
 
 
