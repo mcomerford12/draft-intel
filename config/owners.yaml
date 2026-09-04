@@ -5,7 +5,7 @@
 # league draft object carries NO slot_name_* keys, so the roster/user join is the only path
 # that works in production (docs/api-findings.md Finding 9, and DI-EVAL-1 B1).
 #
-# Sleeper display names, for the seven managers who have joined so far. The remaining three
+# Sleeper display names, for the eight managers who have joined so far. The remaining two
 # cannot be mapped until they join the league; manifest_keys(require=20) raises loudly rather
 # than silently classifying their keepers as competitive bids.
 #
@@ -20,6 +20,10 @@
 #                         `team_name`, so there was nothing in the API to read it off.
 #   Keenan: keenankid17   confirmed by the user, 2026-09-04, on joining at slot 6.
 #   Willie: willdeann     confirmed by the user, 2026-09-04, on joining at slot 7.
+#   Connor: ConnorRice102 confirmed by the user, 2026-09-04, on joining at slot 8. The resemblance
+#                         was obvious and was deliberately NOT acted on until asked -- an obvious
+#                         resemblance is exactly the kind that gets a manager's two keepers filed
+#                         as competitive bids when it turns out to be somebody else.
 #
 # Confirm any future mapping the same way, and record who confirmed it and when.
 aliases:
@@ -30,7 +34,9 @@ aliases:
   Jake: jswilliams5
   Keenan: keenankid17
   Willie: willdeann
-  # Unjoined, display names unknown: Connor, Burt, TD -- draft slots 8, 9, 10.
+  Connor: ConnorRice102
+  # Unjoined, display names unknown: Burt and TD. Sleeper has them on rosters 9 and 10, but a
+  # roster with no owner_id resolves to no display name, so there is nothing to alias yet.
   # The mock draft used short names, which the join above also covers via slot_name_*.
 
 # Fallback aliases for the mock draft fixture, which carries short slot names.

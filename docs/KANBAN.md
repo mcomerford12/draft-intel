@@ -2896,6 +2896,30 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-072] Connor mapped to `ConnorRice102`
+
+- **Sprint:** 4 · **Owner:** data-engineer · **Size:** XS · **Branch:** `di-072-connor-seat`
+- **The ask:** the user confirmed that the account which joined at slot 8 is Connor. Map it.
+- **Why a card for one line.** Because it is the line that decides whether two keepers are
+  keepers. `config/owners.yaml`'s standing rule — every mapping confirmed by a human, never
+  inferred from a resemblance — exists because a wrong one files that manager's keepers as
+  competitive bids, which poisons market inflation, skew and every tendency profile for the
+  whole draft, and simultaneously moves another seat's positional demand and surplus. The
+  resemblance here was obvious from the moment the account appeared and was deliberately not
+  acted on until asked. An obvious resemblance is exactly the kind that turns out to be
+  somebody else.
+- **Measured effect,** `make rehearsal-live` before and after: unplaceable keepers **6 → 4**,
+  competitive picks **146 → 144**. Slot 8 now resolves to Connor rather than being backfilled by
+  the leftover-seat assumption. The run still fails, correctly — Burt and TD have not joined,
+  and their four keepers still have nowhere to land.
+- **Acceptance criteria:**
+  - [x] mapping recorded with who confirmed it and when, per the file's own rule
+  - [x] the header's count of joined managers updated with it (seven → eight)
+  - [x] `make ci` green — 660 tests
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.
