@@ -2597,6 +2597,61 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-066] Walk-away curves on the cockpit
+
+- **Sprint:** 3 · **Owner:** backend-engineer · **Size:** M · **Branch:** `di-064-live-cockpit`
+- **Why:** the curves have existed since DI-036 and were computed by nothing on the live path.
+  ADR-0006 clause 4 is the constraint that shapes the whole design: *the live walk-away lookup
+  is O(1) against a board precomputed between settled picks; the precompute completes inside 30
+  seconds at 8 or fewer open slots, and its cost at more open slots is stated on the page.*
+- **Design:** the board is precomputed in a worker thread after any poll where the user's
+  budget, open slots or the available pool changed. The block does a dictionary lookup and
+  **there is deliberately no fallback that solves a missing curve**, because that fallback would
+  fire exactly when the room is bidding — the 11-second stall the amended gate exists to forbid.
+- **Measured cost**, full pre-draft pool, `top=12`:
+
+  | open slots | 14 | 10 | 8 | 6 | 4 | 2 |
+  |---|---|---|---|---|---|---|
+  | seconds | 152 | 66 | 39 | 20 | 8.6 | 1.9 |
+
+  On the **live** path the pool has already shrunk, so the same states are far cheaper:
+  10 slots → 27.5s, and **8 slots → 16.6s. ADR-0006 clause 4 is met** (gate: inside 30s).
+  At 16 open slots — the state the cockpit boots into at 6:55pm — it is ~190s, which is why the
+  status line says "computing" and states the last cost rather than showing an empty chart.
+- **Verified on the live league in the worst case.** Booted against the real draft with 16 open
+  slots: `walkaway: computing`, the ledger answering throughout (`room $2000 over 160 slots`),
+  the page rendering at 200, and **poll age holding 0.1–2.4s across a minute of CPU-bound
+  precompute** — the event loop is not starved by the worker thread.
+- **Every absence is explained rather than blank.** "No curve" and "not worth bidding on" are
+  opposite conclusions and a missing number cannot tell them apart, so an uncovered player reads
+  *"outside the precomputed top 12 by VORP — which is not the same as not worth bidding on"*, a
+  curve that never turns positive says so, a non-monotone curve says its deltas are unusable,
+  and a board computed for a budget the user no longer has is marked **STALE** with the pick
+  count since.
+- **The curve is drawn**, inline SVG, §4.7b's axes: price on x, Δ starting points on y, zero
+  line, and the crossing marked — the crossing *is* the answer, so everything else on the chart
+  exists to make that one x-position readable. Theme tokens, so it holds in both.
+- **The defect this card introduced, and caught.** Wiring the precompute into `poll_once`
+  unconditionally turned `tests/test_live.py` from 3.6 seconds into **597 seconds** — a test
+  polling at zero picks was paying for a 16-slot, 190-second board. Fixed by making
+  `precompute` off unless asked, exactly as `poll` already is: both are expensive, and neither
+  should start because something called a method. `create_app` passes `precompute=poll`, so
+  they arm together. **597s → 4.1s.**
+- **Acceptance criteria:**
+  - [x] O(1) lookup on the live path, no solve, no on-demand fallback
+  - [x] precompute in a worker thread, off the poll path, one at a time
+  - [x] priced against who is *still available* — `ValueBoard.available()` drops keepers only
+  - [x] cost stated on the page, per ADR-0006 clause 4
+  - [x] staleness surfaced with the pick count since, not assumed
+  - [x] a failed precompute is reported and the ledger keeps answering
+  - [x] no precompute for a full roster — the question no longer exists
+  - [x] 11 tests, including one that holds a fake open to observe "computing", and one that
+        asserts on the *candidates handed to the solver* rather than the curves that come back,
+        because a `top`-limited output could hide a drafted player by ranking them low
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.

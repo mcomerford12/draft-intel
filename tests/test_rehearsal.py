@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from draft_intel.api.live import LiveSnapshot, TeamLine
+from draft_intel.api.live import LiveSnapshot, TeamLine, WalkAwayStatus
 from tools.rehearsal import GOLDEN_SPEND, ReplayFeed, check
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +54,7 @@ def snapshot(teams: tuple[TeamLine, ...], **kw: object) -> LiveSnapshot:
         "inflation_detail": "",
         "positions": (),
         "block": None,
+        "walkaway": WalkAwayStatus(state="absent", detail=""),
         "alerts": (),
         "blockers": (),
     }

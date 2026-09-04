@@ -506,3 +506,223 @@ def test_a_position_with_too_few_picks_to_read_is_omitted_not_shown_blank(
     late = make(PICKS, store)
     asyncio.run(late.poll_once())
     assert late.snapshot().positions, "by the end there is plenty to read"
+
+
+# ------------------------------------------------------- DI-066: walk-away curves
+
+
+def _at(cursor: int, store: OverrideStore, **kw: Any) -> LiveDraft:
+    """A cockpit parked at a point in the draft, with precomputation **on**.
+
+    Cursor 100 leaves the user one open slot, where a real board takes a fraction of a second.
+    The cost at many open slots is not paid here: at the 16 open slots a user has before any
+    pick lands it is 190 seconds, and a test that quietly spends that is the same mistake as
+    one that quietly opens a socket.
+    """
+    live = make(PICKS, store, seating=FIXTURE_SEATING)
+    live.precompute = True
+    client = live.client
+    assert isinstance(client, FakeClient)
+    client.picks_payload = PICKS[:cursor]
+    return live
+
+
+async def _poll_and_wait(live: LiveDraft) -> None:
+    await live.poll_once()
+    task = live._walkaway_task
+    if task is not None:
+        await task
+
+
+def test_precomputation_is_off_unless_asked_for(store: OverrideStore) -> None:
+    """The same rule as the app's `poll`. Wiring minutes of optimizer work into every
+    `poll_once` unconditionally turned this file from 3.6 seconds into 10 minutes — expensive
+    work happening because something called a method, not because anybody wanted it."""
+    live = make(PICKS, store)
+    assert live.precompute is False
+    asyncio.run(live.poll_once())
+    assert live._walkaway_task is None
+    assert live.snapshot().walkaway.state == "absent"
+
+
+def test_the_app_turns_precomputation_on_exactly_when_it_polls(store: OverrideStore) -> None:
+    """Both are only meaningful against a live draft, and both are expensive enough that
+    neither should start because something imported the module."""
+    from draft_intel.api.app import create_app
+
+    create_app(ROOT, store, poll=False)  # the default: nothing expensive is armed
+    quiet = LiveDraft(ROOT, league_id="L", draft_id="D", store=store)
+    assert quiet.precompute is False
+
+    armed = LiveDraft(ROOT, league_id="L", draft_id="D", store=store, precompute=True)
+    assert armed.precompute is True
+
+
+def test_the_precompute_runs_off_the_poll_path(store: OverrideStore) -> None:
+    """ADR-0006 clause 4. A curve is dozens of optimizer solves and E2 measured one at 11.1s;
+    awaiting that inside a poll is the design the amended gate exists to forbid. `poll_once`
+    must return with the work merely *started*.
+
+    Held open by a fake that blocks until released, so "still computing" is observable — with a
+    real board at one open slot it finishes too fast to catch, and at many open slots the test
+    would take minutes.
+    """
+    released = asyncio.Event()
+
+    async def scenario() -> None:
+        def blocking(*_a: Any, **_k: Any) -> Any:
+            asyncio.run(released.wait())  # pragma: no cover - released before it matters
+
+        live = _at(100, store)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr("draft_intel.api.live.walkaway_board", blocking)
+            await live.poll_once()
+
+            assert live._walkaway_task is not None and not live._walkaway_task.done()
+            assert live.snapshot().walkaway.state == "computing"
+            assert live.snapshot().total_remaining > 0, "the ledger answers while it computes"
+
+            live._walkaway_task.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_a_finished_precompute_reports_current_and_states_its_cost(
+    store: OverrideStore,
+) -> None:
+    """The cost statement is not decoration: ADR-0006 requires it on the page, because at many
+    open slots the honest answer is "still computing, the last one took three minutes"."""
+    live = _at(100, store)
+    asyncio.run(_poll_and_wait(live))
+
+    status = live.snapshot().walkaway
+    assert status.state == "current"
+    assert status.curves > 0
+    assert status.seconds is not None and status.seconds >= 0
+    assert "took" in status.detail
+
+
+def test_the_block_reads_a_precomputed_curve_rather_than_solving(
+    store: OverrideStore,
+) -> None:
+    """The O(1) promise. The number comes off the board by dictionary lookup; there is
+    deliberately no fallback that solves a missing curve, because that fallback fires exactly
+    when the room is bidding."""
+    live = _at(100, store)
+    asyncio.run(_poll_and_wait(live))
+    board = live._walkaway
+    assert board is not None
+
+    covered = board.curves[0]
+    live.nominate(covered.player_id)
+    block = live.snapshot().block
+    assert block is not None
+    assert block.walk_away == covered.walk_away_price
+    assert block.curve, "the curve points come through for the chart"
+    assert block.curve_trustworthy == covered.monotone
+
+
+def test_a_player_outside_the_precomputed_set_says_so_rather_than_reading_as_worthless(
+    store: OverrideStore,
+) -> None:
+    """ "No curve" and "not worth bidding on" are opposite conclusions, and a blank cannot tell
+    them apart. Only twelve players get curves; the other 128 must not read as zeroes."""
+    live = _at(100, store)
+    asyncio.run(_poll_and_wait(live))
+    board = live._walkaway
+    assert board is not None
+
+    outside = next(
+        p.player_id
+        for p in live.pipeline.board.players
+        if p.in_pool_live and not board.covers(p.player_id)
+    )
+    live.nominate(outside)
+    block = live.snapshot().block
+    assert block is not None
+    assert block.walk_away is None
+    assert "not the same as not worth bidding on" in block.walk_away_note
+
+
+def test_curves_are_priced_against_who_is_still_available(store: OverrideStore) -> None:
+    """`ValueBoard.available()` drops keepers and nothing else. A curve computed against a pool
+    still holding everyone sold in the last hour prices the user against players they cannot
+    have — so the precompute filters the drafted set out itself.
+
+    Asserted on the candidates handed to the solver rather than on the curves that come back,
+    because the filtering is the thing under test and a `top`-limited output could hide a
+    drafted player simply by ranking them low.
+    """
+    seen: list[list[Any]] = []
+
+    async def scenario() -> None:
+        def capture(candidates: Any, **kw: Any) -> Any:
+            seen.append(list(candidates))
+            from draft_intel.quant.walkaway import WalkAwayBoard
+
+            return WalkAwayBoard(budget=kw["budget"], slots=kw["slots"], curves=())
+
+        live = _at(100, store)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr("draft_intel.api.live.walkaway_board", capture)
+            await _poll_and_wait(live)
+
+    asyncio.run(scenario())
+
+    assert seen, "the solver was called"
+    drafted = {p["player_id"] for p in PICKS[:100]}
+    offered = {c.player_id for c in seen[0]}
+    assert offered, "and offered a pool"
+    assert not offered & drafted, "nobody already bought is offered as a candidate"
+
+
+def test_a_board_stops_being_current_the_moment_the_user_buys_somebody(
+    store: OverrideStore,
+) -> None:
+    """Every price on a stale board answers a question about a roster you no longer have. The
+    project keeps finding plausible figures that have been wrong since 7:40pm; this is that
+    failure mode for the one number a user acts on fastest."""
+    live = _at(100, store)
+    asyncio.run(_poll_and_wait(live))
+    assert live.snapshot().walkaway.state == "current"
+
+    client = live.client
+    assert isinstance(client, FakeClient)
+    client.picks_payload = PICKS[:104]  # more picks land under the board
+    live.precompute = False  # freeze it, so staleness is what is observed rather than a race
+    asyncio.run(live.poll_once())
+
+    status = live.snapshot().walkaway
+    assert status.state == "stale"
+    assert status.picks_since == 4
+    assert "STALE" in status.detail
+
+
+def test_nothing_is_precomputed_for_a_full_roster(store: OverrideStore) -> None:
+    """With no open slots there is nothing to buy, so a curve is not merely stale — it is a
+    question that no longer exists. Spending three minutes on it would be worse than useless."""
+    live = _at(120, store)  # the user's roster is full by here
+    asyncio.run(live.poll_once())
+
+    mine = live.snapshot().my_team
+    assert mine is not None and mine.open_slots == 0
+    assert live._walkaway_task is None
+
+
+def test_a_failed_precompute_is_reported_and_does_not_take_the_cockpit_down(
+    store: OverrideStore, monkeypatch: Any
+) -> None:
+    """The cockpit's job is to keep answering the ledger question even when the expensive
+    optional one fails."""
+
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("solver exploded")
+
+    monkeypatch.setattr("draft_intel.api.live.walkaway_board", boom)
+    live = _at(100, store)
+    asyncio.run(_poll_and_wait(live))
+
+    snap = live.snapshot()
+    assert snap.walkaway.state == "absent"
+    assert "solver exploded" in snap.walkaway.detail
+    assert snap.total_remaining > 0, "the ledger still reports"

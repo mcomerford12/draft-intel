@@ -50,7 +50,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from draft_intel.api.live import LiveDraft, LiveSnapshot
+from draft_intel.api.live import BlockView, LiveDraft, LiveSnapshot
 from draft_intel.cli import LEAGUE_ID, REAL_DRAFT_ID
 from draft_intel.prep import build_pipeline
 from draft_intel.sleeper.client import SleeperClient
@@ -207,8 +207,15 @@ def create_app(
     """
     base = root or ROOT
     overrides = store or OverrideStore(base / "config" / "value_overrides.yaml")
+    # `precompute=poll`: curve precomputation only makes sense while actually polling a live
+    # draft, and both are expensive enough that neither should start because something imported
+    # this module.
     live = live_draft or LiveDraft(
-        base, league_id=LEAGUE_ID, draft_id=REAL_DRAFT_ID, store=overrides
+        base,
+        league_id=LEAGUE_ID,
+        draft_id=REAL_DRAFT_ID,
+        store=overrides,
+        precompute=poll,
     )
 
     @asynccontextmanager
@@ -544,6 +551,13 @@ def _render_live(snap: LiveSnapshot) -> str:
     text-transform:uppercase }}
   .fig .v {{ font:600 30px/1.1 ui-monospace,monospace; font-variant-numeric:tabular-nums }}
   .fig .v.hi {{ color:var(--good) }} .fig .v.lo {{ color:var(--bad) }}
+  .fig .v.none {{ color:var(--muted) }}
+  .wa-note {{ margin:10px 0 0; font-size:13.5px; color:var(--muted); max-width:74ch }}
+  .wa-note.bad {{ color:var(--bad) }}
+  .wa-chart {{ margin:12px 0 0; max-width:520px }}
+  .wa-chart svg {{ width:100%; height:auto; display:block }}
+  .wa-lbl {{ font:10px ui-monospace,monospace }}
+  .wa-cap {{ font-size:12px; color:var(--muted); margin-top:2px }}
   table {{ width:100%; border-collapse:collapse; background:var(--surface);
     border:1px solid var(--line) }}
   th,td {{ padding:6px 10px; text-align:right; border-bottom:1px solid var(--line);
@@ -727,9 +741,96 @@ def _block_html(snap: LiveSnapshot) -> str:
         f'<div class="v">${block.clears_the_field}</div></div>'
         f'<div class="fig"><div class="k">contenders</div>'
         f'<div class="v">{block.contenders}</div></div>'
-        f"</div>{note}</div>"
+        f'<div class="fig"><div class="k">walk away above</div>'
+        f'<div class="v {"" if block.walk_away is not None else "none"}">'
+        f"{f'${block.walk_away}' if block.walk_away is not None else '—'}</div></div>"
+        f"</div>{note}{_walkaway_html(block, snap)}</div>"
         f"<h2>who else wants {escape(block.position)}</h2>"
         f'<ul class="plain">{ladder}</ul>'
+    )
+
+
+def _walkaway_html(block: BlockView, snap: LiveSnapshot) -> str:
+    """The curve, its caveats, and the state of the board it came from.
+
+    The number alone is not enough to act on. "Walk away above $34" computed for a budget you
+    no longer have is worse than no number, so the board's own staleness travels with it —
+    §4.8's rule about never letting a figure appear without what qualifies it, applied to the
+    one figure the user will act on fastest.
+    """
+    bits: list[str] = []
+    status = snap.walkaway
+    if block.walk_away_note:
+        bits.append(f'<p class="wa-note">{escape(block.walk_away_note)}</p>')
+    if not block.curve_trustworthy:
+        bits.append(
+            '<p class="wa-note bad">The curve is not monotone — it rises somewhere, so these '
+            "deltas cannot be read as a walk-away price. Treat the number above as unusable.</p>"
+        )
+    if block.curve:
+        bits.append(_curve_svg(block))
+    if status.state != "current":
+        cls = "bad" if status.state == "stale" else ""
+        bits.append(f'<p class="wa-note {cls}">Curve board: {escape(status.detail)}</p>')
+    return "".join(bits)
+
+
+def _curve_svg(block: BlockView) -> str:
+    """§4.7b's picture: price on x, Δ starting points on y, with the crossing marked.
+
+    Drawn inline rather than with a library because it is a dozen points and one zero line, and
+    the crossing *is* the answer — the price where buying stops improving the team. Everything
+    else on the chart exists to make that one x-position readable.
+
+    Colours come from the theme tokens so it holds in both, and the viewBox leaves room for the
+    outermost labels rather than clipping them.
+    """
+    prices = [p for p, _ in block.curve]
+    deltas = [d for _, d in block.curve]
+    if len(prices) < 2:
+        return ""
+    w, h, pad_l, pad_r, pad_t, pad_b = 460, 130, 38, 14, 12, 26
+    lo_x, hi_x = min(prices), max(prices)
+    lo_y, hi_y = min(min(deltas), 0.0), max(max(deltas), 0.0)
+    span_x = max(1, hi_x - lo_x)
+    span_y = (hi_y - lo_y) or 1.0
+
+    def px(v: float) -> float:
+        return pad_l + (v - lo_x) / span_x * (w - pad_l - pad_r)
+
+    def py(v: float) -> float:
+        return pad_t + (hi_y - v) / span_y * (h - pad_t - pad_b)
+
+    zero = py(0.0)
+    line = " ".join(f"{px(p):.1f},{py(d):.1f}" for p, d in block.curve)
+    marker = ""
+    if block.walk_away is not None and lo_x <= block.walk_away <= hi_x:
+        x = px(block.walk_away)
+        marker = (
+            f'<line x1="{x:.1f}" y1="{pad_t}" x2="{x:.1f}" y2="{h - pad_b}" '
+            f'stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="3 3"/>'
+            f'<text x="{x:.1f}" y="{pad_t + 9}" class="wa-lbl" text-anchor="middle" '
+            f'fill="var(--warn)">${block.walk_away}</text>'
+        )
+    return (
+        f'<div class="wa-chart"><svg viewBox="0 0 {w} {h}" role="img" '
+        f'aria-label="walk-away curve for {escape(block.name)}: '
+        f'change in starting points against price">'
+        f'<line x1="{pad_l}" y1="{zero:.1f}" x2="{w - pad_r}" y2="{zero:.1f}" '
+        f'stroke="var(--line)" stroke-width="1"/>'
+        f'<text x="{pad_l - 6}" y="{zero + 3:.1f}" class="wa-lbl" text-anchor="end" '
+        f'fill="var(--muted)">0</text>'
+        f'<polyline points="{line}" fill="none" stroke="var(--accent)" stroke-width="2" '
+        f'stroke-linejoin="round"/>'
+        f"{marker}"
+        f'<text x="{pad_l}" y="{h - 8}" class="wa-lbl" fill="var(--muted)">${lo_x}</text>'
+        f'<text x="{w - pad_r}" y="{h - 8}" class="wa-lbl" text-anchor="end" '
+        f'fill="var(--muted)">${hi_x}</text>'
+        f'<text x="{pad_l - 6}" y="{pad_t + 8}" class="wa-lbl" text-anchor="end" '
+        f'fill="var(--muted)">{hi_y:+.0f}</text>'
+        f"</svg>"
+        f'<div class="wa-cap">&Delta; starting points against price. The team stops improving '
+        f"where the line crosses zero.</div></div>"
     )
 
 
