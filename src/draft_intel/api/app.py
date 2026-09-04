@@ -39,14 +39,21 @@ picks, no budgets, no bidding. Sprint 3 owns that.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from html import escape
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+from draft_intel.api.live import BlockView, LiveDraft, LiveSnapshot
+from draft_intel.cli import LEAGUE_ID, REAL_DRAFT_ID
 from draft_intel.prep import build_pipeline
+from draft_intel.sleeper.client import SleeperClient
 from draft_intel.store.overrides import OverrideStore, ValueOverride
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -169,11 +176,67 @@ def price_rows(root: Path, store: OverrideStore) -> list[PriceRow]:
     return rows
 
 
-def create_app(root: Path | None = None, store: OverrideStore | None = None) -> FastAPI:
-    """Build the app. ``root`` and ``store`` are injectable so tests never touch real config."""
+class NominateRequest(BaseModel):
+    """Who is on the block. ``null`` clears it.
+
+    Typed by hand, deliberately: Sleeper publishes completed picks over REST and nothing else,
+    and charter §2 forbids reverse-engineering the websocket that carries the live nomination.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    player_id: str | None = None
+
+
+def create_app(
+    root: Path | None = None,
+    store: OverrideStore | None = None,
+    *,
+    live_draft: LiveDraft | None = None,
+    poll: bool = False,
+) -> FastAPI:
+    """Build the app. ``root`` and ``store`` are injectable so tests never touch real config.
+
+    Args:
+        live_draft: The cockpit's draft poller. Injected by tests with a fake client; built
+            against the real league when omitted.
+        poll: Whether to start the background poll loop. **Off by default**, so importing or
+            testing this app never opens a socket to Sleeper — ``make cockpit`` turns it on.
+            A test suite that quietly polls a live draft is one that fails on draft night for
+            reasons nobody can reproduce.
+    """
     base = root or ROOT
     overrides = store or OverrideStore(base / "config" / "value_overrides.yaml")
-    app = FastAPI(title="draft-intel", docs_url="/docs")
+    # `precompute=poll`: curve precomputation only makes sense while actually polling a live
+    # draft, and both are expensive enough that neither should start because something imported
+    # this module.
+    live = live_draft or LiveDraft(
+        base,
+        league_id=LEAGUE_ID,
+        draft_id=REAL_DRAFT_ID,
+        store=overrides,
+        precompute=poll,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        if not poll:
+            yield
+            return
+        # One httpx client for the whole session, closed on shutdown. The rate floor, retry,
+        # backoff and circuit breaker all live in `SleeperClient` and are shared with `smoke`
+        # and `replay`; the cockpit gets them by using the same class rather than by promising
+        # to be careful.
+        async with httpx.AsyncClient() as http:
+            if live.client is None:
+                live.client = SleeperClient(client=http)
+            task = asyncio.create_task(live.run())
+            try:
+                yield
+            finally:
+                task.cancel()
+
+    app = FastAPI(title="draft-intel", docs_url="/docs", lifespan=lifespan)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -234,6 +297,39 @@ def create_app(root: Path | None = None, store: OverrideStore | None = None) -> 
             live_money=built.board.total_live_money,
             orphans=built.orphan_overrides,
         )
+
+    # ------------------------------------------------------------------ the cockpit
+
+    @app.get("/api/live")
+    def api_live() -> LiveSnapshot:
+        return live.snapshot()
+
+    @app.get("/api/live/search")
+    def api_live_search(q: str = "") -> list[dict[str, str | float]]:
+        """Name search for typing a nomination. Names resolve a lookup and decide nothing."""
+        return [
+            {
+                "player_id": player.player_id,
+                "name": player.name,
+                "position": player.position,
+                "live_value": round(player.baseline_value, 2),
+                "is_keeper": str(player.is_keeper).lower(),
+            }
+            for player in live.find(q)
+        ]
+
+    @app.post("/api/live/nominate")
+    def api_nominate(request: NominateRequest) -> LiveSnapshot:
+        if request.player_id is not None and not any(
+            p.player_id == request.player_id for p in live.pipeline.board.players
+        ):
+            raise HTTPException(404, f"no player {request.player_id!r} on the board")
+        live.nominate(request.player_id)
+        return live.snapshot()
+
+    @app.get("/live", response_class=HTMLResponse)
+    def live_page() -> str:
+        return _render_live(live.snapshot())
 
     return app
 
@@ -407,4 +503,344 @@ def _row_html(row: PriceRow) -> str:
     )
 
 
+def _render_live(snap: LiveSnapshot) -> str:
+    """The cockpit. Read at a glance, mid-nomination, while somebody is shouting numbers.
+
+    Every layout decision here follows from that: the block sits at the top at display size, the
+    threat ladder is one column you scan downward, and anything that makes the numbers
+    untrustworthy is a full-width bar above them rather than a badge beside them. The page
+    re-fetches ``/api/live`` on a timer and repaints; there is no framework, because a table and
+    a fetch do not need one.
+    """
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cockpit — draft-intel</title>
+<style>
+  :root {{
+    --ground:#f5f6f4; --surface:#fff; --line:#dadeda; --ink:#171d1a; --muted:#6a756f;
+    --accent:#0f6e62; --warn:#96701a; --warn-bg:#96701a1a; --bad:#a3271e; --bad-bg:#a3271e14;
+    --good:#0f6e62;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{
+      --ground:#0d1412; --surface:#141c19; --line:#26312c; --ink:#e6ede9; --muted:#8a968f;
+      --accent:#4fbeab; --warn:#d4a63f; --warn-bg:#d4a63f22; --bad:#e5776b; --bad-bg:#e5776b1c;
+      --good:#4fbeab;
+    }}
+  }}
+  * {{ box-sizing:border-box }}
+  body {{ margin:0; background:var(--ground); color:var(--ink); font:15px/1.5
+    "IBM Plex Sans",ui-sans-serif,system-ui,sans-serif }}
+  .wrap {{ max-width:1180px; margin:0 auto; padding:18px 20px 64px }}
+  h1 {{ font:600 20px/1.1 "IBM Plex Serif",ui-serif,Georgia,serif; margin:0 0 2px }}
+  h2 {{ font:600 11px/1.4 ui-monospace,monospace; letter-spacing:.09em; text-transform:uppercase;
+    color:var(--muted); margin:26px 0 8px }}
+  .bar {{ padding:9px 13px; border-radius:4px; margin:0 0 10px; font-size:14px }}
+  .bar.bad {{ background:var(--bad-bg); color:var(--bad); border:1px solid var(--bad) }}
+  .bar.warn {{ background:var(--warn-bg); color:var(--warn); border:1px solid var(--warn) }}
+  .status {{ display:flex; gap:18px; align-items:baseline; color:var(--muted);
+    font:12px ui-monospace,monospace; margin:0 0 14px }}
+  .status b {{ color:var(--ink) }}
+  .status .live {{ color:var(--good) }} .status .dead {{ color:var(--bad) }}
+  .block {{ background:var(--surface); border:1px solid var(--line); border-radius:5px;
+    padding:16px 18px; margin:0 0 8px }}
+  .block .who {{ font:600 24px/1.2 "IBM Plex Serif",ui-serif,Georgia,serif }}
+  .figs {{ display:flex; gap:30px; flex-wrap:wrap; margin:12px 0 0 }}
+  .fig .k {{ font:600 10px ui-monospace,monospace; letter-spacing:.08em; color:var(--muted);
+    text-transform:uppercase }}
+  .fig .v {{ font:600 30px/1.1 ui-monospace,monospace; font-variant-numeric:tabular-nums }}
+  .fig .v.hi {{ color:var(--good) }} .fig .v.lo {{ color:var(--bad) }}
+  .fig .v.none {{ color:var(--muted) }}
+  .wa-note {{ margin:10px 0 0; font-size:13.5px; color:var(--muted); max-width:74ch }}
+  .wa-note.bad {{ color:var(--bad) }}
+  .wa-chart {{ margin:12px 0 0; max-width:520px }}
+  .wa-chart svg {{ width:100%; height:auto; display:block }}
+  .wa-lbl {{ font:10px ui-monospace,monospace }}
+  .wa-cap {{ font-size:12px; color:var(--muted); margin-top:2px }}
+  table {{ width:100%; border-collapse:collapse; background:var(--surface);
+    border:1px solid var(--line) }}
+  th,td {{ padding:6px 10px; text-align:right; border-bottom:1px solid var(--line);
+    font-variant-numeric:tabular-nums }}
+  th {{ font:600 10px/1.4 ui-monospace,monospace; letter-spacing:.09em; text-transform:uppercase;
+    color:var(--muted) }}
+  th.l,td.l {{ text-align:left }}
+  tr.me {{ background:#0f6e620f; font-weight:600 }}
+  @media (prefers-color-scheme: dark) {{ tr.me {{ background:#4fbeab14 }} }}
+  tr.out td {{ color:var(--muted) }}
+  .sus {{ color:var(--bad); font-weight:600 }}
+  ul.plain {{ margin:0; padding:0; list-style:none }}
+  ul.plain li {{ padding:4px 0; border-bottom:1px solid var(--line); font-size:14px }}
+  input {{ width:320px; padding:6px 9px; font:inherit; border:1px solid var(--line);
+    border-radius:3px; background:var(--surface); color:var(--ink) }}
+  .hits {{ margin:6px 0 0; padding:0; list-style:none }}
+  .hits li {{ padding:4px 0 }}
+  .hits button {{ font:inherit; text-align:left; width:100%; padding:5px 9px; cursor:pointer;
+    border:1px solid var(--line); border-radius:3px; background:var(--surface); color:var(--ink) }}
+  .hits button:hover {{ border-color:var(--accent); color:var(--accent) }}
+</style></head><body><div class="wrap">
+<h1>Cockpit</h1>
+<div id="app">{_live_body(snap)}</div>
+<h2>who is up</h2>
+<input id="q" autocomplete="off"
+  placeholder="type a name, then pick" aria-label="nominate a player">
+<ul class="hits" id="hits"></ul>
+<script>
+async function repaint() {{
+  try {{
+    const res = await fetch("/api/live");
+    if (!res.ok) return;
+    const html = await (await fetch("/live")).text();
+    const body = html.split('<div id="app">')[1].split("</div>\\n<h2>who is up")[0];
+    document.getElementById("app").innerHTML = body;
+  }} catch (e) {{ /* a failed repaint leaves the last reading and its age on screen */ }}
+}}
+setInterval(repaint, 2000);
+
+const q = document.getElementById("q"), hits = document.getElementById("hits");
+let timer = null;
+q.addEventListener("input", () => {{
+  clearTimeout(timer);
+  timer = setTimeout(async () => {{
+    hits.innerHTML = "";
+    if (!q.value.trim()) return;
+    const rows = await (await fetch(`/api/live/search?q=${{encodeURIComponent(q.value)}}`)).json();
+    for (const row of rows) {{
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.textContent = `${{row.name}} · ${{row.position}} · $${{row.live_value}}`
+        + (row.is_keeper === "true" ? " · KEEPER" : "");
+      b.onclick = async () => {{
+        await fetch("/api/live/nominate", {{
+          method: "POST", headers: {{ "Content-Type": "application/json" }},
+          body: JSON.stringify({{ player_id: row.player_id }}),
+        }});
+        q.value = ""; hits.innerHTML = ""; repaint();
+      }};
+      li.appendChild(b); hits.appendChild(li);
+    }}
+  }}, 180);
+}});
+</script>
+</div></body></html>"""
+
+
+def _live_body(snap: LiveSnapshot) -> str:
+    """The part that repaints. Kept separate so the poll loop replaces only what changed."""
+    out: list[str] = []
+
+    for blocker in snap.blockers:
+        out.append(f'<div class="bar bad">{escape(blocker)}</div>')
+    if snap.stale:
+        # The failure this module exists to prevent: numbers that stopped updating and look
+        # exactly like numbers that did not.
+        out.append(
+            f'<div class="bar bad">NOT LIVE — last good reading {snap.age_seconds:.0f}s ago '
+            f"({escape(snap.connection)}). Every figure below is that old.</div>"
+        )
+
+    live_class = "live" if not snap.stale else "dead"
+    out.append(
+        f'<div class="status">'
+        f'<span class="{live_class}">● {escape(snap.connection)}</span>'
+        f"<span>{snap.age_seconds:.0f}s ago</span>"
+        f"<span>draft <b>{escape(snap.draft_status)}</b></span>"
+        f"<span><b>{snap.picks_seen}</b> picks, <b>{snap.competitive_picks}</b> competitive</span>"
+        f"<span>room has <b>${snap.total_remaining:,}</b> for "
+        f"<b>{snap.total_open_slots}</b> slots</span>"
+        f"</div>"
+    )
+
+    out.append(_block_html(snap))
+
+    out.append("<h2>the room</h2><table><thead><tr>")
+    out.append(
+        '<th class="l">team</th><th>keep</th><th>picks</th><th>spent</th><th>left</th>'
+        "<th>slots</th><th>max bid</th></tr></thead><tbody>"
+    )
+    for team in sorted(snap.teams, key=lambda t: (-t.max_bid, t.slot)):
+        classes = " ".join(c for c, on in (("me", team.is_me), ("out", team.max_bid == 0)) if on)
+        suspect = ' <span class="sus">⚠ SUSPECT</span>' if team.figures_suspect else ""
+        out.append(
+            f'<tr class="{classes}"><td class="l">{escape(team.owner)}{suspect}</td>'
+            f"<td>{team.keepers}</td><td>{team.filled_slots}</td><td>${team.spent}</td>"
+            f"<td>${team.remaining}</td><td>{team.open_slots}</td><td>${team.max_bid}</td></tr>"
+        )
+    out.append("</tbody></table>")
+
+    out.append("<h2>inflation</h2>")
+    direction = "over" if snap.inflation >= 1.0 else "under"
+    out.append(
+        f'<div class="block"><div class="figs"><div class="fig">'
+        f'<div class="k">live inflation</div>'
+        f'<div class="v">{snap.inflation:.2f}x</div></div></div>'
+        f'<p style="color:var(--muted);margin:10px 0 0;font-size:14px">'
+        f"{escape(snap.inflation_detail)}</p></div>"
+    )
+    del direction
+    if snap.positions:
+        out.append('<ul class="plain">')
+        out += [f"<li>{escape(line)}</li>" for line in snap.positions]
+        out.append("</ul>")
+
+    if snap.alerts:
+        out.append('<h2>alerts</h2><ul class="plain">')
+        out += [f"<li>{escape(alert)}</li>" for alert in snap.alerts]
+        out.append("</ul>")
+
+    return "\n".join(out)
+
+
+def _block_html(snap: LiveSnapshot) -> str:
+    block = snap.block
+    if block is None:
+        return (
+            '<div class="block"><div class="who" style="color:var(--muted)">'
+            "nobody on the block</div>"
+            '<p style="color:var(--muted);margin:8px 0 0">Type a name below when the room '
+            "nominates. Sleeper does not publish the nomination over its public API, so this "
+            "is the one thing you tell the tool rather than the other way round.</p></div>"
+        )
+
+    if block.already_drafted_by is not None:
+        head = (
+            f'<div class="bar warn">{escape(block.name)} is already rostered by '
+            f"{escape(block.already_drafted_by)} — bidding on this one is over.</div>"
+        )
+    elif block.blacklisted:
+        head = (
+            f'<div class="bar warn">{escape(block.name)} is blacklisted. You told the tool '
+            f"never to bid, whatever the number says.</div>"
+        )
+    else:
+        head = ""
+
+    # `hi`/`lo` on the max bid, not on the value: the value is a projection and colouring it
+    # would read as advice, while the max bid is arithmetic and zero genuinely means stop.
+    max_class = "lo" if block.my_max_bid == 0 else "hi"
+    ladder = "".join(f"<li>{escape(line)}</li>" for line in block.ladder)
+    note = (
+        f'<p style="color:var(--warn);margin:10px 0 0;font-size:14px">your note: '
+        f"{escape(block.tier_note)}</p>"
+        if block.tier_note
+        else ""
+    )
+    return (
+        f"{head}"
+        f'<div class="block">'
+        f'<div class="who">{escape(block.name)} '
+        f'<span style="color:var(--muted);font-size:15px">{escape(block.position)}</span></div>'
+        f'<div class="figs">'
+        f'<div class="fig"><div class="k">worth to you</div>'
+        f'<div class="v">${block.my_value:,.0f}</div></div>'
+        f'<div class="fig"><div class="k">at today\'s inflation</div>'
+        f'<div class="v">${block.inflation_adjusted:,.0f}</div></div>'
+        f'<div class="fig"><div class="k">your max bid</div>'
+        f'<div class="v {max_class}">${block.my_max_bid}</div></div>'
+        f'<div class="fig"><div class="k">clears the field</div>'
+        f'<div class="v">${block.clears_the_field}</div></div>'
+        f'<div class="fig"><div class="k">contenders</div>'
+        f'<div class="v">{block.contenders}</div></div>'
+        f'<div class="fig"><div class="k">walk away above</div>'
+        f'<div class="v {"" if block.walk_away is not None else "none"}">'
+        f"{f'${block.walk_away}' if block.walk_away is not None else '—'}</div></div>"
+        f"</div>{note}{_walkaway_html(block, snap)}</div>"
+        f"<h2>who else wants {escape(block.position)}</h2>"
+        f'<ul class="plain">{ladder}</ul>'
+    )
+
+
+def _walkaway_html(block: BlockView, snap: LiveSnapshot) -> str:
+    """The curve, its caveats, and the state of the board it came from.
+
+    The number alone is not enough to act on. "Walk away above $34" computed for a budget you
+    no longer have is worse than no number, so the board's own staleness travels with it —
+    §4.8's rule about never letting a figure appear without what qualifies it, applied to the
+    one figure the user will act on fastest.
+    """
+    bits: list[str] = []
+    status = snap.walkaway
+    if block.walk_away_note:
+        bits.append(f'<p class="wa-note">{escape(block.walk_away_note)}</p>')
+    if not block.curve_trustworthy:
+        bits.append(
+            '<p class="wa-note bad">The curve is not monotone — it rises somewhere, so these '
+            "deltas cannot be read as a walk-away price. Treat the number above as unusable.</p>"
+        )
+    if block.curve:
+        bits.append(_curve_svg(block))
+    if status.state != "current":
+        cls = "bad" if status.state == "stale" else ""
+        bits.append(f'<p class="wa-note {cls}">Curve board: {escape(status.detail)}</p>')
+    return "".join(bits)
+
+
+def _curve_svg(block: BlockView) -> str:
+    """§4.7b's picture: price on x, Δ starting points on y, with the crossing marked.
+
+    Drawn inline rather than with a library because it is a dozen points and one zero line, and
+    the crossing *is* the answer — the price where buying stops improving the team. Everything
+    else on the chart exists to make that one x-position readable.
+
+    Colours come from the theme tokens so it holds in both, and the viewBox leaves room for the
+    outermost labels rather than clipping them.
+    """
+    prices = [p for p, _ in block.curve]
+    deltas = [d for _, d in block.curve]
+    if len(prices) < 2:
+        return ""
+    w, h, pad_l, pad_r, pad_t, pad_b = 460, 130, 38, 14, 12, 26
+    lo_x, hi_x = min(prices), max(prices)
+    lo_y, hi_y = min(min(deltas), 0.0), max(max(deltas), 0.0)
+    span_x = max(1, hi_x - lo_x)
+    span_y = (hi_y - lo_y) or 1.0
+
+    def px(v: float) -> float:
+        return pad_l + (v - lo_x) / span_x * (w - pad_l - pad_r)
+
+    def py(v: float) -> float:
+        return pad_t + (hi_y - v) / span_y * (h - pad_t - pad_b)
+
+    zero = py(0.0)
+    line = " ".join(f"{px(p):.1f},{py(d):.1f}" for p, d in block.curve)
+    marker = ""
+    if block.walk_away is not None and lo_x <= block.walk_away <= hi_x:
+        x = px(block.walk_away)
+        marker = (
+            f'<line x1="{x:.1f}" y1="{pad_t}" x2="{x:.1f}" y2="{h - pad_b}" '
+            f'stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="3 3"/>'
+            f'<text x="{x:.1f}" y="{pad_t + 9}" class="wa-lbl" text-anchor="middle" '
+            f'fill="var(--warn)">${block.walk_away}</text>'
+        )
+    return (
+        f'<div class="wa-chart"><svg viewBox="0 0 {w} {h}" role="img" '
+        f'aria-label="walk-away curve for {escape(block.name)}: '
+        f'change in starting points against price">'
+        f'<line x1="{pad_l}" y1="{zero:.1f}" x2="{w - pad_r}" y2="{zero:.1f}" '
+        f'stroke="var(--line)" stroke-width="1"/>'
+        f'<text x="{pad_l - 6}" y="{zero + 3:.1f}" class="wa-lbl" text-anchor="end" '
+        f'fill="var(--muted)">0</text>'
+        f'<polyline points="{line}" fill="none" stroke="var(--accent)" stroke-width="2" '
+        f'stroke-linejoin="round"/>'
+        f"{marker}"
+        f'<text x="{pad_l}" y="{h - 8}" class="wa-lbl" fill="var(--muted)">${lo_x}</text>'
+        f'<text x="{w - pad_r}" y="{h - 8}" class="wa-lbl" text-anchor="end" '
+        f'fill="var(--muted)">${hi_x}</text>'
+        f'<text x="{pad_l - 6}" y="{pad_t + 8}" class="wa-lbl" text-anchor="end" '
+        f'fill="var(--muted)">{hi_y:+.0f}</text>'
+        f"</svg>"
+        f'<div class="wa-cap">&Delta; starting points against price. The team stops improving '
+        f"where the line crosses zero.</div></div>"
+    )
+
+
 app = create_app()
+
+
+def cockpit() -> FastAPI:
+    """The app with live polling on. ``make cockpit``'s entry point.
+
+    A factory rather than a module-level instance because ``poll=True`` opens a socket to
+    Sleeper, and that must never happen merely because something imported this module.
+    """
+    return create_app(poll=True)

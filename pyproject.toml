@@ -39,7 +39,9 @@ packages = ["src/draft_intel"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+# `tools` joins the source roots so the rehearsal harness sorts as first-party. It is project
+# code that tests import, not a dependency.
+src = ["src", "tests", "."]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
@@ -48,7 +50,7 @@ ignore = ["B008"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "tools"]
 plugins = []
 
 [[tool.mypy.overrides]]

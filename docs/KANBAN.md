@@ -38,7 +38,7 @@ you cannot sanity-check. The draft is 2026-09-05 19:00 MDT.
 
 ## Blocked
 
-### [DI-043] Six managers have not joined the league — manifest cannot fully resolve
+### [DI-043] Three managers have not joined the league — manifest cannot fully resolve
 - **Sprint:** 1 · **Owner:** user/commissioner · **Size:** S · **Surfaced by:** DI-EVAL-1 B1
 - **Live check 2026-09-02: 5 of 10 have now joined.** `jswilliams5` holds roster 5, up from the
   four this card was written against. Still 8 of 20 keeper keys resolved, because a joined
@@ -49,12 +49,19 @@ you cannot sanity-check. The draft is 2026-09-05 19:00 MDT.
   classifies that team's two keepers as competitive bids, poisoning skew, inflation and every
   tendency profile for the whole draft. Asked rather than guessed; the reasoning is recorded in
   `config/owners.yaml` so the next mapping is confirmed the same way.
-- **Keeper resolution 8/20 → 10/20.** Verified against the live league, not the fixture.
+- **Live check 2026-09-04: 7 of 10 have now joined.** `keenankid17` holds draft slot 6 and
+  `willdeann` slot 7. Both were joined but *unmapped* — the alias table did not know their
+  display names — so their four keepers were still counted as unresolved while the managers
+  themselves were sitting in the draft room. Confirmed by the user, not inferred, and recorded
+  in `config/owners.yaml` with who confirmed and when, per the rule the `jswilliams5` episode
+  established.
+- **Keeper resolution 8/20 → 10/20 → 14/20.** Verified against the live league, not the fixture.
 - Mapped: `mattchupiccu`→Me, `ajthebeard`→AJ, `MasonWAlpert`→Mason, `steeveegee300`→Steve,
-  `jswilliams5`→Jake.
-- Still unjoined, blocking the remaining 10 keys: **Connor, Keenan, Willie, Burt, TD** — draft
-  slots 6-10. `manifest_keys(require=20)` raises loudly rather than silently classifying their
-  keepers as competitive bids.
+  `jswilliams5`→Jake, `keenankid17`→Keenan, `willdeann`→Willie.
+- Still unjoined, blocking the remaining 6 keys: **Connor, Burt, TD** — draft slots 8, 9, 10.
+  `manifest_keys(require=20)` raises loudly rather than silently classifying their keepers as
+  competitive bids; the cockpit (DI-064) instead runs and raises a persistent blocker naming
+  them, per ADR-0002's D4.
 - **Acceptance criteria:**
   - [ ] All 10 managers joined; `build_identity(...).is_complete(10)` is true
   - [ ] `config/owners.yaml` maps all 10 manifest owners to display names
@@ -2471,6 +2478,180 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-064] The draft-night cockpit
+
+- **Sprint:** 3 · **Owner:** backend-engineer · **Size:** L
+  · **Branch:** `di-064-live-cockpit`
+- **Why:** everything in Sprints 1 and 2 was built, tested, and had no surface that runs
+  *during* the auction. The poller parses picks, the ledger folds them, the valuation prices the
+  board and the affordability engine ranks who can outbid you — and the only way to see any of it
+  was a report printed before the draft started.
+- **What it answers**, at a glance, mid-nomination: what is this player worth to me, what should
+  they cost at tonight's inflation, what is my max bid, who else can still bid, and above what
+  price does each of them drop out.
+- **The nomination is typed by hand.** Sleeper publishes completed picks over REST and nothing
+  else; the live nomination and bid clock exist only on the internal websocket that charter §2
+  forbids reverse-engineering. This is Finding 11's manual layer, which the user decided to keep.
+- **Acceptance criteria:**
+  - [x] `GET /live`, `GET /api/live`, `GET /api/live/search`, `POST /api/live/nominate`
+  - [x] reproduces the Sprint 1 golden ledger through its own polling path — $199/$200/$195/
+        $200/$200/$200/$200/$200/$185/$200, 140 competitive picks, zero alerts
+  - [x] **staleness is a first-class failure**: every snapshot carries its age, a failed poll
+        keeps the last reading *and* says the connection broke, and a reading that merely ages
+        out is marked NOT LIVE even while the connection string still reads healthy
+  - [x] **blockers are separate from alerts** — an alert is something that happened; a blocker
+        is something wrong now that makes the numbers beside it untrustworthy
+  - [x] a player already bought says so instead of quoting a max bid for them
+  - [x] the block uses the user's overridden price, and the pipeline rebuilds when
+        `value_overrides.yaml` changes, so a 7:40pm retune on `/prices` reaches the cockpit
+  - [x] `poll=False` by default: importing or testing the app never opens a socket to Sleeper
+- **The defect this card found, and the reason it was nearly invisible.** The first working
+  build showed slot 1 as AJ. The live league has slot 1 as Mason. `Pipeline.identity` is built
+  from `fixtures/draft.json` — the **mock** draft — which is right for `make prep` (a report
+  about the mock) and catastrophic for the cockpit. The keeper classifier keys on
+  `(slot, player_id)`, so the mock's seating would have checked all twenty keepers against the
+  wrong seats, matched none, and read them as competitive bids: the most expensive picks of the
+  night, silently poisoning inflation, skew, tendencies and every threat read — while the page
+  looked completely healthy.
+
+  | slot | mock (`fixtures/draft.json`) | live league |
+  |---|---|---|
+  | 1 | AJ | Mason |
+  | 2 | Jake | AJ |
+  | **3** | **Matt** | **Matt** |
+  | 4 | Mason | Steve |
+  | 5 | Connor | Jake |
+
+  **The user is slot 3 in both.** The one seat anybody would check by eye is the one seat that
+  agrees. Fixed by resolving `slot → owner` from the live league on a 60s timer through the
+  `slot_to_roster_id` → `/rosters` → `/users` join (the real draft object carries no
+  `slot_name_*` keys at all — Sprint 0, Finding 9), rebuilding the classifier whenever seating
+  changes, and **refusing to fall back to the mock**: before the join succeeds, `identity` is
+  `None`, slots are labelled by number, and a blocker says so.
+- **Verified against the live league**, not just the fixture: seating resolves to Mason/AJ/Matt/
+  Steve/Jake/Keenan/Willie, slots 8–10 are numbered rather than guessed, and the blocker reads
+  *"6 of 20 keepers cannot be placed (Burt, Connor, TD have not joined)"*.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
+### [DI-065] The 160-pick draft-night rehearsal
+
+- **Sprint:** 4 · **Owner:** test-engineer · **Size:** M · **Branch:** `di-064-live-cockpit`
+- **Why:** every other test feeds the ledger a finished array and checks the total. Nothing fed
+  it a draft *as it happens*. That is the only shape in which a whole class of defect appears:
+  state correct at pick 160 and wrong at pick 40, a figure that drifts rather than breaks, a poll
+  that fits its budget early and not late.
+- **What it does:** `make rehearsal` serves `fixtures/picks.json` one pick at a time through the
+  real `LiveDraft.poll_once`, nominates the player about to be bought at each step, and checks
+  **13 invariants after every one of the 160 picks** — money conservation, no negative budget,
+  max bid within budget, roster capacity, keeper cap, every pick lands on somebody, feed read
+  fully, freshness, no alerts, no blockers, block max bid honest. Then four chaos cases. Exits
+  non-zero on any violation, so it can gate a release.
+- **Result: PASSED.** 160 picks, every invariant at every pick, final ledger identical to the
+  Sprint 1 golden file — reached by a second independent route.
+- **Chaos, run on a live instance rather than a fresh one** (the transition is the thing that
+  happens on the night, not the end state):
+  - restart mid-draft → a new process at pick 100 rebuilds the identical ledger
+  - pick removed → slot 9 went $170 → $165, 10 → 9 picks, refunded exactly $5
+  - pick amended → $170 → $177 in one cycle, money still conserves
+  - connection drops → kept $93 on screen, marked stale, named the failure
+  - **not rehearsed, and named rather than skipped:** a mid-draft budget correction. Override
+    events exist in the ledger; the cockpit has no surface that emits one. A cockpit gap.
+- **The defect it found — a false comment and a 78x cost, in one place.** `_fold` called
+  `replay_all`, justified by a comment claiming it "drives the snapshot diff, so a commissioner
+  reversing or amending a pick produces the PickRemoved and PickAmended the ledger knows how to
+  fold." **It does not.** `replay_events` diffs *within a single payload*, where the array only
+  grows and no pick changes — verified: 160 of 160 events were `pick_observed`, zero removals,
+  zero amendments, on a full feed and on one with a pick deleted.
+
+  Corrections were handled, but by ADR-0001's actual mechanism: **there is no incremental state
+  to correct.** Every poll refolds the whole log, so a reversed pick is just a shorter feed.
+
+  Meanwhile `replay_all` re-parsed `payload[:i]` for every `i`. Proven identical output —
+  same events *and* same `DerivedState` across a full feed, a removal, an amendment, an
+  unsorted feed, and one carrying an unparseable row — for **101ms against 1.3ms** at 160
+  picks, inside every poll cycle.
+
+  | | before | after |
+  |---|---|---|
+  | poll p50 | 26.4 ms | **1.5 ms** |
+  | poll p95 | 95.8 ms | **2.5 ms** |
+  | poll max | 106.3 ms | **15.1 ms** |
+  | growth pick 20 → 160 | 3 ms → 98 ms | 1 ms → 2 ms |
+
+  Never near the 1,500 ms cycle budget either way — this is not a near miss that was rescued.
+  It is a quadratic on the live path with a false justification attached, and both are gone.
+- **Acceptance criteria:**
+  - [x] 160 picks through the real poll path, invariants checked after every one
+  - [x] the four chaos cases, on a running instance
+  - [x] final ledger matches the Sprint 1 golden file
+  - [x] latency reported per phase, against the stated cycle budget
+  - [x] non-zero exit on violation, so it gates
+  - [x] **the checker is proven able to fail** — 15 tests doctor a snapshot per invariant
+        (`tests/test_rehearsal.py`). A gate that cannot fail is not a gate; DI-054 found three
+        tests in exactly that state.
+- **Also:** `tools/` is now a package, under `mypy --strict` and ruff like everything else.
+  `mutation_harness.py` was never type-checked before and is now annotated.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
+### [DI-066] Walk-away curves on the cockpit
+
+- **Sprint:** 3 · **Owner:** backend-engineer · **Size:** M · **Branch:** `di-064-live-cockpit`
+- **Why:** the curves have existed since DI-036 and were computed by nothing on the live path.
+  ADR-0006 clause 4 is the constraint that shapes the whole design: *the live walk-away lookup
+  is O(1) against a board precomputed between settled picks; the precompute completes inside 30
+  seconds at 8 or fewer open slots, and its cost at more open slots is stated on the page.*
+- **Design:** the board is precomputed in a worker thread after any poll where the user's
+  budget, open slots or the available pool changed. The block does a dictionary lookup and
+  **there is deliberately no fallback that solves a missing curve**, because that fallback would
+  fire exactly when the room is bidding — the 11-second stall the amended gate exists to forbid.
+- **Measured cost**, full pre-draft pool, `top=12`:
+
+  | open slots | 14 | 10 | 8 | 6 | 4 | 2 |
+  |---|---|---|---|---|---|---|
+  | seconds | 152 | 66 | 39 | 20 | 8.6 | 1.9 |
+
+  On the **live** path the pool has already shrunk, so the same states are far cheaper:
+  10 slots → 27.5s, and **8 slots → 16.6s. ADR-0006 clause 4 is met** (gate: inside 30s).
+  At 16 open slots — the state the cockpit boots into at 6:55pm — it is ~190s, which is why the
+  status line says "computing" and states the last cost rather than showing an empty chart.
+- **Verified on the live league in the worst case.** Booted against the real draft with 16 open
+  slots: `walkaway: computing`, the ledger answering throughout (`room $2000 over 160 slots`),
+  the page rendering at 200, and **poll age holding 0.1–2.4s across a minute of CPU-bound
+  precompute** — the event loop is not starved by the worker thread.
+- **Every absence is explained rather than blank.** "No curve" and "not worth bidding on" are
+  opposite conclusions and a missing number cannot tell them apart, so an uncovered player reads
+  *"outside the precomputed top 12 by VORP — which is not the same as not worth bidding on"*, a
+  curve that never turns positive says so, a non-monotone curve says its deltas are unusable,
+  and a board computed for a budget the user no longer has is marked **STALE** with the pick
+  count since.
+- **The curve is drawn**, inline SVG, §4.7b's axes: price on x, Δ starting points on y, zero
+  line, and the crossing marked — the crossing *is* the answer, so everything else on the chart
+  exists to make that one x-position readable. Theme tokens, so it holds in both.
+- **The defect this card introduced, and caught.** Wiring the precompute into `poll_once`
+  unconditionally turned `tests/test_live.py` from 3.6 seconds into **597 seconds** — a test
+  polling at zero picks was paying for a 16-slot, 190-second board. Fixed by making
+  `precompute` off unless asked, exactly as `poll` already is: both are expensive, and neither
+  should start because something called a method. `create_app` passes `precompute=poll`, so
+  they arm together. **597s → 4.1s.**
+- **Acceptance criteria:**
+  - [x] O(1) lookup on the live path, no solve, no on-demand fallback
+  - [x] precompute in a worker thread, off the poll path, one at a time
+  - [x] priced against who is *still available* — `ValueBoard.available()` drops keepers only
+  - [x] cost stated on the page, per ADR-0006 clause 4
+  - [x] staleness surfaced with the pick count since, not assumed
+  - [x] a failed precompute is reported and the ledger keeps answering
+  - [x] no precompute for a full roster — the question no longer exists
+  - [x] 11 tests, including one that holds a fake open to observe "computing", and one that
+        asserts on the *candidates handed to the solver* rather than the curves that come back,
+        because a `top`-limited output could hide a drafted player by ranking them low
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.
@@ -2498,7 +2679,7 @@ is now held to.
 
 1. **`make prep` produces the priced board** against the real keeper manifest, the real
    projections and the real scoring settings. Running it against the *live league* additionally
-   requires DI-043 — five managers have not joined — which is outside this sprint's control and is
+   requires DI-043 — three managers have not joined — which is outside this sprint's control and is
    named as a dependency rather than held as a gate.
 2. **Money-conservation invariants hold.** *(Unamended.)*
 3. **A human has reviewed the board.** *(Unamended, and deliberately not softened.)* §4.9's premise
@@ -2507,6 +2688,13 @@ is now held to.
    another draft entirely — none of which substitutes for the person who knows this league reading
    it and disagreeing. Under the amendment this is now the **only** whole-model review, so its
    stakes went up, not down.
+
+   **✅ MET 2026-09-03.** The user read the board and disagreed with it: the top QB priced at
+   **$17.74, 25th overall, in a league that starts twenty of them.** That is the clause working
+   exactly as §4.9 intended — a person who knows this league finding something six audit rounds
+   did not, because it is not a defect in the code. It produced DI-061 and then DI-062, and DI-062
+   in turn found that three of the four override fields were inert. **The disagreement was worth
+   more than the review rounds that preceded it.**
 4. **The live walk-away lookup is O(1)** against a board precomputed between settled picks; the
    precompute completes inside 30 seconds at 8 or fewer open slots, and its cost at more open slots
    is stated on the page rather than hidden. *(Replaces "walk-away recompute p99 < 200ms", which

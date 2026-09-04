@@ -3,15 +3,18 @@ resolves ROOT from its own __file__ — so a snapshot holding only `src` makes a
 touches the CLI fail for reasons unrelated to the mutation, and `-x` then reports that as
 'CAUGHT'."""
 
+from __future__ import annotations
+
 import os
 import pathlib
 import shutil
 import subprocess
+from collections.abc import Iterable
 
 REPO = pathlib.Path("/home/user/draft-intel")
 
 
-def snapshot(name):
+def snapshot(name: str) -> pathlib.Path:
     snap = pathlib.Path(f"/tmp/{name}")
     if snap.exists():
         shutil.rmtree(snap)
@@ -21,7 +24,9 @@ def snapshot(name):
     return snap
 
 
-def run(snap, suite="", timeout=1200):
+def run(
+    snap: pathlib.Path, suite: str = "", timeout: int = 1200
+) -> subprocess.CompletedProcess[str]:
     args = ["uv", "run", "python", "-m", "pytest", "-q", "--no-cov", "-p", "no:randomly"]
     if suite:
         args.insert(5, suite)
@@ -35,7 +40,7 @@ def run(snap, suite="", timeout=1200):
     )
 
 
-def verify(name, muts, suite=""):
+def verify(name: str, muts: Iterable[tuple[str, str, str, str]], suite: str = "") -> None:
     snap = snapshot(name)
     base = snap / "src/draft_intel"
     clean = run(snap, suite)
