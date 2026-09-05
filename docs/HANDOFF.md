@@ -1,11 +1,59 @@
 # Handoff — Draft Intelligence Platform
 
-**Written 2026-09-01. Supersedes the earlier version of this file. Read it fully before
-touching anything.**
+> ## ⚠ Sections 1, 9, 11 and 12 are out of date and were written 2026-09-01
+>
+> **Corrected 2026-09-05.** Four days of work happened after this document was written, and
+> its status sections describe a project that no longer exists. Read the correction below
+> before anything else in this file.
+>
+> **What is still true and still worth reading:** §2 (hard facts), §3 (what is trustworthy),
+> §5 (the fix-pass pattern), §7 (discovery findings), §8 (architecture invariants), §10
+> (process rules — including the honest caveat about agent independence, which has not stopped
+> being true). §4's defects are closed; §6's blockers have shrunk but not vanished.
+>
+> **Where to look instead:**
+>
+> | For | Read |
+> |---|---|
+> | What to do on draft night | `docs/RUNBOOK.md` |
+> | What was built and why | `docs/KANBAN.md`, cards DI-001 → DI-074 |
+> | Whether it works right now | `make ci`, then `make rehearsal-live` |
 
 ---
 
-## 1. Status in one paragraph
+## 0. Correction — the state on 2026-09-05
+
+The recommendation in §1 and §12 below was followed, and then overtaken.
+
+**Sprint 1's open defects are closed.** Sprints 2, 3 and 4 were built after this document was
+written: the priced board, the valuation stack, the live cockpit, its rehearsal, and the four
+correction surfaces. `make ci` is green at **678 tests, 95% coverage**. `make rehearsal` drives
+160 real picks through the real cockpit one poll at a time and passes every invariant at every
+pick, plus seven chaos cases.
+
+**The tool connects to the live draft.** §1's claim that it "cannot connect to the real draft
+at all" was true when written — six of ten managers had not joined. Eight have now joined and
+the cockpit polls the real league successfully.
+
+**What remains open is not code.** Two managers (Burt, TD) have still not joined, so four
+keepers cannot be placed on a slot. `make rehearsal-live` fails on exactly that and says so.
+The keeper backstop (`make arm ON=1`) mitigates it by turning those four silent
+misclassifications into four questions.
+
+**What §12 got right, and it is worth recording:** point 4 said the printable board was the
+deliverable that mattered most, and point 5 said to prioritise the offline board over live
+ingestion while the league was unreachable. Both held up. The board was built first, and the
+live path was built afterwards against a league that had by then become reachable.
+
+**What §12 got wrong:** point 3 recommended a single review pass per card. In practice the
+review rounds kept finding real defects — including tests that could not fail, a classifier
+reading the wrong draft's seating, and a false claim in a code comment — so the two-pass rule
+was worth its cost. Roughly sixteen of the later cards still carry pending verdicts; that debt
+is real and is recorded honestly on each card rather than quietly closed.
+
+---
+
+## 1. Status in one paragraph *(SUPERSEDED — see §0)*
 
 The data spine (Sprint 1) works and is **rejected**. Three independent review rounds and
 three adversarial evaluation rounds have all returned REJECT. The replay ledger is exact, the
@@ -263,7 +311,7 @@ src/draft_intel/
 
 ---
 
-## 9. Repo state
+## 9. Repo state *(SUPERSEDED — see §0; `main` now carries every card through DI-074)*
 
 | Branch | PR | Contents |
 |---|---|---|
@@ -308,7 +356,7 @@ stats. **None of it has been started.**
 
 ---
 
-## 11. Running it
+## 11. Running it *(partly superseded — see `docs/RUNBOOK.md` for the draft-night sequence)*
 
 ```bash
 uv sync                                    # Python 3.12 via uv
@@ -329,7 +377,7 @@ environment's egress policy. A 403 at CONNECT means it lapsed —
 
 ---
 
-## 12. If you have four days
+## 12. If you have four days *(SUPERSEDED — this was followed; see §0 for what held up and what did not)*
 
 1. **Finish §4.1 D2** — a duplicate `pick_no` still loses its money with only a reject line to
    show for it. D1 and D3 are closed (commit `0da8214`).
