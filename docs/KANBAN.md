@@ -3238,6 +3238,130 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-078] The armed backstop flagged real bids from teams that held their keepers
+
+- **Sprint:** 3 · **Owner:** data-engineer · **Size:** S · **Branch:** `di-078-manual-keeper-arming`
+- **Found by the independent adversarial review of `domain/ledger.py`** (round 1 on DI-074,
+  verdict REJECTED). Reproduced independently before being believed.
+- **The defect.** `owed` was decremented only inside the loop over `ordered_picks`. A
+  `ManualKeeper` lands on the roster as `PickClass.KEEPER` but is **not a pick**, so the loop
+  never saw it and the slot owed its keepers forever. With the backstop armed, that slot's first
+  two *real bids* were FLAGGED.
+
+  ```
+  ten teams, all 20 keepers typed by hand, then 40 genuine bids:
+    armed=False:  competitive=40/40   flagged=0
+    armed=True:   competitive=20/40   flagged=20, worth $300, alerts=0
+  ```
+
+  Every team read **"2 keepers held"** while its bids were being flagged. `FLAGGED` is filtered
+  out of inflation, skew and tendencies, so 20 real bids left the live calibration — the number
+  the user bids against — with no alert anywhere.
+- **This is the exact row DI-074's own table calls "20 competitive picks deleted",** re-entered
+  through the manual-entry door. The two features were built four cards apart and their
+  intersection is the case that matters most: **a manager who never joins has no ceremonial
+  picks in the feed**, so their keepers can only arrive through the manual form (charter §2
+  makes that the primary price path) — and arming is precisely what gets recommended when that
+  happens. Tonight's league has two such managers.
+- **Fixed further than the finding asked.** Seeding `owed` alone leaves the *window* at full
+  width, so a slot owing one keeper is asked about two picks — twice as many questions as there
+  are missing keepers, each one holding a real bid out of the series. The window shrinks with
+  the debt:
+
+  | keepers typed per team | picks flagged | |
+  |---:|---:|---|
+  | 2 | **0** | debt settled, nothing to ask |
+  | 1 | **10** | one question per team, per missing keeper |
+  | 0 | **20** | unchanged |
+
+- **Seeded before the loop rather than decremented within it,** because a manual keeper is an
+  assertion about what a team *holds* and carries no pick order of its own. `manual` is already
+  final at that point, supersession included, so an entry the feed has since delivered has been
+  removed and is counted once by the loop instead.
+- **Three mutations verified:** dropping the seeding entirely (the original defect), seeding
+  `owed` but not the window (over-asks), and seeding to zero (silently disarms the backstop for
+  the keeper that is still missing).
+- **What the same review checked and found sound,** by differential fuzz against independent
+  reference implementations: `_resolve_reverts` over 4,000 random revert graphs to depth 13 (0
+  mismatches); money conservation and order-independence over 3,000 random logs; `_ordered`'s
+  UNSTAMPED-sorts-last rule; orphan slots; keeper supersession on `player_id`.
+- **Acceptance criteria:**
+  - [x] a keeper typed by hand settles its slot's debt exactly as one from the feed does
+  - [x] the window shrinks with the debt — one question per missing keeper, never two
+  - [x] settling one keeper does not stop the tool asking about the other
+  - [x] `make ci` green — 692 tests, 95% coverage; rehearsal PASSED
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
+### [DI-079] Five defects from the adversarial review of the draft-night path
+
+- **Sprint:** 3 · **Owner:** backend-engineer · **Size:** M · **Branch:** `di-079-review-fixes`
+- Two independent reviews of `api/live.py` and the correction stores returned REJECT. Every
+  finding below was **reproduced by running code before being believed**, including the two
+  that are criticisms of DI-077's own text.
+- **1. An absent picks payload folded as an empty draft.** `SleeperClient` returns `None` on a
+  404 — reachable the moment a commissioner recreates the draft — and `picks(...) or []` read
+  that as "no picks have happened":
+
+  ```
+  mid-draft : picks=40  conn='live'  my $106  maxbid $94  keepers=20  infl=0.77  alerts=0
+  after 404 : picks=0   conn='live'  my $200  maxbid $185 keepers=0   infl=1.40  alerts=0
+  ```
+
+  Every figure on the page wrong, the connection line saying `live`, and nothing anywhere
+  saying so. `None` is now a failed poll; `[]` is still an empty draft, which is the correct
+  reading before the first pick lands.
+- **2. A config typo killed the poll loop permanently.** `_fold` reads `corrections.yaml` and
+  `arming.yaml` — both headed *"safe to edit by hand"* — and sat **outside** `poll_once`'s
+  try/except, whose docstring has always claimed *"Never raises"*. One bad `kind:` raised out
+  of `run()`'s `while True`, polling stopped for good, `/live` kept serving the last reading
+  under a `live` banner, and fixing the file did not bring it back. Only a restart did,
+  mid-auction. Now a held `CONFIG NOT LOADING` blocker, cleared by the next fold that succeeds.
+- **3. A seat numbered outside the league turned the page green.** `unresolved_keepers` counted
+  keys *built*, not keys naming a real slot, so typing 11 for 9 — one keystroke — read "20 of
+  20 placed", cleared every blocker, and left two retention prices in the competitive series:
+
+  | seat typed | keepers placed | competitive | blockers |
+  |---|---:|---:|---:|
+  | none | 18/20 | 142 | 1 |
+  | slot 9 (correct) | 20/20 | **140** | 0 |
+  | slot 11 (typo) | ~~20/20~~ **18/20** | 142 | ~~0~~ **2** |
+
+  The green banner was the failure. A key naming a slot no pick can carry is not a placement.
+- **4 and 5 are DI-077's own text, and the review was right about both.** The keeper blocker
+  named one displaced person twice — *"Jake, jswilliams5"* — because `_displaced_owners`
+  iterated `owner_to_slot`, which carries manifest names **and** Sleeper display names, and a
+  display name holds no keepers. And the conflict line said *"Burt's keepers and money are on
+  slot 2"*: money is keyed on the `draft_slot` the feed reports and **no assertion moves it**.
+  That is this card's own predecessor's thesis — *naming the wrong cause is worse than naming
+  none* — failing on the card that argued it. Both corrected; the message now says what
+  actually happens and that no money has moved.
+- **Also: `armed: "false"` armed the backstop.** `bool("false")` is `True`, and so is
+  `bool("no")` and `bool([false])`. A file plainly saying it was off would have silently
+  reclassified picks. Only a real YAML boolean arms it now.
+- **Two of my first mutation checks survived**, which meant two of the new tests were not
+  pinning what they claimed: the out-of-range test asserted on the blocker (a separate
+  sentence that still fired) rather than on the count that had gone green, and nothing covered
+  `armed:` truthiness at all. Both tests tightened until the mutations fail.
+- **Acceptance criteria:**
+  - [x] a null payload is a failure; an empty list is still an empty draft
+  - [x] a config typo is a blocker, not a dead loop, and recovers with no restart
+  - [x] an out-of-range seat is counted as unplaced and named; a correct seat still clears
+  - [x] the displaced owner is named once, by a name that holds keepers
+  - [x] the conflict message describes the mechanism that actually occurs
+  - [x] five mutations verified, two of them only after the tests were tightened
+  - [x] `make ci` green — 706 tests, 95% coverage; rehearsal PASSED
+- **Still open from the same reviews, not in this card:** the budget delta computed against a
+  ledger that lags `corrections.yaml` by a poll (double-applies a repeated correction);
+  unlocked read-modify-write in `CorrectionStore.add`/`SeatStore.assign` (concurrent requests
+  lose writes); `set_seat` permitting one owner in two seats; walk-away curves priced at book
+  rather than at live inflation; the classifier cached against a stale manifest after a
+  pipeline rebuild; `[object Object]` rendered for pydantic validation errors.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from draft_intel.domain.classify import KeeperClassifier, keepers_seen, reconcile
 from draft_intel.models import PickClass, PickSnapshot
 
@@ -162,6 +164,30 @@ def test_a_missing_or_broken_arming_file_means_off_rather_than_a_crash(tmp_path:
     store = ArmingStore(tmp_path / "written.yaml")
     assert store.set(True) is True
     assert ArmingStore(store.path).load() is True, "it must survive a fresh reader"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ['armed: "false"', 'armed: "no"', "armed: 1", "armed: [false]", "armed: off", "armed: null"],
+)
+def test_only_a_real_boolean_arms_the_backstop(tmp_path: Path, raw: str) -> None:
+    """`bool("false")` is True. So is `bool("no")`, and `bool([false])` — a file that plainly
+    says it is off would have armed the backstop and silently reclassified picks, which is the
+    exact outcome defaulting-to-off exists to prevent. Found by adversarial review."""
+    from draft_intel.store.arming import ArmingStore
+
+    path = tmp_path / "arming.yaml"
+    path.write_text(raw + "\n")
+    assert ArmingStore(path).load() is False, f"{raw!r} must not arm anything"
+
+
+def test_a_real_yaml_true_still_arms_it(tmp_path: Path) -> None:
+    """The negative case. Tightening the check must not stop `make arm ON=1` working."""
+    from draft_intel.store.arming import ArmingStore
+
+    path = tmp_path / "arming.yaml"
+    path.write_text("armed: true\n")
+    assert ArmingStore(path).load() is True
 
 
 def test_arming_no_longer_costs_real_competitive_picks_in_a_room_with_no_ceremony():
@@ -387,3 +413,87 @@ def test_the_window_holds_when_the_ceremonial_round_is_not_at_picks_1_to_20():
         "the manifest still matches keepers at picks 21-40; the window never gated that"
     )
     assert len(state.competitive_seq) == 0
+
+
+# ------------------------- DI-078: the armed backstop meets manual keeper entry
+#
+# Two features built four cards apart, whose intersection is the case that matters most.
+# A manager who never joins has no ceremonial picks in the feed, so their keepers can only
+# arrive through the manual form (charter §2 makes that the primary price path) — and arming is
+# exactly what gets recommended when that happens.
+
+
+def _typed_and_bid(manual_per_slot: int, bids_per_slot: int = 4) -> Any:
+    """N keepers typed by hand per team, then genuine competitive bids from everybody."""
+    from draft_intel.domain.classify import KeeperClassifier
+    from draft_intel.domain.ledger import fold
+    from draft_intel.models import ManualKeeper, PickObserved
+
+    events: list[Any] = []
+    seq = pick_no = 0
+    for slot in range(1, 11):
+        for k in range(manual_per_slot):
+            seq += 1
+            events.append(ManualKeeper(seq=seq, slot=slot, player_id=f"K{slot}{k}", amount=20))
+    for _round in range(bids_per_slot):
+        for slot in range(1, 11):
+            pick_no += 1
+            seq += 1
+            events.append(
+                PickObserved(
+                    seq=seq,
+                    pick=PickSnapshot(
+                        pick_no=pick_no,
+                        player_id=f"P{pick_no}",
+                        slot=slot,
+                        amount=15,
+                        is_keeper=False,
+                    ),
+                )
+            )
+    return fold(
+        events,
+        slots=range(1, 11),
+        classifier=KeeperClassifier(manifest_keys=frozenset()),
+        flag_unmatched=_armed(),
+    )
+
+
+def _flagged(state: Any) -> list[int]:
+    return [
+        entry.amount
+        for team in state.teams.values()
+        for entry in team.roster
+        if entry.pick_class is PickClass.FLAGGED
+    ]
+
+
+def test_a_keeper_typed_by_hand_settles_the_slots_debt_like_one_from_the_feed():
+    """**The blocking defect.** `owed` was decremented only inside the pick loop, and a manual
+    keeper is not a pick — so a slot that visibly held both its keepers still owed two, and its
+    first two *real bids* were flagged out of the competitive series. Twenty bids worth $300, no
+    alert, every team reading "2 keepers held"."""
+    state = _typed_and_bid(manual_per_slot=2)
+
+    assert _flagged(state) == [], "the debt is settled; nothing to ask about"
+    assert len(state.competitive_seq) == 40, "every genuine bid stays in the series"
+    assert sum(len(t.keepers) for t in state.teams.values()) == 20
+
+
+def test_the_window_shrinks_with_the_debt_rather_than_over_asking():
+    """One keeper outstanding earns one question, not two. Leaving the window at its full width
+    asks twice as many as there are missing keepers, and every unanswered question holds a real
+    bid out of inflation, skew and every tendency profile."""
+    assert len(_flagged(_typed_and_bid(manual_per_slot=1))) == 10, "ten teams, one each"
+    assert len(_flagged(_typed_and_bid(manual_per_slot=0))) == 20, "nothing typed, two each"
+
+
+def test_manual_entry_does_not_disarm_the_backstop_for_what_is_still_missing():
+    """The other direction. Settling one keeper must not stop the tool asking about the other —
+    that would turn a partial correction into a silent disarm."""
+    state = _typed_and_bid(manual_per_slot=1)
+    per_slot = {
+        slot: sum(1 for e in team.roster if e.pick_class is PickClass.FLAGGED)
+        for slot, team in state.teams.items()
+    }
+    assert set(per_slot.values()) == {1}, "every team still asked about its one missing keeper"

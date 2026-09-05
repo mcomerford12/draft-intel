@@ -296,6 +296,13 @@ class LiveDraft:
         self._draft_status = "unknown"
         self._picks_raw: list[dict[str, Any]] = []
         self._nominated: str | None = None
+        self._config_error: str | None = None
+        """Why the last fold failed, if it did. A hand-edited config that will not parse.
+
+        Held rather than raised so the poll loop survives it, and cleared by the next fold that
+        succeeds so fixing the file is all the recovery there is.
+        """
+
         self._identity: Identity | None = None
         self._resolved: Identity | None = None
         """Seating as the **league** reports it, before any hand-typed seat is overlaid.
@@ -408,15 +415,50 @@ class LiveDraft:
             return
         try:
             draft = await active.draft(self.draft_id)
-            picks = await active.picks(self.draft_id) or []
+            picks = await active.picks(self.draft_id)
+            # `None` is not "no picks have happened". `SleeperClient.get_json` returns it on a
+            # 404 -- reachable whenever the draft id is stale, which it becomes the moment a
+            # commissioner recreates the draft. Coercing it to `[]` folded an empty draft and
+            # said `live` about it: every team back to $200, max bid $185, twenty keepers gone,
+            # headline inflation 0.77 -> 1.40, and **zero alerts or blockers**. Every figure on
+            # the page wrong, nothing on the page saying so.
+            #
+            # An empty list still means an empty draft, which is the correct reading before the
+            # first pick lands.
+            if picks is None:
+                raise LookupError(
+                    f"the picks feed answered nothing for draft {self.draft_id} -- a 404, which "
+                    "usually means this draft id no longer exists"
+                )
             await self._refresh_identity(active, draft)
         except Exception as error:  # every failure here is reportable, none is fatal
             self._connection = f"{type(error).__name__}: {error}"
             return
 
+        # The fold reads `corrections.yaml` and `arming.yaml`, both of which say "safe to edit by
+        # hand" in their own headers. They were not: one typo raised straight out of this method,
+        # out of `run()`'s `while True`, and killed the poll task **permanently** -- while `/live`
+        # kept serving the last good reading under a `live` banner, and fixing the file did not
+        # bring it back. Only a restart did, mid-auction.
+        #
+        # This method's docstring has always said "Never raises: a failed poll is a reported
+        # condition". That was true of the fetch and false of everything after it. ADR-0002's D4
+        # rule -- warn loudly, do not brick -- applies to a hand-edited config exactly as it does
+        # to a league whose settings disagree.
+        try:
+            state = self._fold(list(picks))
+        except Exception as error:
+            self._config_error = (
+                f"{type(error).__name__} reading your config: {error}. The board below is the "
+                "last good reading and is no longer being updated from it. Fix the file and the "
+                "next poll picks it up -- no restart needed."
+            )
+            return
+
+        self._config_error = None
         self._draft_status = str((draft or {}).get("status", "unknown"))
         self._picks_raw = list(picks)
-        self._state = self._fold(self._picks_raw)
+        self._state = state
         self._polled_at = time.monotonic()
         self._connection = "live"
         self._precompute_walkaway(self._state)
@@ -724,7 +766,18 @@ class LiveDraft:
         """
         if self._identity is None:
             return frozenset()
-        return manifest_keys(dict(self.pipeline.resolved), self._identity)
+        # **A key naming a slot outside the league is not a placement.** No pick can ever carry
+        # slot 11 in a ten-team draft, so such a key matches nothing -- but `unresolved_keepers`
+        # counts keys, so counting it said "20 of 20 keepers placed" and turned the page green
+        # while two retention prices sat in the competitive series all night. Typing 11 for 9 is
+        # one keystroke, `SeatAssignment` bounds the slot only below, and a hand-edited
+        # `seats.yaml` is not bounded at all. The green banner was the failure.
+        teams = self.pipeline.config.teams
+        return frozenset(
+            (slot, player_id)
+            for slot, player_id in manifest_keys(dict(self.pipeline.resolved), self._identity)
+            if 1 <= slot <= teams
+        )
 
     # ------------------------------------------------------------------ the block
 
@@ -890,6 +943,9 @@ class LiveDraft:
                 "be placed and no team name below is confirmed. Every figure on this page is "
                 "provisional until the next successful poll.",
             )
+        # First of all, because while it holds nothing below it is being updated at all.
+        if self._config_error is not None:
+            out.append(f"CONFIG NOT LOADING: {self._config_error}")
         # Before the keeper blocker, because it is a *cause* of it and the keeper blocker's own
         # explanation is wrong whenever this holds.
         for conflict in self._seat_conflicts():
@@ -906,10 +962,14 @@ class LiveDraft:
                 why.append(f"{', '.join(absent)} have not joined")
             if displaced:
                 why.append(f"{', '.join(sorted(displaced))} lost their seat to a seat you assigned")
+            # No parenthetical at all when there is no cause to name. An empty "()" is the
+            # same failure as a wrong cause, in a smaller way: it looks like the tool tried to
+            # explain and had nothing. The blockers above it carry the reason in that case.
+            cause = f" ({'; '.join(why)})" if why else ""
             out.append(
-                f"{expected - resolved} of {expected} keepers cannot be placed on a draft slot "
-                f"({'; '.join(why)}). Each one will be read as a "
-                f"competitive bid, which corrupts inflation, skew and every threat read below."
+                f"{expected - resolved} of {expected} keepers cannot be placed on a draft "
+                f"slot{cause}. Each one will be read as a competitive bid, which corrupts "
+                f"inflation, skew and every threat read below."
             )
         if my_slot is None:
             out.append(
@@ -952,15 +1012,33 @@ class LiveDraft:
         if self._resolved is None:
             return []
         out: list[str] = []
+        teams = self.pipeline.config.teams
         for slot, seat in sorted(self.seats.load().items()):
+            if not 1 <= slot <= teams:
+                out.append(
+                    f"SEAT OUT OF RANGE: you assigned {seat.owner} to slot {slot}, and this "
+                    f"league has slots 1-{teams}. No pick can ever carry that slot, so "
+                    f"{seat.owner}'s keepers match nothing and are being counted as competitive "
+                    f"bids. Clear it under seating and re-enter the right slot."
+                )
+                continue
             league_slot = self._resolved.slot_for(seat.owner)
             if league_slot is not None and league_slot != slot:
+                # What this does NOT do is move money. Every dollar is keyed on the
+                # `draft_slot` the feed reports and no assertion touches it -- an earlier
+                # version of this message said "keepers and money are on slot N", which was
+                # this card's own "naming the wrong cause is worse than naming none" thesis
+                # failing on the card itself. What actually happens is narrower and worse:
+                # the asserted owner's keeper keys match no pick, and the manager the
+                # assertion evicted has theirs read as competitive bids.
                 out.append(
                     f"SEAT CONFLICT: you assigned {seat.owner} to slot {slot}, but the league "
-                    f"now says they are in slot {league_slot}. Your assignment is being used, "
-                    f"so {seat.owner}'s keepers and money are on slot {slot} and slot "
-                    f"{league_slot} has been left unnamed. Clear the assignment under seating "
-                    f"if the league is right."
+                    f"says they are in slot {league_slot}. Your assignment wins, so "
+                    f"{seat.owner}'s keepers are being matched against slot {slot} — where "
+                    f"none of their picks are — and whoever the league seats at slot {slot} "
+                    f"has had their keepers read as competitive bids. No money has moved; "
+                    f"every dollar still follows the slot the feed reports. Clear the "
+                    f"assignment under seating if the league is right."
                 )
         return out
 
@@ -972,10 +1050,16 @@ class LiveDraft:
         """
         if self._resolved is None or self._identity is None:
             return set()
+        # **Manifest owners only.** `owner_to_slot` carries both name spaces — manifest names
+        # and Sleeper display names — so iterating it reported one displaced person twice, the
+        # second time under a display name that owns no keepers at all ("Jake, jswilliams5").
+        # This sentence exists to name who lost their keepers; a name that holds none is noise
+        # in the one place the user is reading for a name.
+        manifest_owners = {owner for owner, _player_id in self.pipeline.resolved}
         return {
             owner
             for owner in self._resolved.owner_to_slot
-            if self._identity.slot_for(owner) is None
+            if owner in manifest_owners and self._identity.slot_for(owner) is None
         }
 
     def _flagged_picks(self) -> list[dict[str, Any]]:
