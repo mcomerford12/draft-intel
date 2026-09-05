@@ -1373,3 +1373,103 @@ def test_the_conflict_message_does_not_claim_money_moved(
 
     assert "No money has moved" in conflict
     assert "keepers and money are on slot" not in conflict
+
+
+# ------------- DI-080: two from the adversarial evaluation of the live quant path
+
+
+def test_live_inflation_is_exactly_one_before_any_competitive_bid(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """`quant/inflation.py` promises **exactly** 1.0000 before a competitive bid is made — not
+    near it, exactly it — and its unit test reaches that by being handed keeper-adjusted inputs
+    directly. The live wiring never was: `available` is `in_pool_live` (keepers out of *supply*)
+    while the ledger still carries their money and slots in *demand* until the ceremonial picks
+    land, so the keeper adjustment was counted twice.
+
+    It read **1.4035** with zero competitive bids, decaying 1.32 / 1.23 / 1.15 / 1.07 as the
+    ceremonial picks arrived. Not cosmetic: it prices the block, so the first nomination of the
+    night was quoted ~39% high.
+    """
+    client = FakeClient(PICKS)
+    live = LiveDraft(
+        ROOT,
+        league_id="L",
+        draft_id="D",
+        store=store,
+        corrections=CorrectionStore(tmp_path / "corrections.yaml"),
+        client=client,
+    )
+    for landed in (0, 4, 8, 12, 16, 20):
+        client.picks_payload = PICKS[:landed]
+        asyncio.run(live.poll_once())
+        snap = live.snapshot()
+        assert snap.competitive_picks == 0, "still inside the ceremonial round"
+        assert snap.inflation == 1.0, f"{landed} ceremonial picks landed -> {snap.inflation}"
+
+
+def test_inflation_still_moves_once_real_bidding_starts(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """The negative case. Pinning 1.0 before the first bid must not flatten the figure
+    afterwards — the whole point of it is to move."""
+    client = FakeClient(PICKS[:40])
+    live = LiveDraft(
+        ROOT,
+        league_id="L",
+        draft_id="D",
+        store=store,
+        corrections=CorrectionStore(tmp_path / "corrections.yaml"),
+        client=client,
+    )
+    asyncio.run(live.poll_once())
+    snap = live.snapshot()
+    assert snap.competitive_picks == 20
+    assert snap.inflation != 1.0 and 0.0 < snap.inflation < 1.0
+
+
+def test_correcting_a_seat_vacates_the_one_it_corrects(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """`SeatStore` is keyed by slot, so a correction used to leave **both** assertions on disk —
+    and the stale one won, because `apply_seats` rebuilds `owner_to_slot` in ascending slot
+    order. Two teams named TD in the room, keepers 20 -> 18, competitive 140 -> 142. Exactly the
+    split `apply_seats`' own docstring forbids, arriving through the correction path."""
+    from draft_intel.store.seats import SeatStore
+
+    missing_td = {slot: name for slot, name in FIXTURE_SEATING.items() if slot != 10}
+    seats = SeatStore(tmp_path / "seats.yaml")
+    live = LiveDraft(
+        ROOT,
+        league_id="L",
+        draft_id="D",
+        store=store,
+        seats=seats,
+        corrections=CorrectionStore(tmp_path / "corrections.yaml"),
+        client=FakeClient(PICKS, seating=missing_td),
+    )
+
+    seats.assign(SeatAssignment(slot=4, owner="TD", note="wrong"))
+    live._identity_at = float("-inf")
+    asyncio.run(live.poll_once())
+    assert live.snapshot().competitive_picks == 144
+
+    seats.assign(SeatAssignment(slot=10, owner="TD", note="corrected"))
+    live._identity_at = float("-inf")
+    asyncio.run(live.poll_once())
+
+    assert sorted(seats.load()) == [10], "one owner, one seat"
+    assert live.identity is not None and live.identity.slot_for("TD") == 10
+    assert [t.slot for t in live.snapshot().teams if t.owner == "TD"] == [10]
+    assert live.snapshot().competitive_picks == 140, "and the correction actually corrects"
+
+
+def test_seating_two_different_owners_is_untouched(store: OverrideStore, tmp_path: Path) -> None:
+    """The negative case. Vacating by owner must not evict somebody else's seat."""
+    from draft_intel.store.seats import SeatStore
+
+    seats = SeatStore(tmp_path / "seats.yaml")
+    seats.assign(SeatAssignment(slot=9, owner="Burt", note=""))
+    seats.assign(SeatAssignment(slot=10, owner="TD", note=""))
+    assert sorted(seats.load()) == [9, 10]
+    assert {s.owner for s in seats.load().values()} == {"Burt", "TD"}

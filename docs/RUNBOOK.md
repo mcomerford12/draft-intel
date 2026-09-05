@@ -48,8 +48,15 @@ Top to bottom, in the order it renders:
 | **the room** | Every team's money, slots and max bid. Yours is highlighted. |
 | **inflation** | What the room is paying over book, live. |
 
-**`inflation 1.40x` before a single pick is not a bug.** It is the structural read: $1,840 of
-discretionary money chasing $1,311 of value. It moves toward the live market as picks land.
+**Before the first competitive bid, inflation reads exactly `1.00x`.** That is the definition,
+not a coincidence: the board's values already price in the keeper effect, so there is nothing
+for the live figure to say until somebody bids.
+
+*(An earlier version of this page said a pre-draft reading of `1.40x` was "not a bug, it is the
+structural read". That was wrong, and the tool was wrong with it — the keeper adjustment was
+being counted on the supply side and again on the demand side. Fixed in DI-080. If you ever see
+anything other than 1.00x with `0 competitive`, that is a bug, and the number pricing the block
+beside it is high by the same proportion.)*
 
 ---
 

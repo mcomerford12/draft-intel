@@ -3358,6 +3358,244 @@ append to. Written to schema here, retroactively for the cards already built.
   lose writes); `set_seat` permitting one owner in two seats; walk-away curves priced at book
   rather than at live inflation; the classifier cached against a stale manifest after a
   pipeline rebuild; `[object Object]` rendered for pydantic validation errors.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** ❌ **REJECTED 2026-09-05** — adversarial
+  evaluation of the draft-night quant path (`quant/affordability.py`, `quant/inflation.py`,
+  `quant/walkaway.py` and how `api/live.py` consumes them). Every finding below was produced by
+  running the code against the real board and the 160-pick fixture through `LiveDraft`'s own
+  polling path; nothing here is read off the source. Repro scripts are transcribed inline.
+
+  **On this card's own criteria: six of seven verified, one fails.** A `None` payload is a failed
+  poll that holds the last reading (`picks=40 → 40`, connection names the `LookupError`,
+  `stale=True`) while `[]` still folds an empty draft; a bad `kind:` is a `CONFIG NOT LOADING`
+  blocker that clears on the next good fold; an out-of-range seat is counted unplaced and named;
+  the displaced owner is named once, by a name that holds keepers. **Criterion 3's second clause —
+  *"a correct seat still clears"* — holds only from a clean store.** See E2 below.
+
+  ### Ranked findings
+
+  **E1 — live inflation double-counts the keeper adjustment until the keeper picks land, and it
+  prices the block.** `api/live.py:909` + `:1112`. `available` is the *post-keeper* pool
+  (`in_pool_live` already has the twenty removed from **supply**), while `remaining_money` and
+  `remaining_slots` are read off the ledger, where the keepers' money and slots have **not** yet
+  been removed from **demand**. That is the one-sided keeper adjustment §4.2 says produces
+  "plausible-looking but badly wrong prices". Measured through `poll_once`, ceremonial picks
+  landing one at a time:
+
+  | keeper picks in the ledger | 0 | 4 | 8 | 12 | 16 | 20 |
+  |---|---|---|---|---|---|---|
+  | headline `inflation` | **1.4035** | 1.3211 | 1.2281 | 1.1510 | 1.0664 | 1.0000 |
+  | block "at today's inflation", top WR (live value $26.60) | **$36.93** | $34.82 | $32.44 | $30.47 | $28.30 | $26.60 |
+
+  `quant/inflation.py`'s own module docstring promises "**exactly 1.0000** before a competitive bid
+  is made"; the unit tests reach that by being handed keeper-adjusted money and slots directly,
+  and the live wiring does not. Charter §2 says to **assume Case B**, in which this state holds
+  for the entire ceremonial round; and any keeper that never arrives holds a share of it all
+  night (four missing ⇒ 1.07x ⇒ +7% on every price the block quotes). `RUNBOOK.md` §2 blesses the
+  figure — *"`inflation 1.40x` before a single pick is not a bug"* — while **this card's own
+  bullet 1 cites `infl=1.40` as evidence that every figure on the page was wrong**. Both cannot be
+  right. It is a hybrid of two bases: $1,840 of full-pot discretionary against $1,311 of
+  post-keeper value. The honest structural read is `keeper_inflation` (0.9608 on this board),
+  which the cockpit never shows.
+
+  **E2 — a seat correction is silently overridden by the seat it was correcting.** `store/seats.py`
+  (`SeatStore` is keyed by slot; `apply_seats` rebuilds `owner_to_slot` in ascending slot order, so
+  the **higher** slot number wins). Fully reachable through the UI — no hand-editing, both slots
+  in range. Against the fixture with TD unresolved:
+
+  ```
+  assign TD -> slot 10   keepers 20/20   competitive 40   (correct)
+  assign TD -> slot 4    keepers 18/20   competitive 42   seats.yaml = {4: TD, 10: TD}
+                         identity.slot_for('TD') == 10  <- the correction lost
+                         room table shows TWO teams named TD, slots 4 and 10
+                         WR realized inflation 1.20x -> 1.40x
+  ```
+
+  §4.8's rule is that the user's correction wins; here it loses to the stale one, and the page
+  shows TD in seat 4 while the classifier keeps using seat 10 — the exact disagreement
+  `apply_seats`'s own docstring says must never happen. The blocker then blames the wrong
+  manager: *"Mason lost their seat to a seat you assigned"*. The same mechanism is why criterion 3
+  fails: after a hand-edited `slot: 11` typo, assigning the **correct** slot 10 leaves 18/20 and 22
+  competitive picks; only `clear(11)` recovers it.
+
+  **E3 — walk-away curves are solved against a pool priced at book, not at live inflation.**
+  `api/live.py:564` (`price=max(1, round(p.baseline_value))`). §4.7b requires the optimizer to run
+  "at inflation-adjusted prices" and `walkaway_curve`'s own arg doc says the same. Already listed
+  as open on this card, but **unquantified — it is not small**. Real board, real live state
+  (my $35 across 6 open slots, live inflation 0.2297):
+
+  | player | shipped | pool at inflation-adjusted prices |
+  |---|---:|---:|
+  | Jayden Reed WR | **$13** | $22 |
+  | Jared Goff QB | **$10** | $20 |
+  | Alec Pierce WR | **$9** | $19 |
+
+  A $9 understatement of "the MOST you should pay", on the digit §4.7b puts on screen alone and
+  enormous — the same shape of defect the module docstring congratulates itself for fixing
+  ("$58 for a player whose true walk-away price was $117"). At 14 slots / $185 it runs the other
+  way and is smaller: $24 vs $28 at inflation 1.15, $27 vs $22 at 0.85.
+
+  **E4 — the walk-away ceiling bypasses the `max_bid` clamp.** `api/live.py:546` passes
+  `mine.remaining` raw; `walkaway.py:160` computes `ceiling = budget - (slots - 1)` from it.
+  `TeamState.max_bid` clamps at `min(remaining, budget)` precisely so a negative amount cannot
+  advise "$686 in a $200 league"; the curve re-derives the ceiling and reintroduces it. Repro
+  through the feed alone — `parse_picks` keeps a negative amount with a complaint:
+
+  ```
+  one of MY picks arrives with metadata.amount = "-500"
+    room table : remaining $542   open 6   max bid $195   SUSPECT
+    the block  : your max bid $195 ... WALK AWAY ABOVE $498   (max_legal_bid $537)
+  ```
+
+  The block carries no `figures_suspect` marker at all — the flag is on `TeamLine` and rendered
+  only in the room table. A smaller sign-flip (−$40) yields a *plausible* inflated ceiling, which
+  by this project's own argument is the more dangerous case.
+
+  **E5 — `picks_since` counts the feed, not the pool, so a reversal leaves a stale curve labelled
+  `current`.** `api/live.py:621` (`_walkaway_status`): `since = max(0, len(self._picks_raw)
+  - self._walkaway_picks)`. Charter §2 states picks can be reversed. One opponent pick reversed
+  (90 → 89 rows) clamps `since` to 0, the user's budget and slots are unchanged, so the board
+  reports *"current for $35 across 6 open slots"* while its pool still excludes a player who is
+  back on the board. Same result for a reversal plus a new pick inside one poll interval (count
+  unchanged). `is_current_for` checks budget and slots only; the pool vintage is in
+  `_walkaway_signature` and is never compared for display.
+
+  **E6 — a failed precompute erases the vintage but not the number.** `_walkaway_status` returns
+  `state="absent"`, `budget=None`, `slots=None`, `picks_since=0` when `_walkaway_error` is set,
+  while `_block` still reads `self._walkaway`. Forced repro: the block goes on serving *"walk away
+  above $13"* from a $35 / 6-slot board while the user actually holds $6 and 1 slot, under the one
+  line *"the last precompute failed"*. The `stale` branch carries the right sentence — *"Every
+  price below answers a question about a roster you no longer have"* — and the error branch drops
+  it. Defensive path, so low likelihood; the fix is one line.
+
+  **E7 — the threat ladder's aggression term is dead on every surface.** `affordability(...)` is
+  called from `live.py:1097` and `prep.py:919` **without `skew=`**, and `skew_board()` is called
+  from nothing outside its own tests. §4.7c requires the rank to be `max bid × positional need ×
+  demonstrated aggression`; what ships is `max bid × need`, and every ladder row reads *"no read
+  yet"* for the whole night — verified after 50 competitive picks. §4.6's instruction to feed
+  **effective buying power** (budget + keeper surplus) into this ranking is also unwired.
+
+  **E8 — the block's "your max bid" is not §4.7a.** It is `ladder.my_max_bid`, the pure budget
+  ceiling. `affordability.my_max_bid()` — which is §4.7a's `min(budget cap, adjusted value +
+  premium)` with the binding constraint labelled — is called only by `prep.py`. Live: an RB worth
+  $9.41 (inflation-adjusted $4.87) sits under **"your max bid $81"**. The value figures beside it
+  mitigate; the label does not.
+
+  **E9 — the headline inflation has no small-sample guard.** `PositionForward` carries `reliable`
+  for exactly this; `Inflation` carries nothing. At 159 picks the page reads *"$21 discretionary
+  chasing $8 of value across 1 players — expect the room to clear about 170% over book"*, rendered
+  identically to a mid-draft reading.
+
+  ### What I could not break (each attacked, each held)
+
+  - **Max bid at the boundaries.** 1 open slot ($50 left → $50); 0 open slots (→ $0, not $41);
+    $0 remaining with 5 slots (→ $0, not −$4); negative remaining (→ $0). Never exceeds
+    `remaining`, never negative, `min(remaining, budget)` bounds a corrupt ledger and
+    `figures_suspect` travels with it on the ladder.
+  - **Per-team, not shared.** All ten opponents' max bids hand-checked against
+    `min(remaining, 200) − (open − 1)` at pick 70: 51/30/81/5/5/4/13/1/47/6, all exact.
+  - **Case A ≡ Case B.** Same 160 picks with `is_keeper` true on the twenty vs the shipped
+    ceremonial payload: **every** snapshot field identical at 25, 60, 120 and 160 picks —
+    inflation, positional lines, competitive count, all ten team rows, and the block (value,
+    inflation-adjusted price, max bid, clears-the-field, contenders, the whole ladder).
+  - **And the filter is load-bearing, not decorative.** Reclassifying one ceremonial keeper
+    (pick 5, $39 QB) to COMPETITIVE moves QB realized inflation **1.67x → 2.20x** and the count
+    40 → 41, while every team's spent, remaining and max bid are byte-identical — money uses all
+    picks, analytics use COMPETITIVE only, exactly as §2 requires.
+  - **Keeper double-count.** Supply removed once (`keeper_ids` out of the pool), demand once
+    (`remaining_base = base − keeper_base`, `roster_live = 160 − 20`). Controls built and run:
+    omit the demand cut → QB live pool 21 at replacement 212.2; apply it twice → 15 at 262.7;
+    shipped → **18 at 227.8**. Remaining starting slots 80 and remaining roster spots 140 both
+    assert, and they are different numbers.
+  - **The 2QB check.** 20 base QB slots − 7 keeper QBs = **13** remaining starting jobs; 25 QB
+    rostered full − 7 kept = **18** bought at auction (§4.2's 17–21). A 1QB counterfactual on the
+    same projections prices QB1 at $11.98 against this league's $17.74, and rosters 15 QBs
+    against 18.
+  - **The value model, re-derived on paper.** `dpv_live = (1451 − 140) / 7276.62 = 0.180166`
+    (code 0.1802), `dpv = (2000 − 160) / 9770.98 = 0.188313` (code 0.1883); eleven players
+    hand-computed as `1 + max(0, points − replacement) × dpv` across WR/RB/TE/QB/K — every
+    `baseline_value` and `market_value` matches to the cent.
+  - **Live inflation, re-derived on paper** at 70 picks: money $323, slots 90, discretionary $233,
+    remaining value $506.75 → 0.4598, and the block's `1 + (6.95 − 1) × 0.4598 = $3.74`. Exact.
+  - **`market_inflation` vs `keeper_inflation` are never merged.** `keeper_inflation` appears only
+    in `prep.py`/`cli.py`; `market_inflation` only in the cockpit; no consumer reads one for the
+    other.
+  - **No provider market value reaches the cockpit.** `api/live.py` never touches `market_value`;
+    the block is priced entirely off `baseline_value`. No E8-class basis mix on the live path
+    (E1 above is a *keeper*-adjustment mismatch, not a provider one).
+  - **Divide-by-zero** in `market_inflation` is guarded at 0 competitive picks and at 0 remaining
+    value; the pool restriction to `in_pool_live` was checked against an unrestricted pool at
+    every 10 picks from 20 to 160 and never differed.
+  - `make ci` is green at **706 passing** on this tree, with all nine findings above in it.
+
+---
+
+### [DI-080] Live inflation double-counted the keepers, and a seat correction did not correct
+
+- **Sprint:** 3 · **Owner:** quant-analyst · **Size:** M · **Branch:** `di-080-quant-review-fixes`
+- From the adversarial evaluation of the live quant path (verdict REJECTED, nine findings). The
+  two fixed here are the two that change a number the user bids against tonight. Both
+  reproduced independently before being believed.
+
+- **1. The headline inflation figure double-counted the keeper adjustment.** `available` is
+  `in_pool_live`, which has keepers out of **supply**; `remaining_money`/`remaining_slots` come
+  from the ledger, where a keeper's money and roster spot are still in **demand** until their
+  ceremonial pick lands. `market_inflation`'s own contract says *"all_spend includes keeper
+  picks"* — the live wiring violated that precondition and only satisfied it once all twenty
+  ceremonial picks had arrived:
+
+  | ceremonial picks landed | was | now |
+  |---:|---:|---:|
+  | 0 | **1.4035** | 1.0000 |
+  | 8 | 1.2281 | 1.0000 |
+  | 16 | 1.0664 | 1.0000 |
+  | 20 | 1.0000 | 1.0000 |
+  | 40 (20 competitive) | 0.7677 | 0.7677 |
+
+  `quant/inflation.py` promises **exactly** 1.0000 before a competitive bid — its unit test
+  reached that by being handed keeper-adjusted inputs directly, and the live path never was.
+  Not cosmetic: **it prices the block**, so the first nomination of the night was quoted about
+  39% high, and keepers that never arrive at all hold the error open for the whole evening.
+  Fixed by taking a manifest keeper the ledger has not yet seen out of demand, exactly as their
+  pick will when it lands — so the figure is continuous rather than stepping.
+
+- **2. Correcting a seat left the seat it was correcting, and the stale one won.** `SeatStore`
+  is keyed by slot, so `assign` added rather than replaced, and `apply_seats` rebuilds
+  `owner_to_slot` in ascending slot order — the higher slot number overwrote the lower.
+
+  ```
+  TD -> slot 4  (wrong)     seats=[4]      TD at 4    18/20 placed   competitive 144
+  TD -> slot 10 (correct)   seats=[4, 10]  TD at 10 ✗ 18/20 placed   competitive 142
+                            two teams named TD in the room table
+  ```
+
+  That is exactly the split `apply_seats`' own docstring forbids — one map saying TD is in seat
+  4 while the classifier reads seat 10 — arriving through the *correction* path, which is why
+  vacating on the resolution path did not catch it. One owner, one seat, now enforced where the
+  write happens rather than left for every reader to reconcile.
+
+- **`docs/RUNBOOK.md` §2 is corrected with it.** It told the user a pre-draft reading of `1.40x`
+  was *"not a bug, it is the structural read"*. It was a bug, and the page now reads 1.00x with
+  the note that anything else at zero competitive picks is one.
+- **Four mutations verified:** dropping the keeper adjustment, adjusting money but not slots,
+  not vacating the owner's previous seat, and vacating every seat rather than theirs.
+- **What the same evaluation attacked and could not break,** by re-deriving the model on paper:
+  max bid at every boundary (1 slot, 0 slots, $0, negative) — never exceeds remaining, never
+  negative; per-team rather than shared, all ten hand-checked at pick 70; Case A ≡ Case B
+  byte-identical at 25/60/120/160 picks, and the filter shown load-bearing; keeper
+  double-counting in supply and demand checked against both a too-few and a too-many control;
+  the 2QB replacement level; and `dpv_live`/`dpv` re-derived to the cent for eleven players.
+- **Still open from this evaluation, not in this card:** walk-away curves solved against a pool
+  priced at book rather than live inflation ($13 where $22 is right at 6 open slots); the
+  walk-away ceiling bypassing the `max_bid` clamp so a negative amount yields "walk away above
+  $498"; `picks_since` counting feed rows rather than pool vintage; the threat ladder's
+  aggression term unwired (`skew=` never passed); the block's "your max bid" being the budget
+  ceiling rather than §4.7a's; and no small-sample guard on the headline figure at 159 picks.
+- **Acceptance criteria:**
+  - [x] inflation is exactly 1.0 before the first competitive bid, at every point in the
+        ceremonial round — and still moves once real bidding starts
+  - [x] correcting a seat vacates the one it corrects; seating two different owners does not
+  - [x] the runbook's contradicted claim is corrected rather than left standing
+  - [x] `make ci` green — 710 tests, 95% coverage; rehearsal PASSED
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
 ---
