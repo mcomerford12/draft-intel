@@ -3238,6 +3238,62 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-078] The armed backstop flagged real bids from teams that held their keepers
+
+- **Sprint:** 3 · **Owner:** data-engineer · **Size:** S · **Branch:** `di-078-manual-keeper-arming`
+- **Found by the independent adversarial review of `domain/ledger.py`** (round 1 on DI-074,
+  verdict REJECTED). Reproduced independently before being believed.
+- **The defect.** `owed` was decremented only inside the loop over `ordered_picks`. A
+  `ManualKeeper` lands on the roster as `PickClass.KEEPER` but is **not a pick**, so the loop
+  never saw it and the slot owed its keepers forever. With the backstop armed, that slot's first
+  two *real bids* were FLAGGED.
+
+  ```
+  ten teams, all 20 keepers typed by hand, then 40 genuine bids:
+    armed=False:  competitive=40/40   flagged=0
+    armed=True:   competitive=20/40   flagged=20, worth $300, alerts=0
+  ```
+
+  Every team read **"2 keepers held"** while its bids were being flagged. `FLAGGED` is filtered
+  out of inflation, skew and tendencies, so 20 real bids left the live calibration — the number
+  the user bids against — with no alert anywhere.
+- **This is the exact row DI-074's own table calls "20 competitive picks deleted",** re-entered
+  through the manual-entry door. The two features were built four cards apart and their
+  intersection is the case that matters most: **a manager who never joins has no ceremonial
+  picks in the feed**, so their keepers can only arrive through the manual form (charter §2
+  makes that the primary price path) — and arming is precisely what gets recommended when that
+  happens. Tonight's league has two such managers.
+- **Fixed further than the finding asked.** Seeding `owed` alone leaves the *window* at full
+  width, so a slot owing one keeper is asked about two picks — twice as many questions as there
+  are missing keepers, each one holding a real bid out of the series. The window shrinks with
+  the debt:
+
+  | keepers typed per team | picks flagged | |
+  |---:|---:|---|
+  | 2 | **0** | debt settled, nothing to ask |
+  | 1 | **10** | one question per team, per missing keeper |
+  | 0 | **20** | unchanged |
+
+- **Seeded before the loop rather than decremented within it,** because a manual keeper is an
+  assertion about what a team *holds* and carries no pick order of its own. `manual` is already
+  final at that point, supersession included, so an entry the feed has since delivered has been
+  removed and is counted once by the loop instead.
+- **Three mutations verified:** dropping the seeding entirely (the original defect), seeding
+  `owed` but not the window (over-asks), and seeding to zero (silently disarms the backstop for
+  the keeper that is still missing).
+- **What the same review checked and found sound,** by differential fuzz against independent
+  reference implementations: `_resolve_reverts` over 4,000 random revert graphs to depth 13 (0
+  mismatches); money conservation and order-independence over 3,000 random logs; `_ordered`'s
+  UNSTAMPED-sorts-last rule; orphan slots; keeper supersession on `player_id`.
+- **Acceptance criteria:**
+  - [x] a keeper typed by hand settles its slot's debt exactly as one from the feed does
+  - [x] the window shrinks with the debt — one question per missing keeper, never two
+  - [x] settling one keeper does not stop the tool asking about the other
+  - [x] `make ci` green — 692 tests, 95% coverage; rehearsal PASSED
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.

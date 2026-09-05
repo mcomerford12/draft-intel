@@ -323,6 +323,34 @@ def fold(
     # can be computed at all.
     expected = dict(flag_unmatched or {})
     owed = dict(expected)
+    # **A keeper typed by hand settles the obligation exactly as one from the feed does.**
+    #
+    # Without this the backstop flags a slot's first two *real bids* even while that slot
+    # visibly holds both its keepers -- because `owed` was decremented only inside the pick loop
+    # below, and a manual keeper is not a pick. Measured: ten teams whose keepers were all typed
+    # in, then forty genuine bids, armed -> twenty of them FLAGGED, worth $300, with no alert
+    # and every team reading "2 keepers held".
+    #
+    # That combination is not exotic, it is the one this project is heading into: a manager who
+    # never joins has no ceremonial picks in the feed, so their keepers can only arrive through
+    # the manual form (charter §2 makes that the primary price path), and arming is exactly what
+    # is recommended when that happens. The two features were built four cards apart and their
+    # intersection is the case that matters most.
+    #
+    # Seeded before the loop rather than decremented within it because a manual keeper is an
+    # assertion about what the team *holds*, carrying no pick order of its own -- `manual` is
+    # already final here, supersession included, so an entry the feed has since delivered has
+    # been removed and is counted once by the loop instead.
+    #
+    # The *window* shrinks with it, not only the debt. A slot that owes one keeper should be
+    # asked about one pick, not two: leaving the window at its full width asks twice as many
+    # questions as there are missing keepers, and every unanswered question is a real bid held
+    # out of the competitive series. Measured on ten teams with one keeper typed each -- 20
+    # picks flagged where 10 are warranted.
+    for entry in manual.values():
+        if entry.slot in owed:
+            owed[entry.slot] = max(0, owed[entry.slot] - 1)
+            expected[entry.slot] = max(0, expected[entry.slot] - 1)
     nth_for_slot: dict[int, int] = {}
     classes: dict[int, PickClass] = {}
     for pick in ordered_picks:

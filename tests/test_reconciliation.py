@@ -387,3 +387,87 @@ def test_the_window_holds_when_the_ceremonial_round_is_not_at_picks_1_to_20():
         "the manifest still matches keepers at picks 21-40; the window never gated that"
     )
     assert len(state.competitive_seq) == 0
+
+
+# ------------------------- DI-078: the armed backstop meets manual keeper entry
+#
+# Two features built four cards apart, whose intersection is the case that matters most.
+# A manager who never joins has no ceremonial picks in the feed, so their keepers can only
+# arrive through the manual form (charter §2 makes that the primary price path) — and arming is
+# exactly what gets recommended when that happens.
+
+
+def _typed_and_bid(manual_per_slot: int, bids_per_slot: int = 4) -> Any:
+    """N keepers typed by hand per team, then genuine competitive bids from everybody."""
+    from draft_intel.domain.classify import KeeperClassifier
+    from draft_intel.domain.ledger import fold
+    from draft_intel.models import ManualKeeper, PickObserved
+
+    events: list[Any] = []
+    seq = pick_no = 0
+    for slot in range(1, 11):
+        for k in range(manual_per_slot):
+            seq += 1
+            events.append(ManualKeeper(seq=seq, slot=slot, player_id=f"K{slot}{k}", amount=20))
+    for _round in range(bids_per_slot):
+        for slot in range(1, 11):
+            pick_no += 1
+            seq += 1
+            events.append(
+                PickObserved(
+                    seq=seq,
+                    pick=PickSnapshot(
+                        pick_no=pick_no,
+                        player_id=f"P{pick_no}",
+                        slot=slot,
+                        amount=15,
+                        is_keeper=False,
+                    ),
+                )
+            )
+    return fold(
+        events,
+        slots=range(1, 11),
+        classifier=KeeperClassifier(manifest_keys=frozenset()),
+        flag_unmatched=_armed(),
+    )
+
+
+def _flagged(state: Any) -> list[int]:
+    return [
+        entry.amount
+        for team in state.teams.values()
+        for entry in team.roster
+        if entry.pick_class is PickClass.FLAGGED
+    ]
+
+
+def test_a_keeper_typed_by_hand_settles_the_slots_debt_like_one_from_the_feed():
+    """**The blocking defect.** `owed` was decremented only inside the pick loop, and a manual
+    keeper is not a pick — so a slot that visibly held both its keepers still owed two, and its
+    first two *real bids* were flagged out of the competitive series. Twenty bids worth $300, no
+    alert, every team reading "2 keepers held"."""
+    state = _typed_and_bid(manual_per_slot=2)
+
+    assert _flagged(state) == [], "the debt is settled; nothing to ask about"
+    assert len(state.competitive_seq) == 40, "every genuine bid stays in the series"
+    assert sum(len(t.keepers) for t in state.teams.values()) == 20
+
+
+def test_the_window_shrinks_with_the_debt_rather_than_over_asking():
+    """One keeper outstanding earns one question, not two. Leaving the window at its full width
+    asks twice as many as there are missing keepers, and every unanswered question holds a real
+    bid out of inflation, skew and every tendency profile."""
+    assert len(_flagged(_typed_and_bid(manual_per_slot=1))) == 10, "ten teams, one each"
+    assert len(_flagged(_typed_and_bid(manual_per_slot=0))) == 20, "nothing typed, two each"
+
+
+def test_manual_entry_does_not_disarm_the_backstop_for_what_is_still_missing():
+    """The other direction. Settling one keeper must not stop the tool asking about the other —
+    that would turn a partial correction into a silent disarm."""
+    state = _typed_and_bid(manual_per_slot=1)
+    per_slot = {
+        slot: sum(1 for e in team.roster if e.pick_class is PickClass.FLAGGED)
+        for slot, team in state.teams.items()
+    }
+    assert set(per_slot.values()) == {1}, "every team still asked about its one missing keeper"
