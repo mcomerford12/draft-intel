@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from draft_intel.api.live import POLL_INTERVAL_SECONDS, LiveDraft, LiveSnapshot
+from draft_intel.models import PickClass
 from draft_intel.store.corrections import CorrectionStore
 from draft_intel.store.overrides import OverrideStore
 
@@ -202,7 +203,7 @@ def _fresh(feed: ReplayFeed, *, corrections: CorrectionStore | None = None) -> L
 
 
 def chaos(picks: list[dict[str, Any]]) -> list[Violation]:
-    """The six things that go wrong on a real draft night, run against the cockpit.
+    """The seven things that go wrong on a real draft night, run against the cockpit.
 
     A clean 160-pick replay proves the tool handles a draft where nothing goes wrong. Nothing
     going wrong is not the case worth rehearsing. These are the Sprint 1 plan's chaos list,
@@ -361,6 +362,38 @@ def chaos(picks: list[dict[str, Any]]) -> list[Violation]:
         and team.max_bid == 0
         and any("overdrawn" in a for a in overdrawn.alerts),
         f"slot {target} taken to $-20 as typed, max bid clamped to $0, and said so out loud",
+    )
+
+    # 7. A pick is classified wrong and the user says so mid-draft. This moves no money, which
+    #    is exactly why it is easy to ship broken: every conservation check still passes while
+    #    the analytics quietly read a ceremonial keeper as a $24 bid. So the assertion is on
+    #    `competitive_picks` -- the number that decides what reaches inflation, skew, run
+    #    detection and every tendency profile -- and on the reversal putting it back, because a
+    #    correction you cannot undo at 9pm is one nobody will risk typing.
+    reclass = CorrectionStore(Path(tempfile.mkdtemp()) / "corrections.yaml")
+    classed = _fresh(feed, corrections=reclass)
+    feed.cursor = midpoint
+    asyncio.run(classed.poll_once())
+    competitive_before = classed.snapshot().competitive_picks
+    victim_pick = classed.settled_picks(limit=1)[0]
+
+    flip = reclass.add(
+        kind="reclassify", pick_no=victim_pick["pick_no"], pick_class=PickClass.KEEPER
+    )
+    asyncio.run(classed.poll_once())
+    after_flip = classed.snapshot()
+
+    reclass.revert(flip.id)
+    asyncio.run(classed.poll_once())
+    money_held = after_flip.total_remaining == classed.snapshot().total_remaining
+    report(
+        "pick reclassified mid-draft",
+        after_flip.competitive_picks == competitive_before - 1
+        and classed.snapshot().competitive_picks == competitive_before
+        and money_held,
+        f"pick {victim_pick['pick_no']} left the competitive series "
+        f"({competitive_before} -> {after_flip.competitive_picks}), undo put it back, "
+        f"money never moved",
     )
     return out
 

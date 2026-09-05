@@ -594,3 +594,129 @@ def test_the_keeper_button_starts_disabled(store: OverrideStore) -> None:
     client, _ = _cockpit_at(store, 60)
     _body, tail = _split(client.get("/live").text)
     assert 'id="keeper-go" disabled' in tail
+
+
+# ------------------------------------------- DI-073: the reclassification surface
+#
+# `Reclassify` was the last event type the ledger consumed and nothing produced. Every test
+# below is about the one property that matters: the correction has to reach the *analytics*.
+# A row written to YAML that leaves `competitive_picks` where it was would satisfy a test that
+# only checked the store, and would be worthless at 9pm.
+
+
+def test_the_pick_list_reports_the_class_each_pick_currently_carries(store: OverrideStore) -> None:
+    """Newest first, with the current class on every row. Without the class you cannot see
+    whether you are about to change anything."""
+    client, _ = _cockpit_at(store, 60)
+    rows = client.get("/api/live/picks?limit=5").json()
+
+    assert [row["pick_no"] for row in rows] == [60, 59, 58, 57, 56]
+    assert all(row["pick_class"] in {"KEEPER", "COMPETITIVE", "FLAGGED"} for row in rows)
+    assert all(row["owner"] and row["name"] for row in rows)
+
+
+def test_the_pick_list_searches_by_number_and_by_name(store: OverrideStore) -> None:
+    client, _ = _cockpit_at(store, 60)
+    by_number = client.get("/api/live/picks?q=42").json()
+    assert [row["pick_no"] for row in by_number] == [42]
+
+    name = by_number[0]["name"]
+    by_name = client.get(f"/api/live/picks?q={name}").json()
+    assert 42 in [row["pick_no"] for row in by_name]
+
+
+def test_reclassifying_a_pick_moves_it_out_of_the_competitive_series(
+    store: OverrideStore,
+) -> None:
+    """**The whole point of the card.** A keeper counted as a bid is a phantom data point in
+    inflation, skew, run detection and every tendency profile. The assertion is on
+    `competitive_picks`, not on the stored row, because a correction that does not reach the
+    analytics has not corrected anything."""
+    import asyncio
+
+    client, live = _cockpit_at(store, 60)
+    before = live.snapshot().competitive_picks
+
+    target = client.get("/api/live/picks?limit=1").json()[0]
+    assert target["pick_class"] == "COMPETITIVE"
+    response = client.post(
+        "/api/live/corrections/reclassify",
+        json={"pick_no": target["pick_no"], "pick_class": "KEEPER", "reason": "ceremonial"},
+    )
+    assert response.status_code == 200
+    assert response.json()["was"] == "COMPETITIVE"
+
+    asyncio.run(live.poll_once())
+    assert live.snapshot().competitive_picks == before - 1
+    listed = client.get(f"/api/live/picks?q={target['pick_no']}").json()
+    assert listed[0]["pick_class"] == "KEEPER", "the list must show the correction it caused"
+
+
+def test_undoing_a_reclassification_puts_the_pick_back(store: OverrideStore) -> None:
+    """A correction nobody dares type is a correction nobody uses. Reverting emits a real
+    `Revert` rather than deleting the row, so the fold restores the class exactly."""
+    import asyncio
+
+    client, live = _cockpit_at(store, 60)
+    before = live.snapshot().competitive_picks
+    target = client.get("/api/live/picks?limit=1").json()[0]
+
+    made = client.post(
+        "/api/live/corrections/reclassify",
+        json={"pick_no": target["pick_no"], "pick_class": "KEEPER"},
+    ).json()
+    asyncio.run(live.poll_once())
+    assert live.snapshot().competitive_picks == before - 1
+
+    client.delete(f"/api/live/corrections/{made['correction']['id']}")
+    asyncio.run(live.poll_once())
+    assert live.snapshot().competitive_picks == before
+
+
+@pytest.mark.parametrize(
+    ("payload", "status", "why"),
+    [
+        ({"pick_no": 9999, "pick_class": "KEEPER"}, 404, "a pick the ledger does not hold"),
+        ({"pick_no": 60, "pick_class": "COMPETITIVE"}, 422, "a correction that changes nothing"),
+        ({"pick_no": 60, "pick_class": "FLAGGED"}, 422, "FLAGGED is not an answer a person gives"),
+    ],
+)
+def test_the_reclassify_endpoint_refuses_what_it_should(
+    store: OverrideStore, payload: dict[str, object], status: int, why: str
+) -> None:
+    """Each refusal is a row that would otherwise sit in the audit trail explaining nothing —
+    or, for FLAGGED, a 'correction' that leaves the pick exactly as unresolved as it was."""
+    client, _ = _cockpit_at(store, 60)
+    assert client.post("/api/live/corrections/reclassify", json=payload).status_code == status, why
+
+
+def test_a_reclassification_writes_no_slot_and_still_reads_back(store: OverrideStore) -> None:
+    """It is keyed on `pick_no` alone. The slot is deliberately absent — late-bound seating
+    means a slot copied at 9pm is a staler answer than the pick itself already gives."""
+    client, live = _cockpit_at(store, 60)
+    client.post("/api/live/corrections/reclassify", json={"pick_no": 60, "pick_class": "KEEPER"})
+
+    stored = live.corrections.load()
+    assert [c.slot for c in stored] == [None]
+    assert [c.pick_no for c in stored] == [60]
+    assert "pick 60" in stored[0].describe()
+
+
+def test_the_reclassify_form_lives_outside_the_repainted_region(store: OverrideStore) -> None:
+    """Same rule as every other form, and the same defect if it is broken: `#app` is replaced
+    wholesale every two seconds, so anything typed into a control inside it is wiped."""
+    client, live = _cockpit_at(store, 60)
+    body, tail = _split(client.get("/live").text)
+
+    for control in ("class-q", "class-to", "class-go", "class-hits"):
+        assert control in tail and control not in body
+    assert 'id="class-go" disabled' in tail, "nothing selected means nothing to post"
+
+    # ...and the resulting correction shows up in the half that *does* refresh, named by pick
+    # rather than by a team it deliberately does not carry.
+    import asyncio
+
+    client.post("/api/live/corrections/reclassify", json={"pick_no": 60, "pick_class": "KEEPER"})
+    asyncio.run(live.poll_once())
+    body, _tail = _split(client.get("/live").text)
+    assert "pick 60" in body and "counted as KEEPER" in body
