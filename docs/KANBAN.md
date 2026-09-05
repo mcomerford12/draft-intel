@@ -3056,7 +3056,56 @@ append to. Written to schema here, retroactively for the cards already built.
   - [x] four mutations verified: dropping the ordinal window, ignoring a user's answer,
         defaulting a broken file to on, and ignoring `flag_unmatched` entirely
   - [x] `make ci` green — 678 tests, 95% coverage; rehearsal PASSED
-- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+- **Reviewer verdict: REJECTED** (adversarial review of `domain/ledger.py` + `domain/classify.py`,
+  2026-09-05). Two defects reproduced, one blocking.
+
+  **R1 (BLOCKING) — `ledger.py:328-335`: `ManualKeeper` never decrements `owed`, so the armed
+  backstop flags a slot's first two *real bids* even when that slot already holds both keepers.**
+  The `owed` map is decremented only inside the `for pick in ordered_picks` loop. Manual keeper
+  entries land on the roster as `PickClass.KEEPER` (`ledger.py:399-409`) but are not picks, so
+  they are invisible to that loop and the slot owes 2 forever. Reproduced: 10 teams, all 20
+  keepers typed by hand (`ManualKeeper`), then 40 genuine competitive picks —
+  `flag_unmatched=keepers_owed(1..10, keepers_per_team=2)` yields **`competitive_seq` of 20 of 40,
+  20 picks worth $300 FLAGGED, and `alerts == ()`**. Mixed case is worse because the state is
+  self-contradictory: slot 1 with one manifest keeper from the feed and one typed by hand reports
+  `len(team.keepers) == 2` and still FLAGS its $57 bid. FLAGGED is excluded from
+  `quant/inflation.py`, `quant/skew.py` and `quant/tendencies.py`, so this is the exact row this
+  card's own table calls "no ceremonial round at all → 20 competitive picks deleted", re-entered
+  through the manual-entry door. Charter §2 names manual keeper entry as the path for precisely
+  the botched-ceremonial-round case that arming exists for, so armed + manual is the intended
+  combination, not an exotic one. Fix belongs in the fold: seed `owed` from manual keepers before
+  the classification loop.
+
+  **R2 (non-blocking, out of this card's scope) — `ledger.py:232-233,330`: `Reclassify` keys on
+  `pick_no`, which Sleeper reuses after a commissioner undo.** A stale reclassification silently
+  re-attaches to whatever player later occupies that `pick_no`. Reproduced: `Reclassify(pick_no=1,
+  COMPETITIVE)` on an undone pick, then a new pick 1 = a different player, slot 5, $77,
+  `is_keeper=true` → `keeper_spend()` 77 → **0**, slot 5 keepers 1 → **0**, the $77 retention price
+  enters `competitive_seq` as a bid, and `alerts == ()`. Already noted on the board as M10; carry
+  it as its own card.
+
+  **Checked and found sound, with the work shown:** `_resolve_reverts` is correct — differential
+  fuzz of 4,000 random revert graphs (linear chains to depth 13, multiple reverts on one target,
+  reverts of reverts) against an independent recursive `active()` reference: 0 mismatches; the
+  depth-0..6 chain on a `BudgetAdjustment(+50)` alternates $250/$200 exactly. `_ordered` — an
+  UNSTAMPED `PickRemoved` does neutralise an earlier stamped `PickObserved`; a generator folds
+  identically to a list; duplicate seqs alert. Money conservation and fold order-independence —
+  3,000 random 25-event logs mixing observe/remove/amend/manual/adjust/reclassify/revert over
+  slots 1-12 in a 10-slot league: `Σ spent + Σ remaining == teams × budget + override_delta` held
+  every time, and shuffling the input produced a byte-identical `model_dump()`. Orphan slots —
+  a $50 pick on slot 11 is reported in `orphans`, alerted, and absorbed by no team; conservation
+  stays exact. `Reclassify` → KEEPER decrements `owed` exactly once even when the classifier
+  already returned KEEPER, and → COMPETITIVE correctly leaves the debt outstanding. Supersession
+  on `player_id` alone always alerts on a slot, amount or keeper-flag divergence — no silent
+  variant found. No hardcoded player/team/tier, no `roster_id` keying, no runtime name matching,
+  no keeper branch in the money path, no new dependency.
+
+  **Residual, not blocking:** a duplicate `seq` shared by a pick and an override lets a `Revert`
+  of the override delete the pick's money (reproduced: $50 leaves the ledger, conservation still
+  reads exactly $2,000), defeating the "reverts of pick events are refused" guard at
+  `ledger.py:128-133`. Unreachable through any shipped producer — `store/db.py` seqs are an
+  autoincrement primary key and `live.py` keeps picks at 1..N against corrections at 1e6+ — so it
+  is defence-in-depth only. · **Evaluator verdict:** pending.
 
 ---
 
@@ -3137,6 +3186,54 @@ append to. Written to schema here, retroactively for the cards already built.
   - [x] four mutations verified: dropping unanimity, dropping the agreement guard, reporting the
         ratio against the rule, and a minimum count of one
   - [x] `make ci` green — 684 tests, 95% coverage; rehearsal PASSED
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
+### [DI-077] A seat assertion the league contradicts, and a blocker that blamed the wrong person
+
+- **Sprint:** 3 · **Owner:** data-engineer · **Size:** S · **Branch:** `di-077-seat-conflict`
+- **Found by the adversarial review of the draft-night path**, in the one area none of the four
+  review slices covered: what happens when the live identity and a hand-typed seat disagree.
+- **The scenario is tonight's.** Two managers have not joined. The user seats one by hand at
+  7:05 while waiting. That manager joins at 7:20 — into a different slot, or under a name
+  `owners.yaml` now resolves. From then on their keepers are attributed to a team that is not
+  theirs, and **nothing says so**.
+- **Measured on the full fixture,** everybody joined, one seat asserted one slot wrong:
+
+  | | competitive picks | blockers |
+  |---|---:|---:|
+  | no seats asserted | 140 | 0 |
+  | seat agrees with the league | 140 | 0 |
+  | **seat contradicts the league** | **144** | 1, naming the wrong cause |
+
+  Four keeper picks became competitive bids — the exact corruption `pick_class` exists to
+  prevent, arriving through the surface built to fix it.
+- **The second half is worse than the first.** The one blocker that did fire read *"TD have not
+  joined"* — a claim about the league that is **false**. TD had joined; the user's assertion had
+  displaced them. Naming the wrong cause is worse than naming none: it sends the user to chase a
+  manager who is already sitting there while the real problem is a seat they typed themselves.
+- **Root cause: `LiveDraft` kept only the post-assertion identity.** `apply_seats` returns a new
+  `Identity` and the one the league actually reported was discarded, so the tool had no way to
+  know its two sources disagreed. Both defects were silent rather than merely unhandled because
+  the evidence had been thrown away.
+- **`apply_seats` itself is not changed and is not wrong.** The user is *meant* to win — that is
+  the whole purpose of the surface, for a manager who joins under a name `owners.yaml` does not
+  recognise. What was missing is that a contradicted assertion is a different situation from an
+  uncontested one, and the person at the table has to be told which one they are in.
+- **Fix:** retain the league's own seating as `LiveDraft._resolved` beside the asserted
+  `_identity`; raise a `SEAT CONFLICT` blocker naming **both** slots and the remedy; and split
+  the keeper blocker's cause into "have not joined" and "lost their seat to a seat you
+  assigned", so it stops asserting something false about the league.
+- **Acceptance criteria:**
+  - [x] a seat that agrees with the league is silent — without this the finding is a banner the
+        user learns to ignore
+  - [x] a contradicted seat names both slots, the owner, and how to undo it
+  - [x] the keeper blocker never says "have not joined" about somebody who has
+  - [x] a genuinely absent manager still reads as absent; splitting the cause loses neither half
+  - [x] three mutations verified: dropping the conflict test, reverting to the hardcoded cause,
+        and discarding the league identity
+  - [x] `make ci` green — 689 tests, 95% coverage; rehearsal PASSED
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
 ---

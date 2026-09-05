@@ -1102,3 +1102,111 @@ def test_no_corrections_changes_nothing(store: OverrideStore, tmp_path: Path) ->
     assert live.snapshot().total_remaining == 2000 - sum(
         int(p["metadata"]["amount"]) for p in PICKS[:60]
     )
+
+
+# --------------------------------- DI-077: a seat assertion the league contradicts
+#
+# Found by adversarial review of the draft-night path. A seat assertion is *meant* to win — it
+# exists for a manager who joins under a display name `owners.yaml` does not recognise, and the
+# person at the table knows better than the API. What it must not do is win silently once the
+# API has an answer of its own, because the two together are a real draft-night mistake: you
+# seat somebody at 7:05 while they are missing, they join at 7:20 into a different slot, and
+# from then on their keepers sit on a team that is not theirs.
+
+
+def _seated(store: OverrideStore, tmp_path: Path, *seats: SeatAssignment) -> LiveDraft:
+    """The full fixture, everybody joined, with `seats` asserted on top."""
+    from draft_intel.store.seats import SeatStore
+
+    seat_store = SeatStore(tmp_path / "seats.yaml")
+    for seat in seats:
+        seat_store.assign(seat)
+    live = LiveDraft(
+        ROOT,
+        league_id="L",
+        draft_id="D",
+        store=store,
+        seats=seat_store,
+        corrections=CorrectionStore(tmp_path / "corrections.yaml"),
+        client=FakeClient(PICKS),
+    )
+    asyncio.run(live.poll_once())
+    return live
+
+
+def test_a_seat_that_agrees_with_the_league_says_nothing(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """The negative case, and the one that keeps the finding usable. Asserting what the league
+    already says is the common case — the user placing somebody defensively — and a banner for
+    it would train them to ignore the banner that matters."""
+    live = _seated(store, tmp_path, SeatAssignment(slot=9, owner="Burt", note="agrees"))
+    snap = live.snapshot()
+    assert snap.competitive_picks == 140
+    assert snap.blockers == ()
+
+
+def test_a_seat_the_league_contradicts_is_named_with_both_slots_and_the_remedy(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """Measured cost of this going unsaid: competitive picks 140 -> 144, four keeper picks
+    reclassified as bids, and no banner anywhere pointing at the cause."""
+    live = _seated(store, tmp_path, SeatAssignment(slot=10, owner="Burt", note="typed at 7:05"))
+    snap = live.snapshot()
+
+    assert snap.competitive_picks == 144, "the misattribution itself, for scale"
+    conflict = next((b for b in snap.blockers if b.startswith("SEAT CONFLICT")), None)
+    assert conflict is not None
+    assert "slot 10" in conflict and "slot 9" in conflict, "both seats, or it is not actionable"
+    assert "Burt" in conflict
+    assert "seating" in conflict, "a blocker without its remedy is just bad news"
+
+
+def test_the_keeper_blocker_stops_blaming_a_manager_who_has_joined(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """The worse half of the defect. Displacing TD by asserting Burt into slot 10 made the
+    keeper blocker report *"TD have not joined"* — a claim about the league that is false, and
+    which sends the user to chase a manager who is already sitting there. Naming the wrong cause
+    is worse than naming none."""
+    live = _seated(store, tmp_path, SeatAssignment(slot=10, owner="Burt", note="typed at 7:05"))
+    keeper_blocker = next(b for b in live.snapshot().blockers if "cannot be placed" in b)
+
+    assert "TD have not joined" not in keeper_blocker
+    assert "TD lost their seat to a seat you assigned" in keeper_blocker
+
+
+def test_a_genuinely_absent_manager_is_still_reported_as_absent(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """The other side of the same sentence. Splitting the cause must not lose the real one —
+    somebody who has actually not joined still reads as not joined."""
+    from draft_intel.store.seats import SeatStore
+
+    short = {slot: name for slot, name in FIXTURE_SEATING.items() if slot != 10}
+    live = LiveDraft(
+        ROOT,
+        league_id="L",
+        draft_id="D",
+        store=store,
+        seats=SeatStore(tmp_path / "seats.yaml"),
+        corrections=CorrectionStore(tmp_path / "corrections.yaml"),
+        client=FakeClient(PICKS, seating=short),
+    )
+    asyncio.run(live.poll_once())
+    keeper_blocker = next(b for b in live.snapshot().blockers if "cannot be placed" in b)
+    assert "TD have not joined" in keeper_blocker
+    assert "lost their seat" not in keeper_blocker
+
+
+def test_the_leagues_own_seating_is_retained_beside_the_asserted_one(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """The root cause was that it was not. `LiveDraft` kept only the post-assertion identity, so
+    it had no way to know its two sources disagreed — which is why both defects above were
+    silent rather than merely unhandled."""
+    live = _seated(store, tmp_path, SeatAssignment(slot=10, owner="Burt", note="typed"))
+    assert live._resolved is not None
+    assert live._resolved.slot_for("Burt") == 9, "what the league said"
+    assert live.identity is not None
+    assert live.identity.slot_for("Burt") == 10, "what the user asserted, and what is used"

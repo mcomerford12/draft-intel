@@ -297,6 +297,14 @@ class LiveDraft:
         self._picks_raw: list[dict[str, Any]] = []
         self._nominated: str | None = None
         self._identity: Identity | None = None
+        self._resolved: Identity | None = None
+        """Seating as the **league** reports it, before any hand-typed seat is overlaid.
+
+        Kept beside ``_identity`` rather than discarded, because without it the tool cannot tell
+        that its two sources disagree. A seat assertion is meant to win (that is its whole
+        purpose), but a contradicted assertion is a different situation from an uncontested one
+        and the user has to be told which they are in.
+        """
         self._identity_at = float("-inf")
         self._seats_mtime: float | None = None
         """When identity was last resolved, on the monotonic clock.
@@ -441,12 +449,11 @@ class LiveDraft:
         rosters = await client.rosters(self.league_id) or []
         users = await client.users(self.league_id) or []
         aliases = yaml.safe_load((self.root / "config" / "owners.yaml").read_text()) or {}
-        resolved = apply_seats(
-            build_identity(
-                draft, rosters=rosters, users=users, aliases=aliases.get("aliases") or {}
-            ),
-            self.seats.load(),
+        league = build_identity(
+            draft, rosters=rosters, users=users, aliases=aliases.get("aliases") or {}
         )
+        resolved = apply_seats(league, self.seats.load())
+        self._resolved = league
         if resolved.slot_to_owner != (self._identity.slot_to_owner if self._identity else None):
             # Seating changed, so every `(slot, player_id)` keeper key built from the old one is
             # stale. Dropping the classifier forces it to be rebuilt against the new seating.
@@ -883,11 +890,25 @@ class LiveDraft:
                 "be placed and no team name below is confirmed. Every figure on this page is "
                 "provisional until the next successful poll.",
             )
+        # Before the keeper blocker, because it is a *cause* of it and the keeper blocker's own
+        # explanation is wrong whenever this holds.
+        for conflict in self._seat_conflicts():
+            out.append(conflict)
         resolved, expected, unmapped = self.unresolved_keepers()
         if resolved < expected:
+            # "have not joined" is a claim about the league, and it is false for anyone your own
+            # seat assertion displaced. Naming the wrong cause is worse than naming none: it
+            # sends you to chase a manager who is already sitting there.
+            displaced = self._displaced_owners()
+            absent = [owner for owner in unmapped if owner not in displaced]
+            why = []
+            if absent:
+                why.append(f"{', '.join(absent)} have not joined")
+            if displaced:
+                why.append(f"{', '.join(sorted(displaced))} lost their seat to a seat you assigned")
             out.append(
                 f"{expected - resolved} of {expected} keepers cannot be placed on a draft slot "
-                f"({', '.join(unmapped)} have not joined). Each one will be read as a "
+                f"({'; '.join(why)}). Each one will be read as a "
                 f"competitive bid, which corrupts inflation, skew and every threat read below."
             )
         if my_slot is None:
@@ -913,6 +934,49 @@ class LiveDraft:
                 "money is out of inflation, skew and every tendency profile."
             )
         return tuple(out)
+
+    def _seat_conflicts(self) -> list[str]:
+        """Seats you asserted that the league now answers differently.
+
+        A seat assertion is designed to win — it exists for a manager who joins under a display
+        name ``owners.yaml`` does not recognise, and the person at the table knows better than
+        the API. What it must not do is win *silently* once the API has an answer of its own,
+        because the two together are the shape of a real draft-night mistake: you seat somebody
+        at 7:05 while they are missing, they join at 7:20 into a different slot, and from then on
+        their keepers are attributed to a team that is not theirs.
+
+        Measured cost of that going unsaid, on the full fixture: competitive picks 140 -> 144,
+        four keeper picks reclassified as bids, and the only banner shown naming the wrong
+        manager as the cause.
+        """
+        if self._resolved is None:
+            return []
+        out: list[str] = []
+        for slot, seat in sorted(self.seats.load().items()):
+            league_slot = self._resolved.slot_for(seat.owner)
+            if league_slot is not None and league_slot != slot:
+                out.append(
+                    f"SEAT CONFLICT: you assigned {seat.owner} to slot {slot}, but the league "
+                    f"now says they are in slot {league_slot}. Your assignment is being used, "
+                    f"so {seat.owner}'s keepers and money are on slot {slot} and slot "
+                    f"{league_slot} has been left unnamed. Clear the assignment under seating "
+                    f"if the league is right."
+                )
+        return out
+
+    def _displaced_owners(self) -> set[str]:
+        """Manifest owners the league seats somewhere, whom a seat assertion has since evicted.
+
+        Exists only so the keeper blocker can stop calling them absent. They are not absent —
+        they are sitting in a seat the user gave to somebody else.
+        """
+        if self._resolved is None or self._identity is None:
+            return set()
+        return {
+            owner
+            for owner in self._resolved.owner_to_slot
+            if self._identity.slot_for(owner) is None
+        }
 
     def _flagged_picks(self) -> list[dict[str, Any]]:
         """Every pick the arming backstop is asking about, oldest first.
