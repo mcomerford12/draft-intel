@@ -3060,6 +3060,44 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-075] The draft-night runbook, and a handoff that had gone stale
+
+- **Sprint:** 4 · **Owner:** docs-scribe · **Size:** S · **Branch:** `di-075-runbook`
+- **The ask:** seventy-four cards of capability and nothing that tells you what to do at 7pm
+  with the room waiting. `docs/RUNBOOK.md` is that page.
+- **Written against a running tool, not from memory.** The cockpit was started against the live
+  draft while writing it, so every banner quoted is one the page actually renders, every command
+  was run, and every number was measured. Two claims in the first draft were wrong and were
+  corrected by measuring rather than shipped:
+  - **Walk-away precompute.** The draft said "about sixteen seconds at eight open slots", carried
+    over from a mid-draft measurement. Measured properly at realistic draft states it is 183s at
+    14 open slots, 62s at 10, 13s at 6, 1s at 2 — so the panel reads `computing` for roughly the
+    first forty picks. ADR-0006 clause 4 (≤30s at ≤8 open slots) **holds**; the early-round cost
+    is real and is now stated rather than discovered on the night.
+  - The runbook now says: **in the early rounds, price off the printed board.**
+- **What running it found, which is the point of running it.** `config/keepers.yaml` carries
+  **0 of 20** retention prices, so every keeper price in the pre-draft report is what that player
+  cost in the **mock** draft — a different draft. `make prep` flags it correctly in a `!!` block,
+  but structural keeper inflation (which the report itself calls the single most actionable
+  pre-draft number) and the whole keeper surplus board inherit it, and surplus is how the tool
+  judges what each opponent can actually afford. Twenty numbers from the user closes it. This is
+  now the largest open item and outranks `auction_values.csv`.
+- **`docs/HANDOFF.md` was four days stale and actively misleading** — it described Sprint 1 as
+  rejected, Sprint 2 as never started, 118 tests, and a tool that "cannot connect to the real
+  draft at all". Corrected with a dated §0 rather than rewritten, because §2, §3, §5, §7, §8 and
+  §10 are still true and still worth reading. §0 also records what its recommendation got right
+  (build the board before the live path) and what it got wrong (one review pass per card — the
+  two-pass rule kept finding real defects and was worth its cost).
+- **Acceptance criteria:**
+  - [x] one page: the pre-draft sequence, the page decoded, a symptom → action table, the
+        backstop, the limits, and what to do if it all falls over
+  - [x] every command in it was run; every banner quoted was rendered by the live cockpit
+  - [x] every number in it was measured, and the two that were not got corrected
+  - [x] the stale handoff is marked stale, section by section, without discarding what is true
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.
