@@ -15,7 +15,12 @@ import httpx
 import yaml
 
 from draft_intel.config import Severity, assert_startable, load_league_config, validate
-from draft_intel.domain.classify import KeeperClassifier, keepers_seen, reconcile
+from draft_intel.domain.classify import (
+    KeeperClassifier,
+    keepers_owed,
+    keepers_seen,
+    reconcile,
+)
 from draft_intel.domain.identity import (
     Identity,
     UnresolvedManifest,
@@ -38,6 +43,7 @@ from draft_intel.quant.slots import seat_keepers
 from draft_intel.quant.valuation import value_board
 from draft_intel.replay.harness import load_picks, replay_all, replay_rejects
 from draft_intel.sleeper.client import SleeperClient
+from draft_intel.store.arming import ArmingStore
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "fixtures"
@@ -73,21 +79,12 @@ def _classifier(
     identity: Identity,
     *,
     require: int | None,
-    armed: bool = False,
 ) -> KeeperClassifier:
     """Build the pick classifier from the resolved manifest.
 
-    **Deliberately NOT armed, and this is the second decision on that in two cards.** DI-053
-    armed it by default, on the reasoning that ``KeeperClassifier.armed`` is the charter's
-    classification mechanism #4 -- an unmatched pick inside the ceremonial window is FLAGGED for
-    confirmation rather than silently treated as a competitive bid -- and was set ``True`` by
-    nothing outside `tests/`, so the backstop existed and never ran. That reasoning was right
-    about the gap and wrong about the remedy. DI-055 reverses it.
-
-    **What DI-053 missed: ``arming_window`` is a hardcoded count of 20, not a fact read from the
-    feed.** Its acceptance criterion claimed arming "changes nothing on a fully-resolving
-    manifest". That is true only of ``fixtures/picks.json``, where the ceremonial round happens
-    to occupy exactly picks 1-20. Generalising from one fixture:
+    **This no longer decides anything about arming, and that is DI-057's resolution of a
+    question two earlier cards fought over.** DI-053 armed the backstop by default; DI-055
+    reversed it, on three objections:
 
     ==================================  =========================================
     ceremonial round at picks 1-20      no change (the fixture, and only it)
@@ -95,25 +92,22 @@ def _classifier(
     no ceremonial round at all          **20 of 160 competitive picks lost**
     ==================================  =========================================
 
-    Those are the most expensive picks of the night, and they vanish from ``competitive_seq`` --
-    so out of skew, inflation, run detection and every tendency profile. That is exactly the
-    poisoning ``pick_class`` exists to prevent, arriving from the mechanism meant to prevent it.
+    All three were symptoms of one cause: the window was ``pick_no <= 20``, a hardcoded constant
+    describing ``fixtures/picks.json`` rather than any league. A ``Classifier`` is a pure
+    function of one pick, so a constant is the only window it *can* express.
 
-    **And FLAGGED is currently terminal.** ``Reclassify`` is consumed by the ledger and produced
-    by no product path, so a flagged pick can never be confirmed or denied; charter §2 also
-    specifies a *prominent pre-draft toggle*, which is Sprint 3 and unbuilt. Arming a backstop
-    before its confirmation loop exists turns a recoverable mistake into a one-way trap, three
-    days before the draft.
+    The window now lives in the fold, as ``fold(flag_unmatched=...)``, keyed on how many
+    ceremonial keepers each slot still owes. That closes rows two and three: a real bid by a
+    team whose keepers have landed is never flagged, and a league with no ceremonial round
+    flags nothing at all. DI-055's fourth objection -- that ``FLAGGED`` was terminal, with no
+    product path able to confirm or deny it -- was closed by DI-073's reclassification form.
 
-    So the switch stays available and off. Arming belongs with the toggle and the ``Reclassify``
-    producer, as one Sprint 3 change -- and the window should key on *manifest incompleteness*
-    (a slot that still owes keepers) rather than a pick-number constant.
+    The switch itself is :class:`~draft_intel.store.arming.ArmingStore`, off by default, flipped
+    once before the draft with ``make arm ON=1``.
     """
     manifest = load_manifest(CONFIG / "keepers.yaml")
     resolved = resolve_manifest(manifest, players)
-    return KeeperClassifier(
-        manifest_keys=manifest_keys(resolved, identity, require=require), armed=armed
-    )
+    return KeeperClassifier(manifest_keys=manifest_keys(resolved, identity, require=require))
 
 
 def replay() -> int:
@@ -135,6 +129,13 @@ def replay() -> int:
         ),
         expect_keepers=True,
         rejects=replay_rejects(payload),
+        # The same switch the cockpit reads, from the same file. A replay that classified
+        # differently from the live tool would be a rehearsal of a draft nobody is running.
+        flag_unmatched=(
+            keepers_owed(range(1, config.teams + 1), keepers_per_team=config.keepers_per_team)
+            if ArmingStore(CONFIG / "arming.yaml").load()
+            else None
+        ),
     )
 
     print(
@@ -521,9 +522,42 @@ def smoke() -> int:
     return asyncio.run(_smoke())
 
 
+def arm(args: list[str]) -> int:
+    """Charter §2's pre-draft arming toggle, and the reason it is a command rather than a flag.
+
+    A flag would bind arming to one process. The person deciding this is at a table ten minutes
+    before the draft, in a different terminal from the one the cockpit is running in, and both
+    have to agree. So it is a file, and this reads or writes it.
+
+    ``arm`` alone reports the state. ``arm on`` / ``arm off`` set it, and print what changes --
+    because "armed" is not self-explanatory at 6:50pm and the consequence is what matters.
+    """
+    store = ArmingStore(CONFIG / "arming.yaml")
+    if not args:
+        state = store.load()
+        print(f"keeper backstop: {'ARMED' if state else 'off'}  ({store.path})")
+        return 0
+    want = args[0].lower()
+    if want not in {"on", "off"}:
+        print(f"unknown argument {args[0]!r}; expected 'on' or 'off'", file=sys.stderr)
+        return 2
+    store.set(want == "on")
+    if want == "on":
+        print("keeper backstop ARMED.")
+        print("  While a team still owes ceremonial keepers, a pick of theirs the manifest does")
+        print("  not recognise is FLAGGED rather than counted as a bid. Each one is a question:")
+        print("  answer it from the cockpit's `recount it` form. Unanswered, it stays out of")
+        print("  inflation, skew and every tendency profile.")
+    else:
+        print("keeper backstop off. The manifest and is_keeper decide; anything else is a bid.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv[1:]
     command = args[0] if args else "replay"
+    if command == "arm":
+        return arm(args[1:])
     if command == "replay":
         return replay()
     if command == "smoke":
@@ -535,7 +569,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return prep_main()
     print(
-        f"unknown command {command!r}; expected 'replay', 'smoke', 'value' or 'prep'",
+        f"unknown command {command!r}; expected 'replay', 'smoke', 'value', 'prep' or 'arm'",
         file=sys.stderr,
     )
     return 2

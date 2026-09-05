@@ -497,11 +497,14 @@ def test_the_cockpit_and_the_price_table_agree_on_a_players_value(
 # --------------------------------------- DI-070: forms must survive the repaint
 
 
-def _cockpit_at(store: OverrideStore, cursor: int) -> tuple[TestClient, Any]:
+def _cockpit_at(
+    store: OverrideStore, cursor: int, *, armed: bool = False, stale_manifest: bool = False
+) -> tuple[TestClient, Any]:
     import asyncio
     import json
 
     from draft_intel.api.live import LiveDraft
+    from draft_intel.store.arming import ArmingStore
     from draft_intel.store.corrections import CorrectionStore
     from draft_intel.store.seats import SeatStore
     from tests.test_live import FIXTURE_SEATING, FakeClient
@@ -520,9 +523,19 @@ def _cockpit_at(store: OverrideStore, cursor: int) -> tuple[TestClient, Any]:
         store=store,
         seats=SeatStore(scratch / "seats.yaml"),
         corrections=CorrectionStore(scratch / "corrections.yaml"),
+        arming=ArmingStore(scratch / "arming.yaml"),
         client=FakeClient(picks[:cursor], seating=FIXTURE_SEATING),
     )
+    live.arming.set(armed)
     asyncio.run(live.poll_once())
+    if stale_manifest:
+        # A keeper swapped after `config/keepers.yaml` was written, which is the only thing the
+        # backstop exists for. Dropping one resolved key is that, exactly.
+        from draft_intel.domain.classify import KeeperClassifier
+
+        keys = live._keeper_classifier().manifest_keys
+        live._classifier = KeeperClassifier(manifest_keys=frozenset(sorted(keys)[1:]))
+        asyncio.run(live.poll_once())
     return TestClient(create_app(ROOT, store, live_draft=live)), live
 
 
@@ -720,3 +733,90 @@ def test_the_reclassify_form_lives_outside_the_repainted_region(store: OverrideS
     asyncio.run(live.poll_once())
     body, _tail = _split(client.get("/live").text)
     assert "pick 60" in body and "counted as KEEPER" in body
+
+
+# ----------------------------------------- DI-057: the backstop, armed at last
+#
+# DI-053 armed it, DI-055 disarmed it, DI-057 rebuilt the window and shipped the switch. What
+# follows pins the behaviour all three cards were actually arguing about, at the cockpit level
+# where the user meets it.
+
+
+def test_the_backstop_is_off_by_default_and_says_so_on_the_page(store: OverrideStore) -> None:
+    """Charter §2 asks for this to be *prominent*. A mode that silently changes what
+    `competitive` counts and is not displayed is the opposite of prominent — and it has to read
+    in both states, or "armed" looks like a transient alert rather than a standing mode."""
+    client, live = _cockpit_at(store, 60)
+    assert live.snapshot().armed is False
+    assert "backstop off" in client.get("/live").text
+
+
+def test_an_armed_cockpit_flags_a_swapped_keeper_instead_of_bidding_it(
+    store: OverrideStore,
+) -> None:
+    """The whole purpose. Disarmed, a keeper the manifest does not know is silently a
+    competitive bid and the count goes *up* by one — a phantom bid in inflation, skew and every
+    tendency profile. Armed, it becomes a question instead."""
+    disarmed, _ = _cockpit_at(store, 60, stale_manifest=True)
+    loose = disarmed.get("/api/live").json()["competitive_picks"]
+
+    client, live = _cockpit_at(store, 60, armed=True, stale_manifest=True)
+    snap = live.snapshot()
+    assert snap.armed is True
+    assert snap.competitive_picks == loose - 1
+    assert [row["pick_class"] for row in live._flagged_picks()] == ["FLAGGED"]
+    assert "backstop ARMED" in client.get("/live").text
+
+
+def test_a_flagged_pick_is_a_blocker_naming_the_pick_and_the_remedy(
+    store: OverrideStore,
+) -> None:
+    """A blocker rather than an alert, and the distinction is the point: an alert records what
+    happened, a blocker says the figures beside it are not yet trustworthy. An unanswered
+    flagged pick is exactly that — real money sitting outside the competitive series."""
+    client, live = _cockpit_at(store, 60, armed=True, stale_manifest=True)
+    blockers = " ".join(live.snapshot().blockers)
+
+    assert "flagged for confirmation" in blockers
+    assert "recount it" in blockers, "a blocker without its remedy is just bad news"
+    flagged = live._flagged_picks()[0]
+    assert f"pick {flagged['pick_no']}" in blockers and str(flagged["name"]) in blockers
+    assert "flagged for confirmation" in client.get("/live").text
+
+
+def test_answering_a_flagged_pick_clears_it_and_its_blocker(store: OverrideStore) -> None:
+    """The loop DI-055 refused to ship without, closed end to end: the backstop asks, DI-073's
+    form answers, and the question goes away rather than sitting there all night."""
+    import asyncio
+
+    client, live = _cockpit_at(store, 60, armed=True, stale_manifest=True)
+    flagged = live._flagged_picks()[0]
+    before = live.snapshot().competitive_picks
+
+    response = client.post(
+        "/api/live/corrections/reclassify",
+        json={"pick_no": flagged["pick_no"], "pick_class": "KEEPER", "reason": "late swap"},
+    )
+    assert response.status_code == 200
+    assert response.json()["was"] == "FLAGGED"
+
+    asyncio.run(live.poll_once())
+    assert live._flagged_picks() == []
+    assert live.snapshot().blockers == ()
+    assert live.snapshot().competitive_picks == before, "confirming a keeper adds no bid"
+
+
+def test_arming_mid_draft_lands_on_the_next_poll_rather_than_at_a_restart(
+    store: OverrideStore,
+) -> None:
+    """Every read goes to disk, as with seats and corrections. Somebody deciding to arm at 7:40
+    cannot be told to restart the cockpit mid-auction."""
+    import asyncio
+
+    _client, live = _cockpit_at(store, 60, stale_manifest=True)
+    assert live._flagged_picks() == []
+
+    live.arming.set(True)
+    asyncio.run(live.poll_once())
+    assert len(live._flagged_picks()) == 1
+    assert live.snapshot().armed is True

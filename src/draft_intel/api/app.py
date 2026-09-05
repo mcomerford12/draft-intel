@@ -1150,7 +1150,15 @@ def _live_body(
         f"<span><b>{snap.picks_seen}</b> picks, <b>{snap.competitive_picks}</b> competitive</span>"
         f"<span>room has <b>${snap.total_remaining:,}</b> for "
         f"<b>{snap.total_open_slots}</b> slots</span>"
-        f"</div>"
+        # Shown in both states, deliberately. "Armed" appearing only when armed reads as a
+        # transient alert; the point is that this is a standing mode which changes what
+        # `competitive` above counts, so its absence has to be legible too.
+        + (
+            '<span class="live">● backstop ARMED</span>'
+            if snap.armed
+            else "<span>backstop off</span>"
+        )
+        + "</div>"
     )
 
     out.append(_block_html(snap))
