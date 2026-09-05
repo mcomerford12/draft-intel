@@ -1,0 +1,15 @@
+# The keeper backstop. Written by `make arm`, safe to edit by hand.
+#
+# armed: true   While a slot still owes ceremonial keepers, a pick by that slot that the
+#               manifest does not recognise is FLAGGED rather than counted as a competitive
+#               bid. Confirm or deny each one from the cockpit's `recount it` form -- a
+#               FLAGGED pick is a question, and leaving it unanswered keeps real money out of
+#               inflation, skew and every tendency profile.
+#
+# armed: false  The manifest and `is_keeper` decide, and an unrecognised pick is a bid. This
+#               is the default and the behaviour every gate in the project was measured under.
+#
+# The window is NOT a pick-number range. It is per slot, and it closes as soon as that slot has
+# recorded the keepers the league rule says it holds -- so a real bid at pick 20 by a team whose
+# ceremonial round is done stays competitive. A league with keepers_per_team: 0 flags nothing.
+armed: false

@@ -47,3 +47,6 @@ rehearsal:
 # be placed -- which is the point: it is telling you Saturday is not ready yet.
 rehearsal-live:
 	uv run python tools/rehearsal.py --live
+
+arm:  ## the keeper backstop: `make arm` reports, `make arm ON=1` / `ON=0` sets it
+	@uv run python -m draft_intel.cli arm $(if $(ON),$(if $(filter 1 true yes on,$(ON)),on,off),)

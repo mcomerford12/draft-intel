@@ -11,8 +11,11 @@ Priority, highest first:
 1. Manual reclassification - applied in the ledger fold, wins over everything here.
 2. Manifest match on ``(slot, player_id)``.
 3. ``is_keeper`` true.
-4. Armed keeper mode with an unmatched early pick, flagged for confirmation.
-5. Competitive.
+4. Competitive.
+
+Priority 5 in earlier versions -- the armed backstop, flagging an unmatched pick for
+confirmation -- is no longer in this module. It needs pick order, which only the fold has, and
+lives there as ``fold(flag_unmatched=...)``. See :func:`keepers_owed`.
 
 Ordering 2 above 3 is not stylistic. In the user's own mock draft all twenty ceremonial
 keeper picks arrive with ``is_keeper: false`` (docs/api-findings.md, Finding 5), so the
@@ -21,6 +24,7 @@ manifest is the only mechanism that fires on real data.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 from draft_intel.models import PickClass, PickSnapshot
@@ -30,27 +34,49 @@ from draft_intel.models import PickClass, PickSnapshot
 class KeeperClassifier:
     """Classifies picks against the resolved keeper manifest.
 
+    **This classifier never returns FLAGGED, and cannot.** The arming backstop used to live
+    here as ``armed`` plus an ``arming_window`` of 20 picks, and DI-055 refused to ship it for
+    a reason that was really about *where* it lived rather than whether it should exist: a
+    ``Classifier`` is a pure function of one pick, so the only window it can express is a
+    constant. ``pick_no <= 20`` is a fact about ``fixtures/picks.json``, not about any league.
+    In a room whose ceremonial round sits anywhere else it flags twenty real bids, and in a
+    room with no ceremonial round at all it deletes twenty competitive picks outright.
+
+    A window that means "has this slot's ceremonial round happened yet" needs pick *order*,
+    which exists only in the fold. So it lives there now, as ``fold(flag_unmatched=...)``,
+    keyed on how many keepers each slot still owes. See :func:`draft_intel.domain.ledger.fold`.
+
     Args:
         manifest_keys: ``(slot, player_id)`` pairs expected to be keepers.
-        armed: Whether keeper mode is armed. While armed, an unmatched pick inside the
-            arming window is flagged for confirmation rather than silently treated as a
-            competitive bid - the backstop for a late keeper swap nobody told the user about.
-        arming_window: How many early picks the arming switch covers. Defaults to two per
-            team, the size of a full ceremonial round.
     """
 
     manifest_keys: frozenset[tuple[int, str]] = field(default_factory=frozenset)
-    armed: bool = False
-    arming_window: int = 20
 
     def __call__(self, pick: PickSnapshot) -> PickClass:
         if (pick.slot, pick.player_id) in self.manifest_keys:
             return PickClass.KEEPER
         if pick.is_keeper:
             return PickClass.KEEPER
-        if self.armed and pick.pick_no <= self.arming_window:
-            return PickClass.FLAGGED
         return PickClass.COMPETITIVE
+
+
+def keepers_owed(slots: Iterable[int], *, keepers_per_team: int) -> dict[int, int]:
+    """``slot -> ceremonial keepers expected``, the arming window's own definition.
+
+    Derived from the league's ``keepers_per_team`` rather than from the resolved manifest, and
+    the difference is the whole backstop. A manifest-derived count says slot 4 expects one
+    keeper when one of its two was swapped after the file was written — so the swapped pick
+    arrives with nothing owed and is silently counted as a competitive bid, which is precisely
+    the case the backstop exists to catch. The league rule says two, and two is what the room
+    will actually do.
+
+    A league with no ceremonial round has ``keepers_per_team = 0``, so every slot expects zero
+    and nothing is ever flagged. That is the generalisation the old constant could not express.
+
+    The returned count does double duty in the fold: it is both how many keepers a slot still
+    owes and how many of that slot's *own first picks* are candidates for flagging.
+    """
+    return {slot: keepers_per_team for slot in slots}
 
 
 def reconcile(

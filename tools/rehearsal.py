@@ -48,6 +48,7 @@ from typing import Any, NamedTuple
 
 from draft_intel.api.live import POLL_INTERVAL_SECONDS, LiveDraft, LiveSnapshot
 from draft_intel.models import PickClass
+from draft_intel.store.arming import ArmingStore
 from draft_intel.store.corrections import CorrectionStore
 from draft_intel.store.overrides import OverrideStore
 
@@ -198,6 +199,7 @@ def _fresh(feed: ReplayFeed, *, corrections: CorrectionStore | None = None) -> L
         # config changes what every later run and every test folds -- which has already happened
         # once, from a test, and is why `tests/conftest.py` now fingerprints the directory.
         corrections=corrections or CorrectionStore(scratch / "no-corrections.yaml"),
+        arming=ArmingStore(scratch / "no-arming.yaml"),
         client=feed,
     )
 
@@ -530,6 +532,10 @@ def run(live_league: bool = False, _seats_override: str | None = None) -> int:
         # `config/corrections.yaml` by a test made the rehearsal report "first failure at pick 1
         # of 160" for a reason that had nothing to do with pick 1.
         corrections=CorrectionStore(scratch / "no-corrections.yaml"),
+        # And the arming switch, for the same reason a third time: `make arm ON=1` must not
+        # silently change what this gate reports. The armed path has its own tests; a release
+        # gate whose result depends on a toggle is not a gate.
+        arming=ArmingStore(scratch / "no-arming.yaml"),
         # Seats are the exception, and deliberately so: the cockpit must read the *same* seats
         # the re-attribution did, or the rehearsal measures one seating while the ledger
         # classifies against another -- exactly the mock-vs-live confusion DI-064 was built to

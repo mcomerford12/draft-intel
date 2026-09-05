@@ -21,7 +21,7 @@ a silent default.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 
 from draft_intel.models import (
     OVERRIDE_KINDS,
@@ -145,6 +145,7 @@ def fold(
     max_keepers: int = 2,
     expect_keepers: bool = False,
     rejects: Iterable[str] | None = None,
+    flag_unmatched: Mapping[int, int] | None = None,
 ) -> DerivedState:
     """Replay ``events`` into a :class:`DerivedState`.
 
@@ -164,6 +165,25 @@ def fold(
         rejects: Ingestion complaints from :func:`~draft_intel.sleeper.poller.parse_picks`,
             carried through so a dropped row and its lost dollars surface where a consumer
             looks. This channel existed and was fed by nothing.
+        flag_unmatched: **The arming backstop** (charter §2 mechanism #4), as ``slot -> how many
+            ceremonial keepers that slot is expected to hold``. ``None`` disarms it entirely and
+            is the default.
+
+            While a slot still owes keepers, an unmatched pick by that slot is ``FLAGGED`` for
+            confirmation rather than silently counted as a competitive bid — the backstop for a
+            late keeper swap nobody told the user about. Two bounds keep it from becoming the
+            trap DI-055 refused to ship:
+
+            * a slot that has recorded all its expected keepers stops flagging, so a real bid at
+              pick 20 by a team whose ceremonial round is done stays competitive;
+            * only a slot's own first ``expected`` picks are candidates, because a team's
+              ceremonial round *is* its first picks. So a manager who never joins has at most
+              two picks questioned rather than their whole night, and nobody's pick at #45 is
+              ever proposed as a ceremonial keeper.
+
+            A league with no ceremonial round passes ``{}`` or ``None`` and nothing changes,
+            which is the point: the window is a fact about *this* league's keepers rather than
+            the constant ``pick_no <= 20`` that only ever described one fixture.
     """
     classify = classifier or _default_classifier
     alerts: list[str] = []
@@ -294,10 +314,45 @@ def fold(
     # A manual reclassification always wins. Tested with `is not None` rather than `or`
     # because relying on every PickClass member being truthy is a trap waiting for the day
     # someone adds a falsy one.
+    #
+    # The arming backstop lives HERE rather than in the classifier, and that is the whole of
+    # DI-057's second criterion. A `Classifier` is a pure function of one pick, so the only
+    # window it could express was a constant -- `pick_no <= 20` -- which is a fact about one
+    # fixture and not about any league (DI-055). Pick *order* exists only in this loop, so this
+    # is the only place a window keyed on "has this slot's ceremonial round happened yet"
+    # can be computed at all.
+    expected = dict(flag_unmatched or {})
+    owed = dict(expected)
+    nth_for_slot: dict[int, int] = {}
     classes: dict[int, PickClass] = {}
     for pick in ordered_picks:
+        nth = nth_for_slot[pick.slot] = nth_for_slot.get(pick.slot, 0) + 1
         override = reclass.get(pick.pick_no)
-        classes[pick.pick_no] = override if override is not None else classify(pick)
+        found = override if override is not None else classify(pick)
+        if found is PickClass.KEEPER:
+            # A manual reclassification to KEEPER counts too: the user confirming one settles
+            # that slot's obligation exactly as a manifest match would.
+            owed[pick.slot] = max(0, owed.get(pick.slot, 0) - 1)
+        elif (
+            # Never re-flag a pick the user has already ruled on. Someone who answers "that was
+            # a real bid" and watches it come back FLAGGED will stop answering.
+            override is None
+            and found is PickClass.COMPETITIVE
+            and owed.get(pick.slot, 0) > 0
+            # The window, and it is the whole reason this loop rather than the classifier: a
+            # team's ceremonial round *is* its first picks, so the window is that team's own
+            # first `expected` picks -- not a range of global pick numbers, and not a count of
+            # flags already issued.
+            #
+            # Both alternatives were tried and both are wrong. A global range (`pick_no <= 20`)
+            # is a fact about one fixture. A flag counter lets a slot that recorded one keeper
+            # and never the other flag its pick at #45 as a possible ceremonial keeper, which
+            # is noise -- ceremonial rounds are early by construction, and a team's third pick
+            # is not one however few keepers it has recorded.
+            and nth <= expected.get(pick.slot, 0)
+        ):
+            found = PickClass.FLAGGED
+        classes[pick.pick_no] = found
 
     competitive_seq = {
         p.pick_no: i

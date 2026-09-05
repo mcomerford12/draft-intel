@@ -36,7 +36,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict
 
 from draft_intel.config import LeagueConfig
-from draft_intel.domain.classify import KeeperClassifier
+from draft_intel.domain.classify import KeeperClassifier, keepers_owed
 from draft_intel.domain.identity import Identity, build_identity, manifest_keys
 from draft_intel.domain.ledger import fold
 from draft_intel.models import DerivedState, PickObserved
@@ -51,6 +51,7 @@ from draft_intel.quant.optimizer import Candidate
 from draft_intel.quant.valuation import PlayerValue
 from draft_intel.quant.walkaway import WalkAway, WalkAwayBoard, walkaway_board
 from draft_intel.sleeper.poller import parse_picks
+from draft_intel.store.arming import ArmingStore
 from draft_intel.store.corrections import CorrectionStore
 from draft_intel.store.overrides import OverrideStore
 from draft_intel.store.seats import SeatStore, apply_seats
@@ -226,6 +227,15 @@ class LiveSnapshot(BaseModel):
     walkaway: WalkAwayStatus
     alerts: tuple[str, ...]
 
+    armed: bool = False
+    """Whether the keeper backstop is on, per :class:`~draft_intel.store.arming.ArmingStore`.
+
+    On the snapshot rather than read by the page, because it changes what the numbers beside it
+    *mean*: armed, a pick missing from the competitive count may be a question awaiting an
+    answer rather than a keeper. Charter §2 asks for this to be prominent, and a state that
+    silently alters classification and is not displayed is the opposite of prominent.
+    """
+
     blockers: tuple[str, ...] = ()
     """Conditions that corrupt every figure on the page while they hold.
 
@@ -256,6 +266,7 @@ class LiveDraft:
         store: OverrideStore | None = None,
         seats: SeatStore | None = None,
         corrections: CorrectionStore | None = None,
+        arming: ArmingStore | None = None,
         client: DraftFeed | None = None,
         precompute: bool = False,
     ) -> None:
@@ -274,6 +285,7 @@ class LiveDraft:
         self.store = store or OverrideStore(root / "config" / "value_overrides.yaml")
         self.seats = seats or SeatStore(root / "config" / "seats.yaml")
         self.corrections = corrections or CorrectionStore(root / "config" / "corrections.yaml")
+        self.arming = arming or ArmingStore(root / "config" / "arming.yaml")
         self.client = client
 
         self._pipeline: Pipeline | None = None
@@ -629,6 +641,16 @@ class LiveDraft:
             max_keepers=built.config.keepers_per_team,
             classifier=self._keeper_classifier(),
             rejects=parsed.rejects,
+            # Read from disk on every fold, exactly as corrections and seats are, so arming
+            # mid-draft lands on the next poll rather than at the next restart.
+            flag_unmatched=(
+                keepers_owed(
+                    range(1, built.config.teams + 1),
+                    keepers_per_team=built.config.keepers_per_team,
+                )
+                if self.arming.load()
+                else None
+            ),
         )
 
     def _keeper_classifier(self) -> KeeperClassifier:
@@ -647,14 +669,13 @@ class LiveDraft:
         naming the owners, because every keeper it cannot place becomes a competitive bid and
         corrupts skew, inflation and every tendency profile for the night.
 
-        Not armed, for the reason DI-055 recorded: ``arming_window`` is a hardcoded 20 rather
-        than a fact read from the feed, and ``FLAGGED`` is terminal until the ``Reclassify``
-        producer exists.
+        Arming is **not** this object's business any more (DI-057). The backstop needs pick
+        order, so it lives in the fold as ``flag_unmatched``; this classifier can no longer
+        return ``FLAGGED`` at all. Caching it here is therefore still safe: it depends only on
+        the manifest keys, which change when identity does, and never on the arming switch.
         """
         if self._classifier is None:
-            self._classifier = KeeperClassifier(
-                manifest_keys=self._manifest_keys_now(), armed=False
-            )
+            self._classifier = KeeperClassifier(manifest_keys=self._manifest_keys_now())
         return self._classifier
 
     def unresolved_keepers(self) -> tuple[int, int, tuple[str, ...]]:
@@ -777,6 +798,7 @@ class LiveDraft:
         state = self._state
         my_slot = self.my_slot
         blockers = self._blockers(my_slot)
+        armed = self.arming.load()
 
         if state is None:
             return LiveSnapshot(
@@ -797,6 +819,7 @@ class LiveDraft:
                 walkaway=self._walkaway_status(None),
                 alerts=("no successful poll yet — every figure below is the model's prior",),
                 blockers=blockers,
+                armed=armed,
             )
 
         teams = tuple(
@@ -845,6 +868,7 @@ class LiveDraft:
             walkaway=self._walkaway_status(state),
             alerts=tuple(state.alerts) + tuple(state.rejects) + tuple(state.orphans),
             blockers=blockers,
+            armed=armed,
         )
 
     def _blockers(self, my_slot: int | None) -> tuple[str, ...]:
@@ -871,7 +895,36 @@ class LiveDraft:
                 f"your own draft slot is unknown — {self.pipeline.manifest.user_team!r} is not "
                 "mapped to a seat, so there is no max bid and no threat ladder"
             )
+        # A FLAGGED pick is a question the tool cannot answer for itself, and an unanswered
+        # question is money sitting outside the competitive series. It belongs here rather than
+        # among the alerts: alerts describe what happened, blockers say the figures beside them
+        # are not yet trustworthy, and that is exactly what a flagged pick means.
+        flagged = self._flagged_picks()
+        if flagged:
+            listed = ", ".join(
+                f"pick {p['pick_no']} ({p['name']}, {p['owner']}, ${p['amount']})"
+                for p in flagged[:4]
+            )
+            more = f" and {len(flagged) - 4} more" if len(flagged) > 4 else ""
+            out.append(
+                f"{len(flagged)} pick(s) flagged for confirmation: {listed}{more}. The keeper "
+                "backstop is armed and these are inside a team's ceremonial round without "
+                "matching the manifest. Until you answer each one under `recount it`, their "
+                "money is out of inflation, skew and every tendency profile."
+            )
         return tuple(out)
+
+    def _flagged_picks(self) -> list[dict[str, Any]]:
+        """Every pick the arming backstop is asking about, oldest first.
+
+        Oldest first, unlike :meth:`settled_picks`: these are a queue to work through rather
+        than a list to search, and the one that has been waiting longest is the one whose
+        absence from the competitive series has distorted the most subsequent maths.
+        """
+        return sorted(
+            (row for row in self.settled_picks(limit=10_000) if row["pick_class"] == "FLAGGED"),
+            key=lambda row: int(row["pick_no"] or 0),
+        )
 
     def _block(
         self,

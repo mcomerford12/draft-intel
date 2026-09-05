@@ -2292,6 +2292,8 @@ append to. Written to schema here, retroactively for the cards already built.
 - Deferred from DI-053/DI-055. The backstop is genuinely wanted — an unmatched pick inside the
   ceremonial window should be FLAGGED for confirmation, not silently counted as a competitive
   bid — but it cannot ship before the things that make FLAGGED recoverable.
+- **CLOSED by DI-074.** All five criteria met; see that card. The paragraph below is kept as
+  the record of what was still open at the time.
 - **Update, DI-073:** the first criterion is **done**. `Reclassify` now has a producer — the
   cockpit's reclassification form, keyed on `pick_no`, reverting cleanly. The reason this card
   was blocked ("arming a backstop before its confirmation loop exists turns a recoverable
@@ -2299,11 +2301,13 @@ append to. Written to schema here, retroactively for the cards already built.
 - **Acceptance criteria:**
   - [x] a product path constructs `Reclassify`, so a flagged pick can be confirmed or denied
         — DI-073
-  - [ ] charter §2's prominent pre-draft arming toggle exists and is reachable from the CLI
-  - [ ] the window keys on **manifest incompleteness** — a slot that still owes keepers — rather
+  - [x] charter §2's prominent pre-draft arming toggle exists and is reachable from the CLI
+        — DI-074
+  - [x] the window keys on **manifest incompleteness** — a slot that still owes keepers — rather
         than a hardcoded `pick_no <= 20`, so a room that holds no ceremonial round is unaffected
-  - [ ] FLAGGED picks are surfaced everywhere they matter, not only in `cli.replay`
-  - [ ] pinned on a payload where the ceremonial round is *not* at picks 1-20
+        — DI-074
+  - [x] FLAGGED picks are surfaced everywhere they matter, not only in `cli.replay` — DI-074
+  - [x] pinned on a payload where the ceremonial round is *not* at picks 1-20 — DI-074
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
 ### [DI-058] Close adversarial evaluation round 6 on DI-053/DI-054
@@ -2978,6 +2982,80 @@ append to. Written to schema here, retroactively for the cards already built.
 - **Still open on DI-057:** arming the classifier, its pre-draft toggle, and keying the window
   on manifest incompleteness rather than `pick_no <= 20`. Those were blocked on this card — a
   backstop whose FLAGGED verdict could not be answered was a one-way trap — and are no longer.
+  **Closed by DI-074.**
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
+### [DI-074] Arm the keeper backstop — DI-057, three cards later
+
+- **Sprint:** 3 · **Owner:** data-engineer · **Size:** M · **Branch:** `di-074-arm-backstop`
+- **The ask:** DI-057, in full. Three cards argued about this one switch — DI-053 armed it,
+  DI-055 disarmed it, and DI-057 was left holding the conditions under which it could ship.
+- **The whole disagreement was about *where the window lived*, and nobody said so.** DI-055's
+  three objections were all symptoms of one cause: `arming_window` was the constant `pick_no
+  <= 20`, which describes `fixtures/picks.json` and no league. A `Classifier` is a pure
+  function of one pick, so a constant is the only window it *can* express.
+
+  | scenario | under the constant |
+  |---|---|
+  | ceremonial round at picks 1-20 | fine (the fixture, and only it) |
+  | a real bid at pick 20 | **flagged as a possible keeper** |
+  | no ceremonial round at all | **20 competitive picks deleted** |
+
+- **So the window moved to the fold**, which is the only place pick *order* exists, as
+  `fold(flag_unmatched={slot: keepers_owed})`. `KeeperClassifier` can no longer return
+  `FLAGGED` at all. The rule is now: while a slot still owes ceremonial keepers, one of **that
+  slot's own first N picks** that the manifest does not recognise is flagged.
+- **Two bounds, and both are load-bearing:**
+  - a slot that has recorded its keepers stops flagging, so a real bid at pick 20 by a team
+    whose ceremonial round is done stays competitive;
+  - only a slot's own first N picks are candidates, because *a team's ceremonial round is its
+    first picks*. The first version of this bound counted flags issued instead, and let a team
+    that recorded one keeper and never the other propose its pick at **#45** as a possible
+    ceremonial keeper. Caught by the stale-manifest test, which is what that test is for.
+- **The toggle:** `config/arming.yaml` via `make arm` / `make arm ON=1`. A file rather than a
+  flag because the CLI and the cockpit do not share memory and the person deciding is in a
+  different terminal ten minutes before the draft. Read from disk on every fold, so arming
+  mid-draft lands on the next poll rather than at a restart. A missing or malformed file means
+  **off** — refusing to start takes the tool down over an optional setting, and defaulting to
+  on silently reclassifies picks because a file had a typo.
+- **Still off by default**, and for a reason that survived DI-055's other two: arming changes
+  classifications, and a tool that quietly reclassifies picks the first time you run it is not
+  one whose numbers you can trust. It is a decision, made once.
+- **What it does to the real league, measured.** Burt and TD have not joined, so four keepers
+  cannot be placed and are read as competitive bids — the exact corruption DI-071 found:
+
+  ```
+  armed=False:  competitive=144   flagged=0
+  armed=True:   competitive=140   flagged=4
+      pick 17  George Pickens    slot 9   $21
+      pick 18  Breece Hall       slot 9   $18
+      pick 19  Puka Nacua        slot 10  $35
+      pick 20  Bo Nix            slot 10  $17
+  ```
+
+  **Arming restores the correct competitive count on a league that is still missing two
+  managers**, by turning four silent misclassifications into four questions. That is a real
+  draft-night mitigation for a blocker no amount of code could otherwise fix.
+- **Surfaced where it matters** (DI-057's fourth criterion): flagged picks are **blockers**, not
+  alerts — an alert records what happened, a blocker says the figures beside it are not
+  trustworthy — naming each pick, its buyer, its price and the remedy. The armed state itself
+  shows on the status line **in both states**, because "armed" appearing only when armed reads
+  as a transient alert rather than a standing mode.
+- **The rehearsal reads a scratch arming file**, the third store to be pinned that way after
+  overrides and corrections. A release gate whose result depends on a toggle is not a gate.
+- **Acceptance criteria (DI-057's own, all five):**
+  - [x] a product path constructs `Reclassify` — DI-073
+  - [x] charter §2's prominent pre-draft toggle exists and is reachable from the CLI
+  - [x] the window keys on manifest incompleteness, not a hardcoded `pick_no <= 20`
+  - [x] FLAGGED picks surfaced everywhere they matter, not only in `cli.replay`
+  - [x] **pinned on a payload where the ceremonial round is not at picks 1-20** — a synthetic
+        draft whose keepers land at picks 21-40, where the old constant would have flagged
+        twenty genuine bids and missed all twenty keepers
+  - [x] four mutations verified: dropping the ordinal window, ignoring a user's answer,
+        defaulting a broken file to on, and ignoring `flag_unmatched` entirely
+  - [x] `make ci` green — 678 tests, 95% coverage; rehearsal PASSED
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
 ---
