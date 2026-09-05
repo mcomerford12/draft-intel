@@ -115,16 +115,27 @@ a silent error into a visible one.
 
 Stated plainly, because a tool that hides its limits is worse than one that has none.
 
-- **The keeper prices are not your league's.** `config/keepers.yaml` carries **0 of 20**
-  retention prices, so the tool fell back to what those players cost in the *mock* draft — a
-  different draft, someone else's numbers. `make prep` says so in a `!!` block at the top, and
-  it is the most consequential thing in this list: **structural keeper inflation** (the report
-  calls it the single most actionable pre-draft number) and the **keeper surplus board** both
-  inherit it, and surplus is how the tool judges what each opponent can really afford.
+- **The keeper prices are not your league's — and the report now says how they are wrong.**
+  `config/keepers.yaml` carries **0 of 20** retention prices, so the tool fell back to what
+  those players cost in the *mock* draft.
 
-  Fix it by filling in `price` and `price_source` in `config/keepers.yaml` — the manifest is
-  consulted first and wins wherever it has a value. Twenty numbers. Worth more than anything
-  else you could spend twenty minutes on before Saturday.
+  Section 2 gives you **two scenarios**, and right now they disagree about the direction of the
+  night:
+
+  | scenario | keeper inflation | reads as |
+  |---|---|---|
+  | prices under the 75% rule | **1.0747x** | field clears ~7% **over** book |
+  | prices as loaded (the mock's) | 0.9608x | field clears ~4% **under** book |
+
+  **Read the rule row.** All twenty loaded prices sit above the rule — none scattered either
+  side — averaging +$8.6, which works out at **109% of auction value rather than 75%**. Twenty
+  out of twenty in the same direction is not twenty mispriced keepers; it means those figures
+  are full auction values, not retention prices. The report states this in its second `!!`
+  block.
+
+  Filling in `price` and `price_source` in `config/keepers.yaml` settles it for certain — the
+  manifest is consulted first and wins wherever it has a value. Twenty numbers, and the best
+  twenty minutes available before Saturday.
 
 - **Market values are the model's own** unless you supply `config/auction_values.csv`. The board
   marks estimates as `ESTIMATE`. They are internally consistent and not externally validated.

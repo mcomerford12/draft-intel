@@ -60,6 +60,16 @@ from draft_intel.quant.valuation import ValueBoard
 # keeper mispriced by $20 moves that team's whole evening and must not pass unremarked.
 PRICE_DIVERGENCE_DOLLARS = 3
 
+SYSTEMATIC_BIAS_MINIMUM = 4
+"""Fewest priced keepers before unanimity means anything.
+
+Two keepers both landing above the rule is a coin flip; twenty is a different price basis. Four
+is the smallest count where "every one of them" is worth saying out loud.
+"""
+
+RETENTION_FRACTION = 0.75
+"""The league's retention rule: ``floor(0.75 x auction value)``. Charter §1, settled."""
+
 
 class KeeperLine(BaseModel):
     """One keeper: what they are worth, what they cost, and what the rule says they cost."""
@@ -195,9 +205,61 @@ class KeeperBoard(BaseModel):
             return None
         return self.as_loaded.keeper_spend - self.under_rule.keeper_spend
 
+    @property
+    def systematic_bias(self) -> str | None:
+        """One finding when *every* loaded price misses the rule the same way.
+
+        Twenty keepers each $10 above what ``floor(0.75 x value)`` implies is not twenty
+        mispriced keepers. It is one wrong price basis, reported twenty times — and the
+        per-line alerts below, which are right about each line, bury that under a list nobody
+        reads to the end of.
+
+        The tell is unanimity. Rounding scatters, a stale auction value scatters, a hand-typed
+        price scatters. A sign shared by every single line is a different quantity: prices that
+        are the players' full auction value rather than 75% of it, or a rule that is not the
+        rule this board was told about.
+
+        The ratio is reported against **market value**, not against the rule price, because
+        that is where the answer is legible: ``0.75`` means the loaded prices *are* retention
+        prices and the divergence is rounding, while ``~1.0`` means they are full auction
+        values and the whole ``as loaded`` scenario is answering a question nobody asked.
+        """
+        priced = [
+            line
+            for line in self.lines
+            if line.price_divergence is not None and line.rule_price is not None
+        ]
+        if len(priced) < SYSTEMATIC_BIAS_MINIMUM:
+            return None
+        divergences = [line.price_divergence for line in priced if line.price_divergence]
+        if len(divergences) != len(priced):
+            return None  # at least one line agrees with the rule, so the miss is not systematic
+        if not (all(d > 0 for d in divergences) or all(d < 0 for d in divergences)):
+            return None
+
+        paid = sum(line.price_paid or 0 for line in priced)
+        rule = sum(line.rule_price or 0 for line in priced)
+        direction = "ABOVE" if divergences[0] > 0 else "BELOW"
+        mean = sum(divergences) / len(divergences)
+        # rule_price is floor(0.75 x market), so scaling it back recovers the market basis
+        # these prices would have to be a fraction of.
+        of_market = (paid / rule * RETENTION_FRACTION) if rule else 0.0
+        return (
+            f"PRICE BASIS: all {len(priced)} loaded keeper prices are {direction} the 75% rule, "
+            f"by {mean:+.1f} on average (${paid} against ${rule}). Unanimity is not noise — "
+            f"these look like {of_market:.0%} of auction value, not the {RETENTION_FRACTION:.0%} "
+            f"the rule takes, so the 'prices as loaded' scenario is probably measuring a "
+            f"different quantity. Until real retention prices are in config/keepers.yaml, trust "
+            f"the rule scenario."
+        )
+
     def alerts(self) -> list[str]:
         """Charter §2 reconciliation: the things worth saying out loud before the draft."""
         out: list[str] = []
+        # First, because it explains every line below it and changes which scenario you read.
+        bias = self.systematic_bias
+        if bias is not None:
+            out.append(bias)
         for line in sorted(self.lines, key=lambda line: -abs(line.price_divergence or 0)):
             if line.diverged:
                 out.append(
