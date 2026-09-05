@@ -906,8 +906,39 @@ class LiveDraft:
         ]
         remaining_money = sum(team.remaining for team in state.teams.values())
         remaining_slots = sum(team.open_slots for team in state.teams.values())
+
+        # **Supply and demand must be keeper-adjusted on the same side of the ledger.**
+        #
+        # `available` is `in_pool_live`, which has the keepers removed from *supply* already.
+        # `remaining_money`/`remaining_slots` come from the ledger, where a keeper's money and
+        # roster spot are still in *demand* until their ceremonial pick lands. Feeding those two
+        # together violates `market_inflation`'s own stated precondition ("all_spend includes
+        # keeper picks") and double-counts the keeper adjustment.
+        #
+        # Measured, on the real board with no ceremonial pick landed: headline inflation
+        # **1.4035** with zero competitive bids, decaying 1.32 / 1.23 / 1.15 / 1.07 as they
+        # arrived and hitting exactly 1.0000 at the twentieth. The module docstring promises
+        # exactly 1.0000 before a competitive bid is made; the unit test reached it by being
+        # handed keeper-adjusted inputs directly, and the live path never was.
+        #
+        # It is not a cosmetic figure. It prices the block: the top WR showed $36.93 against a
+        # $26.60 live value, +39%, on the first nomination of the night. And keepers that never
+        # arrive at all -- a manager who has not joined -- hold the error open all evening.
+        #
+        # So a keeper the manifest knows about but the ledger has not yet seen has their
+        # retention price and their roster spot taken out of demand here, exactly as the pick
+        # would when it lands. The adjustment shrinks to nothing as they arrive, so the figure
+        # is continuous rather than stepping.
+        owed_money = 0
+        owed_slots = 0
+        for line in built.keepers.lines:
+            if line.player_id not in drafted and line.price_paid is not None:
+                owed_money += line.price_paid
+                owed_slots += 1
         inflation = market_inflation(
-            available, remaining_money=remaining_money, remaining_slots=remaining_slots
+            available,
+            remaining_money=remaining_money - owed_money,
+            remaining_slots=remaining_slots - owed_slots,
         )
 
         return LiveSnapshot(

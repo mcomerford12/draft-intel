@@ -75,7 +75,23 @@ class SeatStore:
         return out
 
     def assign(self, seat: SeatAssignment) -> dict[int, SeatAssignment]:
-        current = self.load()
+        """Seat an owner, **vacating whatever seat they were previously asserted into.**
+
+        Keyed by slot, so correcting a seat used to leave both assertions on disk -- and the
+        stale one won, because ``apply_seats`` rebuilds ``owner_to_slot`` in ascending slot
+        order and the higher slot number overwrote the lower. Measured: assign TD to slot 10
+        (correct, 20/20 keepers placed), then correct them to slot 4, and the result is
+        ``seats.yaml = {4: TD, 10: TD}``, ``slot_for('TD') == 10``, **two teams named TD in the
+        room table**, keepers 20 -> 18 and competitive picks 140 -> 142.
+
+        That is precisely the split ``apply_seats``' own docstring forbids -- one map saying TD
+        is in seat 4 while the classifier reads seat 10 -- and it arrived through the correction
+        path rather than the resolution path, which is why vacating there did not catch it.
+
+        A correction has to be a correction. One owner, one seat, enforced where the write
+        happens rather than left for every reader to reconcile.
+        """
+        current = {slot: held for slot, held in self.load().items() if held.owner != seat.owner}
         current[seat.slot] = seat
         self._write(current)
         return current
