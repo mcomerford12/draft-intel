@@ -289,6 +289,7 @@ def build_report(root: Path, *, targets: int = 12) -> str:
         price_source,
         resolved_count=sum(1 for _o, pid in resolved if identity.slot_for(_o) is not None),
         expected_count=config.teams * config.keepers_per_team,
+        basis=keepers.systematic_bias,
     )
     out += _override_section(built)
     out += _inflation_section(keepers, unreliable)
@@ -415,7 +416,9 @@ def _retention_prices(
     return merged, "the MOCK draft's picks feed -- NOT this league"
 
 
-def _price_provenance(source: str, *, resolved_count: int, expected_count: int) -> list[str]:
+def _price_provenance(
+    source: str, *, resolved_count: int, expected_count: int, basis: str | None = None
+) -> list[str]:
     out = [RULE, "KEEPER PRICE PROVENANCE — read this before section 2 or 3", RULE]
     out.append(_line("retention prices from", source))
     # ADR-0006 clause 1: the gate says "priced against the real keeper manifest", and this line
@@ -439,7 +442,28 @@ def _price_provenance(source: str, *, resolved_count: int, expected_count: int) 
             "\n     Fix: fill in `price` and `price_source` in config/keepers.yaml. The manifest\n"
             "     is consulted first and wins wherever it has a value."
         )
+    # Directly beneath the provenance note, because it answers the question that note raises.
+    # "These are somebody else's numbers" tells you not to trust them; this tells you *how* they
+    # are wrong, and therefore which of the two scenarios in section 2 to read.
+    if basis is not None:
+        out.append("\n  !! " + "\n     ".join(_wrap(basis, 72)))
     return [*out, ""]
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """Wrap at word boundaries. `textwrap` would do, but the report builds every other block
+    from plain joins and one import for one call is not worth the inconsistency."""
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        if current and len(current) + 1 + len(word) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        lines.append(current)
+    return lines
 
 
 def _override_section(built: Pipeline) -> list[str]:
@@ -623,7 +647,11 @@ def _keeper_section(keepers: KeeperBoard, teams: int) -> list[str]:
     out.append("\n  surplus by position (§4.6: concentration at QB confirms the scarcity thesis)")
     for position, surplus in sorted(by_position.items(), key=lambda kv: -kv[1]):
         out.append(_line(position, f"${surplus:+.0f}"))
-    for alert in keepers.alerts()[:6]:
+    # The basis finding is already printed in full at the top, under the provenance note where
+    # it changes which scenario you read. Repeating it here would push a real per-line alert off
+    # the bottom of a list that is truncated at six.
+    basis = keepers.systematic_bias
+    for alert in [a for a in keepers.alerts() if a != basis][:6]:
         out.append(f"  ALERT {alert}")
     return [*out, ""]
 

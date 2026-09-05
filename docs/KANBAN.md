@@ -3098,6 +3098,49 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-076] A wrong price basis, said once instead of twenty times
+
+- **Sprint:** 2 · **Owner:** quant-analyst · **Size:** S · **Branch:** `di-076-systematic-price-bias`
+- **Found by writing DI-075.** The runbook claimed the keeper prices were simply "not this
+  league's". Checking that before publishing it turned up something sharper: **all twenty loaded
+  prices sit above what `floor(0.75 x value)` implies. None below. Not one.** Mean +$8.6,
+  ranging +$4 to +$14, and proportional to the player.
+- **Twenty out of twenty in one direction is not twenty mispriced keepers.** Rounding scatters.
+  A stale auction value scatters. A hand-typed price scatters. A sign shared by *every* line is
+  a different quantity — and the arithmetic says which: $549 against $377 is **109% of auction
+  value, where the rule takes 75%**. Those figures are full auction values, not retention prices.
+- **Why it mattered enough to fix.** Section 2 offers two scenarios and they point opposite ways
+  — the rule scenario says the field clears **7% over** book, the as-loaded scenario says **4%
+  under**. A reader with no way to choose between them has no read on the night at all. The
+  board already had every number needed to say which one to trust and said none of it; instead
+  it emitted six per-line ALERTs that were each individually correct and collectively silent
+  about the cause.
+- **`KeeperBoard.systematic_bias`** returns one finding when every priced line misses the rule
+  in the same direction, reporting the ratio **against market value** rather than against the
+  rule price — because that is where the answer is legible: `0.75` means the prices really are
+  retention prices and the gap is rounding; `~1.0` means they are auction values and the whole
+  as-loaded scenario answers a question nobody asked.
+- **Three guards, each mutation-verified:** unanimity is required (mixed signs are an ordinary
+  hand-typed column); a single line agreeing with the rule disqualifies it (the others then
+  scatter for ordinary reasons); and at least four priced keepers, because two both landing
+  above the rule is a coin flip and this finding claims a systematic cause.
+- **Where it prints:** directly under the provenance `!!` block, which is where the reader has
+  just been told the prices are somebody else's — this tells them *how* they are wrong and
+  therefore which scenario to read. Suppressed from the section-3 ALERT list, which truncates at
+  six, so repeating it there would push a real per-line alert off the bottom.
+- **Acceptance criteria:**
+  - [x] one finding, not N, when the miss is systematic; N per-line alerts when it is not
+  - [x] the ratio is reported against the basis that makes it interpretable
+  - [x] a board whose prices genuinely *are* `floor(0.75 x value)` raises nothing — the negative
+        case, without which the positive one proves only that a string gets returned
+  - [x] uniformly-below is caught too; the detector is about unanimity, not about expense
+  - [x] four mutations verified: dropping unanimity, dropping the agreement guard, reporting the
+        ratio against the rule, and a minimum count of one
+  - [x] `make ci` green — 684 tests, 95% coverage; rehearsal PASSED
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.

@@ -13,7 +13,9 @@ import pytest
 
 from draft_intel.quant.keeper_board import (
     PRICE_DIVERGENCE_DOLLARS,
+    SYSTEMATIC_BIAS_MINIMUM,
     IncompleteScenario,
+    KeeperBoard,
     KeeperLine,
     Scenario,
     keeper_board,
@@ -509,3 +511,82 @@ def test_the_rule_is_applied_to_the_rounded_dollar_value_not_the_raw_float(raw):
     line = result.lines[0]
     assert line.market_value is not None
     assert line.rule_price == (int(line.market_value) * 3) // 4
+
+
+# ------------------------------------------- DI-076: a wrong price basis, said once
+
+
+def _basis(prices: dict[str, int], values: dict[str, float]) -> KeeperBoard:
+    """A board of N keepers, each with a loaded price and an auction value."""
+    priced = board(
+        *[value(k, market_value=v, is_keeper=True) for k, v in values.items()],
+        value("free", market_value=60.0),
+    )
+    return keeper_board(
+        priced,
+        keeper_owners=dict.fromkeys(values, "AJ"),
+        prices=prices,
+        market=market(**values),
+    )
+
+
+def test_every_price_missing_the_rule_the_same_way_is_reported_once_as_a_wrong_basis():
+    """Twenty keepers each $10 above the rule is not twenty mispriced keepers. It is one wrong
+    price basis, reported twenty times — and the per-line alerts, right about each line, bury it
+    under a list nobody reads to the end of.
+
+    The ratio is the payload: `floor(0.75 * value)` against prices that are ~100% of value says
+    the loaded figures are auction values, not retention prices.
+    """
+    values = {f"k{i}": 40.0 for i in range(1, 9)}
+    result = _basis({k: 40 for k in values}, values)  # paid = value; rule would be $30
+
+    bias = result.systematic_bias
+    assert bias is not None
+    assert "all 8 loaded keeper prices are ABOVE" in bias
+    assert "100% of auction value" in bias, "the ratio is against market, where it is legible"
+    assert result.alerts()[0] == bias, "it explains every line under it, so it goes first"
+
+
+def test_one_keeper_agreeing_with_the_rule_means_the_miss_is_not_systematic():
+    """Unanimity is the whole tell. A single line landing on the rule says the others scatter
+    for ordinary reasons — rounding, a stale value, a hand-typed price — and the per-line alerts
+    are then the right shape for it."""
+    values = {f"k{i}": 40.0 for i in range(1, 9)}
+    prices = {k: 40 for k in values}
+    prices["k1"] = 30  # exactly floor(0.75 * 40)
+    assert _basis(prices, values).systematic_bias is None
+
+
+def test_divergences_in_both_directions_are_not_a_basis_error():
+    """Prices scattered either side of the rule are exactly what a hand-typed column looks
+    like. Calling that a wrong basis would train the user to ignore the finding."""
+    values = {f"k{i}": 40.0 for i in range(1, 9)}
+    prices = {k: (40 if i % 2 else 20) for i, k in enumerate(values)}
+    assert _basis(prices, values).systematic_bias is None
+
+
+def test_too_few_keepers_for_unanimity_to_mean_anything():
+    """Two keepers both above the rule is a coin flip. The finding claims a systematic cause and
+    must not make that claim from three data points."""
+    values = {f"k{i}": 40.0 for i in range(1, 4)}
+    assert len(values) < SYSTEMATIC_BIAS_MINIMUM
+    assert _basis({k: 40 for k in values}, values).systematic_bias is None
+
+
+def test_prices_that_really_are_retention_prices_raise_nothing():
+    """The negative case, and the one that matters most: a board whose loaded prices *are*
+    `floor(0.75 * value)` must produce no basis finding at all. Without this the test above
+    proves only that the detector returns a string sometimes."""
+    values = {f"k{i}": 40.0 for i in range(1, 9)}
+    result = _basis({k: 30 for k in values}, values)
+    assert result.systematic_bias is None
+    assert not [a for a in result.alerts() if a.startswith("PRICE BASIS")]
+
+
+def test_prices_uniformly_below_the_rule_are_caught_too():
+    """The detector is about unanimity, not about being expensive. A league whose keepers were
+    all retained at half the rule price has the same problem in the other direction."""
+    values = {f"k{i}": 40.0 for i in range(1, 9)}
+    bias = _basis({k: 15 for k in values}, values).systematic_bias
+    assert bias is not None and "BELOW" in bias
