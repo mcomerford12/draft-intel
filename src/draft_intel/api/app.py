@@ -44,6 +44,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from html import escape
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -52,6 +53,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from draft_intel.api.live import BlockView, LiveDraft, LiveSnapshot, TeamLine
 from draft_intel.cli import LEAGUE_ID, REAL_DRAFT_ID
+from draft_intel.models import PickClass
 from draft_intel.prep import build_pipeline
 from draft_intel.sleeper.client import SleeperClient
 from draft_intel.store.corrections import Correction
@@ -208,6 +210,22 @@ class CorrectionRequest(BaseModel):
     delta: int | None = None
     player_id: str | None = None
     amount: int | None = Field(default=None, ge=0)
+    reason: str = ""
+
+
+class ReclassifyRequest(BaseModel):
+    """A pick the classifier read the wrong way.
+
+    ``FLAGGED`` is deliberately not offered. It is the classifier's way of saying *"I do not
+    know, a person should look"*; a person looking and choosing "I do not know" moves nothing
+    and leaves the pick out of the competitive series it may well belong in. The two answers
+    worth typing are the two that settle it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pick_no: int = Field(ge=1)
+    pick_class: Literal[PickClass.KEEPER, PickClass.COMPETITIVE]
     reason: str = ""
 
 
@@ -458,6 +476,40 @@ def create_app(
             reason=request.reason,
         )
         return {"correction": entry.model_dump(), "effective": "next poll"}
+
+    @app.get("/api/live/picks")
+    def api_picks(q: str = "", limit: int = 25) -> list[dict[str, object]]:
+        """Settled picks, newest first, for choosing one to reclassify.
+
+        Newest first because the pick you need to argue with is almost always the one that just
+        happened — you watched it land and the class it got is wrong. ``q`` matches a player
+        name or an exact pick number, for the case where it is not.
+        """
+        return live.settled_picks(q, limit=limit)
+
+    @app.post("/api/live/corrections/reclassify")
+    def correct_class(request: ReclassifyRequest) -> dict[str, object]:
+        settled = live.settled_picks(str(request.pick_no), limit=1)
+        current = next((p for p in settled if p["pick_no"] == request.pick_no), None)
+        if current is None:
+            raise HTTPException(404, f"no pick {request.pick_no} in the ledger")
+        if current["pick_class"] == request.pick_class.value:
+            # Not an error the user needs protecting from, but a correction that changes nothing
+            # is a row that will confuse whoever reads the audit trail later looking for a cause.
+            raise HTTPException(
+                422, f"pick {request.pick_no} already counts as {request.pick_class.value}"
+            )
+        entry = live.corrections.add(
+            kind="reclassify",
+            pick_no=request.pick_no,
+            pick_class=request.pick_class,
+            reason=request.reason,
+        )
+        return {
+            "correction": entry.model_dump(mode="json"),
+            "was": current["pick_class"],
+            "effective": "next poll",
+        }
 
     @app.delete("/api/live/corrections/{correction_id}")
     def revert_correction(correction_id: int) -> dict[str, object]:
@@ -799,6 +851,20 @@ def _render_live(
   <ul class="hits" id="keeper-hits"></ul>
   <p class="seats-lede">Sleeper publishes no auction value, so a retention price is typed from
     the draft room. Superseded automatically if the real pick arrives.</p>
+  <div class="seat-form">
+    <span class="seat-is">pick</span>
+    <input id="class-q" autocomplete="off" placeholder="last 25, or search"
+      style="width:210px;text-align:left" aria-label="pick to reclassify">
+    <span class="seat-is">was really a</span>
+    <select id="class-to" aria-label="what the pick actually was">
+      <option value="KEEPER">keeper</option>
+      <option value="COMPETITIVE">competitive bid</option>
+    </select>
+    <button id="class-go" disabled>recount it</button>
+  </div>
+  <ul class="hits" id="class-hits"></ul>
+  <p class="seats-lede">Moves no money. It moves whether those dollars count as a bid — and so
+    whether they reach inflation, skew and every tendency profile.</p>
 </div>
 
 <h2>seating</h2>
@@ -901,6 +967,23 @@ document.addEventListener("click", async (event) => {{
     document.getElementById("keeper-hits").innerHTML = "";
     target.disabled = true;
     repaint();
+  }} else if (target.id === "class-go") {{
+    if (!classPick) {{ flash(target, "pick one first"); return; }}
+    const res = await fetch("/api/live/corrections/reclassify", {{
+      method: "POST",
+      headers: {{ "Content-Type": "application/json" }},
+      body: JSON.stringify({{
+        pick_no: classPick.pick_no,
+        pick_class: document.getElementById("class-to").value,
+        reason: `${{classPick.name}}, corrected from the draft room`,
+      }}),
+    }});
+    if (!res.ok) {{ flash(target, (await res.json()).detail || "refused"); return; }}
+    classPick = null;
+    document.getElementById("class-q").value = "";
+    document.getElementById("class-hits").innerHTML = "";
+    target.disabled = true;
+    repaint();
   }} else if (target.id === "seat-go") {{
     const res = await fetch(`/api/live/seats/${{document.getElementById("seat-slot").value}}`, {{
       method: "POST",
@@ -954,6 +1037,51 @@ document.addEventListener("input", (event) => {{
       list.appendChild(li);
     }}
   }}, 180);
+}});
+
+// Reclassification names a *pick*, not a player: the same player can be bought once and the
+// pick number is what a Reclassify keys on. So the list shows pick, buyer, price and the class
+// it currently carries -- without the current class you cannot tell whether you are about to
+// change anything, and the API refuses a no-op correction rather than writing a row that
+// explains nothing to whoever reads the trail later.
+let classPick = null;
+let classTimer = null;
+function drawPicks(rows) {{
+  const list = document.getElementById("class-hits");
+  const button = document.getElementById("class-go");
+  classPick = null;
+  button.disabled = true;
+  list.innerHTML = "";
+  for (const row of rows) {{
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.textContent = `#${{row.pick_no}} · ${{row.name}} · ${{row.owner}} · $${{row.amount}}`
+      + ` · now ${{row.pick_class.toLowerCase()}}`;
+    b.onclick = () => {{
+      classPick = {{ pick_no: row.pick_no, name: row.name }};
+      document.getElementById("class-q").value = `#${{row.pick_no}} ${{row.name}}`;
+      list.innerHTML = "";
+      button.disabled = false;
+    }};
+    li.appendChild(b);
+    list.appendChild(li);
+  }}
+}}
+document.addEventListener("input", (event) => {{
+  if (!event.target || event.target.id !== "class-q") return;
+  clearTimeout(classTimer);
+  classTimer = setTimeout(async () => {{
+    const box = document.getElementById("class-q");
+    drawPicks(await (await fetch(
+      `/api/live/picks?q=${{encodeURIComponent(box.value)}}&limit=8`)).json());
+  }}, 180);
+}});
+// An empty box offers the last few picks rather than nothing, because the pick you need is
+// usually the one that just landed and typing its number to find it is a step for no reason.
+document.addEventListener("focusin", async (event) => {{
+  if (!event.target || event.target.id !== "class-q") return;
+  if (document.getElementById("class-q").value.trim()) return;
+  drawPicks(await (await fetch("/api/live/picks?limit=8")).json());
 }});
 
 refreshPickers();
@@ -1122,8 +1250,20 @@ def _corrections_html(corrections: list[Correction], teams: dict[int, str]) -> s
     """
     if not corrections:
         return ""
+
+    def label(c: Correction) -> str:
+        """Who or what the correction is about. A reclassification is about a pick, not a team.
+
+        It deliberately carries no slot — the pick already answers that, and more currently
+        (see ``Correction.slot``) — so naming it by pick number here is the honest label rather
+        than a fallback for a missing field.
+        """
+        if c.slot is None:
+            return f"pick {c.pick_no}"
+        return teams.get(c.slot, f"slot {c.slot}")
+
     rows = "".join(
-        f"<li><strong>{escape(teams.get(c.slot, f'slot {c.slot}'))}</strong> "
+        f"<li><strong>{escape(label(c))}</strong> "
         f"{escape(c.describe().split(': ', 1)[1])}"
         f"{f' — {escape(c.reason)}' if c.reason else ''} "
         f'<button data-uncorrect="{c.id}">undo</button></li>'

@@ -721,6 +721,53 @@ class LiveDraft:
         hits.sort(key=lambda p: (-p.baseline_value, p.name))
         return hits[:12]
 
+    def settled_picks(self, query: str = "", *, limit: int = 25) -> list[dict[str, Any]]:
+        """Picks the ledger holds, newest first, with the class each one currently carries.
+
+        The input to reclassification, so it reports the class **as folded** — manual
+        reclassifications included, since a pick already corrected must read as corrected or the
+        user will correct it twice and wonder why the second one changed nothing.
+
+        Newest first because the pick worth arguing with is nearly always the one that just
+        landed. ``query`` matches an exact pick number or a substring of the player's name, for
+        when it is not; an empty query returns the most recent ``limit``.
+
+        Manual keepers are deliberately excluded. They have no ``pick_no`` — they exist because
+        the feed never delivered them — so there is nothing for a ``Reclassify`` to key on. The
+        way to undo one is to revert it, which the corrections list already offers.
+        """
+        state = self._state
+        if state is None:
+            return []
+        names = {p.player_id: p for p in self.pipeline.board.players}
+        owners = {slot: self.owner_for(slot) for slot in state.teams}
+
+        rows = [
+            {
+                "pick_no": entry.pick_no,
+                "slot": team.slot,
+                "owner": owners.get(team.slot) or f"slot {team.slot}",
+                "player_id": entry.player_id,
+                "name": names[entry.player_id].name if entry.player_id in names else "unknown",
+                "position": names[entry.player_id].position if entry.player_id in names else "",
+                "amount": entry.amount,
+                "pick_class": entry.pick_class.value,
+            }
+            for team in state.teams.values()
+            for entry in team.roster
+            if entry.pick_no is not None
+        ]
+
+        needle = query.strip().lower()
+        if needle:
+            rows = [
+                row
+                for row in rows
+                if needle == str(row["pick_no"]) or needle in str(row["name"]).lower()
+            ]
+        rows.sort(key=lambda row: -int(row["pick_no"] or 0))
+        return rows[:limit]
+
     # ------------------------------------------------------------------ snapshot
 
     def snapshot(self) -> LiveSnapshot:

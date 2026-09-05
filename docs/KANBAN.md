@@ -2292,8 +2292,13 @@ append to. Written to schema here, retroactively for the cards already built.
 - Deferred from DI-053/DI-055. The backstop is genuinely wanted — an unmatched pick inside the
   ceremonial window should be FLAGGED for confirmation, not silently counted as a competitive
   bid — but it cannot ship before the things that make FLAGGED recoverable.
+- **Update, DI-073:** the first criterion is **done**. `Reclassify` now has a producer — the
+  cockpit's reclassification form, keyed on `pick_no`, reverting cleanly. The reason this card
+  was blocked ("arming a backstop before its confirmation loop exists turns a recoverable
+  mistake into a one-way trap") no longer holds. What remains is the toggle and the window.
 - **Acceptance criteria:**
-  - [ ] a product path constructs `Reclassify`, so a flagged pick can be confirmed or denied
+  - [x] a product path constructs `Reclassify`, so a flagged pick can be confirmed or denied
+        — DI-073
   - [ ] charter §2's prominent pre-draft arming toggle exists and is reachable from the CLI
   - [ ] the window keys on **manifest incompleteness** — a slot that still owes keepers — rather
         than a hardcoded `pick_no <= 20`, so a room that holds no ceremonial round is unaffected
@@ -2916,6 +2921,63 @@ append to. Written to schema here, retroactively for the cards already built.
   - [x] mapping recorded with who confirmed it and when, per the file's own rule
   - [x] the header's count of joined managers updated with it (seven → eight)
   - [x] `make ci` green — 660 tests
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
+### [DI-073] The reclassification surface — the last event type with no producer
+
+- **Sprint:** 3 · **Owner:** backend-engineer · **Size:** M · **Branch:** `di-073-reclassify`
+- **The ask:** close the last hole. `Reclassify` has been consumed by the ledger since Sprint 1
+  and produced by **nothing**. Budget corrections, manual keepers and reverts all got surfaces
+  in DI-069/DI-070; this was the one left, and it is the one that matters most.
+- **Why it matters most.** A pick's class decides whether its dollars enter the auction
+  analytics *at all*. A ceremonial keeper counted as a bid is a phantom data point in
+  `competitive_seq`, market inflation, skew, run detection and every tendency profile; a real
+  bid counted as a keeper removes a true one from all of them. DI-071 measured exactly this
+  against the live league — six unseated keepers moved the competitive count from 140 to 146 —
+  and until now the only remedy was to edit YAML and restart the tool mid-draft.
+- **What shipped:**
+  - `Correction` gains `kind: reclassify`, carrying `pick_no` and `pick_class`. **No slot**, and
+    deliberately: seating is late-bound (D1), so a slot copied into the row at 9pm is a second,
+    staler answer to a question the pick itself already answers — the same reasoning that made
+    keeper supersession key on `player_id` rather than `(slot, player_id)`.
+  - A model validator: each kind must carry its own key fields. There are three call sites and
+    one of them is a person editing YAML at a table, so "a row that folds to nothing" is caught
+    at load rather than discovered by its absence.
+  - `GET /api/live/picks` — settled picks newest first, each with **the class it currently
+    carries, as folded**, corrections included. Without the current class you cannot see whether
+    you are about to change anything; without "as folded" you would correct the same pick twice.
+  - `POST /api/live/corrections/reclassify`, and the form in the stable shell (never inside
+    `#app`, per DI-070). Empty box offers the last eight picks, because the pick worth arguing
+    with is nearly always the one that just landed.
+  - Rehearsal chaos case 7: a reclassification mid-draft moves `competitive_picks` by one, the
+    undo puts it back, **and the money never moves**. That last clause is the whole reason this
+    is easy to ship broken — every conservation check passes while the analytics quietly read a
+    ceremonial keeper as a $24 bid.
+- **Three refusals, each for a reason:** a pick the ledger does not hold (404); a correction
+  that changes nothing (422 — it would sit in the audit trail explaining nothing); and
+  `FLAGGED` (422). The last is the interesting one: FLAGGED is the classifier saying *"I don't
+  know, a person should look"*, so a person looking and choosing "I don't know" settles nothing
+  and leaves the pick out of a competitive series it may well belong in.
+- **Manual keepers are deliberately not reclassifiable.** They have no `pick_no` — they exist
+  because the feed never delivered them — so there is nothing for a `Reclassify` to key on. The
+  way to undo one is to revert it, which the corrections list already offers.
+- **`model_dump(mode="json")` on write.** `PickClass` is a `StrEnum` and PyYAML's
+  SafeRepresenter dispatches on exact type rather than the MRO, so a str subclass is "undefined"
+  to it and raises instead of writing `KEEPER`. Plain scalars round-trip identically, so nothing
+  already on disk changes.
+- **Acceptance criteria:**
+  - [x] a product path constructs `Reclassify` — DI-057's first criterion, closed
+  - [x] the correction reaches the *analytics*, not merely the store: asserted on
+        `competitive_picks`, and mutation-verified by making `events()` drop the event
+  - [x] reverting restores the class exactly, via a real `Revert`
+  - [x] the form is outside the repainted region; the resulting correction is inside it
+  - [x] three refusals, each mutation-verified
+  - [x] `make ci` green — 669 tests, 95% coverage; rehearsal PASSED with seven chaos cases
+- **Still open on DI-057:** arming the classifier, its pre-draft toggle, and keying the window
+  on manifest incompleteness rather than `pick_no <= 20`. Those were blocked on this card — a
+  backstop whose FLAGGED verdict could not be answered was a one-way trap — and are no longer.
 - **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
 
 ---

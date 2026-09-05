@@ -168,7 +168,7 @@ def test_the_full_rehearsal_passes_and_exits_zero() -> None:
     assert result.returncode == 0, result.stdout[-3000:]
     assert "PASSED — 160 picks" in result.stdout
     assert "every poll fitted inside" in result.stdout
-    assert result.stdout.count("  ok ") >= 16, "10 ledger rows plus 6 chaos cases"
+    assert result.stdout.count("  ok ") >= 17, "10 ledger rows plus 7 chaos cases"
 
 
 # ------------------------------------------------------- re-attribution, for --live
