@@ -3294,6 +3294,74 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-079] Five defects from the adversarial review of the draft-night path
+
+- **Sprint:** 3 · **Owner:** backend-engineer · **Size:** M · **Branch:** `di-079-review-fixes`
+- Two independent reviews of `api/live.py` and the correction stores returned REJECT. Every
+  finding below was **reproduced by running code before being believed**, including the two
+  that are criticisms of DI-077's own text.
+- **1. An absent picks payload folded as an empty draft.** `SleeperClient` returns `None` on a
+  404 — reachable the moment a commissioner recreates the draft — and `picks(...) or []` read
+  that as "no picks have happened":
+
+  ```
+  mid-draft : picks=40  conn='live'  my $106  maxbid $94  keepers=20  infl=0.77  alerts=0
+  after 404 : picks=0   conn='live'  my $200  maxbid $185 keepers=0   infl=1.40  alerts=0
+  ```
+
+  Every figure on the page wrong, the connection line saying `live`, and nothing anywhere
+  saying so. `None` is now a failed poll; `[]` is still an empty draft, which is the correct
+  reading before the first pick lands.
+- **2. A config typo killed the poll loop permanently.** `_fold` reads `corrections.yaml` and
+  `arming.yaml` — both headed *"safe to edit by hand"* — and sat **outside** `poll_once`'s
+  try/except, whose docstring has always claimed *"Never raises"*. One bad `kind:` raised out
+  of `run()`'s `while True`, polling stopped for good, `/live` kept serving the last reading
+  under a `live` banner, and fixing the file did not bring it back. Only a restart did,
+  mid-auction. Now a held `CONFIG NOT LOADING` blocker, cleared by the next fold that succeeds.
+- **3. A seat numbered outside the league turned the page green.** `unresolved_keepers` counted
+  keys *built*, not keys naming a real slot, so typing 11 for 9 — one keystroke — read "20 of
+  20 placed", cleared every blocker, and left two retention prices in the competitive series:
+
+  | seat typed | keepers placed | competitive | blockers |
+  |---|---:|---:|---:|
+  | none | 18/20 | 142 | 1 |
+  | slot 9 (correct) | 20/20 | **140** | 0 |
+  | slot 11 (typo) | ~~20/20~~ **18/20** | 142 | ~~0~~ **2** |
+
+  The green banner was the failure. A key naming a slot no pick can carry is not a placement.
+- **4 and 5 are DI-077's own text, and the review was right about both.** The keeper blocker
+  named one displaced person twice — *"Jake, jswilliams5"* — because `_displaced_owners`
+  iterated `owner_to_slot`, which carries manifest names **and** Sleeper display names, and a
+  display name holds no keepers. And the conflict line said *"Burt's keepers and money are on
+  slot 2"*: money is keyed on the `draft_slot` the feed reports and **no assertion moves it**.
+  That is this card's own predecessor's thesis — *naming the wrong cause is worse than naming
+  none* — failing on the card that argued it. Both corrected; the message now says what
+  actually happens and that no money has moved.
+- **Also: `armed: "false"` armed the backstop.** `bool("false")` is `True`, and so is
+  `bool("no")` and `bool([false])`. A file plainly saying it was off would have silently
+  reclassified picks. Only a real YAML boolean arms it now.
+- **Two of my first mutation checks survived**, which meant two of the new tests were not
+  pinning what they claimed: the out-of-range test asserted on the blocker (a separate
+  sentence that still fired) rather than on the count that had gone green, and nothing covered
+  `armed:` truthiness at all. Both tests tightened until the mutations fail.
+- **Acceptance criteria:**
+  - [x] a null payload is a failure; an empty list is still an empty draft
+  - [x] a config typo is a blocker, not a dead loop, and recovers with no restart
+  - [x] an out-of-range seat is counted as unplaced and named; a correct seat still clears
+  - [x] the displaced owner is named once, by a name that holds keepers
+  - [x] the conflict message describes the mechanism that actually occurs
+  - [x] five mutations verified, two of them only after the tests were tightened
+  - [x] `make ci` green — 706 tests, 95% coverage; rehearsal PASSED
+- **Still open from the same reviews, not in this card:** the budget delta computed against a
+  ledger that lags `corrections.yaml` by a poll (double-applies a repeated correction);
+  unlocked read-modify-write in `CorrectionStore.add`/`SeatStore.assign` (concurrent requests
+  lose writes); `set_seat` permitting one owner in two seats; walk-away curves priced at book
+  rather than at live inflation; the classifier cached against a stale manifest after a
+  pipeline rebuild; `[object Object]` rendered for pydantic validation errors.
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.

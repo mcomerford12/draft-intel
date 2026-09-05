@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from draft_intel.domain.classify import KeeperClassifier, keepers_seen, reconcile
 from draft_intel.models import PickClass, PickSnapshot
 
@@ -162,6 +164,30 @@ def test_a_missing_or_broken_arming_file_means_off_rather_than_a_crash(tmp_path:
     store = ArmingStore(tmp_path / "written.yaml")
     assert store.set(True) is True
     assert ArmingStore(store.path).load() is True, "it must survive a fresh reader"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ['armed: "false"', 'armed: "no"', "armed: 1", "armed: [false]", "armed: off", "armed: null"],
+)
+def test_only_a_real_boolean_arms_the_backstop(tmp_path: Path, raw: str) -> None:
+    """`bool("false")` is True. So is `bool("no")`, and `bool([false])` — a file that plainly
+    says it is off would have armed the backstop and silently reclassified picks, which is the
+    exact outcome defaulting-to-off exists to prevent. Found by adversarial review."""
+    from draft_intel.store.arming import ArmingStore
+
+    path = tmp_path / "arming.yaml"
+    path.write_text(raw + "\n")
+    assert ArmingStore(path).load() is False, f"{raw!r} must not arm anything"
+
+
+def test_a_real_yaml_true_still_arms_it(tmp_path: Path) -> None:
+    """The negative case. Tightening the check must not stop `make arm ON=1` working."""
+    from draft_intel.store.arming import ArmingStore
+
+    path = tmp_path / "arming.yaml"
+    path.write_text("armed: true\n")
+    assert ArmingStore(path).load() is True
 
 
 def test_arming_no_longer_costs_real_competitive_picks_in_a_room_with_no_ceremony():

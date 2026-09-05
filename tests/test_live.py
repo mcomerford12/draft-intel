@@ -1210,3 +1210,166 @@ def test_the_leagues_own_seating_is_retained_beside_the_asserted_one(
     assert live._resolved.slot_for("Burt") == 9, "what the league said"
     assert live.identity is not None
     assert live.identity.slot_for("Burt") == 10, "what the user asserted, and what is used"
+
+
+# ------------------ DI-079: four defects from the adversarial review of this module
+#
+# Each was reproduced by running code before being believed, and each is the same shape: the
+# page keeps looking healthy while a figure underneath it is wrong.
+
+
+def test_an_absent_picks_payload_is_a_failure_not_an_empty_draft(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """**The worst of the four.** `SleeperClient` returns `None` on a 404 — reachable the moment
+    a commissioner recreates the draft — and `or []` folded that as "no picks have happened":
+    every team back to $200, max bid $185, twenty keepers gone, headline inflation 0.77 -> 1.40,
+    connection `live`, and zero alerts. Every figure on the page wrong, nothing saying so."""
+
+    class Nulling(FakeClient):
+        async def picks(self, draft_id: str) -> Any:
+            return None if getattr(self, "null", False) else await super().picks(draft_id)
+
+    client = Nulling(PICKS[:40])
+    live = LiveDraft(ROOT, league_id="L", draft_id="D", store=store, client=client)
+    asyncio.run(live.poll_once())
+    before = live.snapshot()
+    assert before.picks_seen == 40
+
+    client.null = True  # type: ignore[attr-defined]
+    asyncio.run(live.poll_once())
+    after = live.snapshot()
+
+    assert after.picks_seen == 40, "the last good reading is held, not replaced by an empty one"
+    assert after.connection != "live"
+    assert "404" in after.connection, "and it says what happened"
+    assert after.inflation == before.inflation
+
+
+def test_an_empty_picks_list_is_still_an_empty_draft(store: OverrideStore, tmp_path: Path) -> None:
+    """The negative case for the above. Before the first pick lands, `[]` is the correct answer
+    and must keep reading as `live` — otherwise the fix turns every pre-draft poll into a
+    failure."""
+    live = LiveDraft(ROOT, league_id="L", draft_id="D", store=store, client=FakeClient([]))
+    asyncio.run(live.poll_once())
+    assert live.snapshot().picks_seen == 0
+    assert live.snapshot().connection == "live"
+
+
+def test_a_seat_numbered_outside_the_league_does_not_turn_the_page_green(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """Typing 11 for 9 is one keystroke, and `unresolved_keepers` counted keys *built* rather
+    than keys naming a real slot — so it read "20 of 20 placed", cleared every blocker, and left
+    two retention prices inside the competitive series for the night. The green banner was the
+    failure."""
+    from draft_intel.store.seats import SeatStore
+
+    one_missing = {slot: name for slot, name in FIXTURE_SEATING.items() if slot != 9}
+    seats = SeatStore(tmp_path / "seats.yaml")
+    seats.assign(SeatAssignment(slot=11, owner="Burt", note="meant 9"))
+    live = LiveDraft(
+        ROOT,
+        league_id="L",
+        draft_id="D",
+        store=store,
+        seats=seats,
+        corrections=CorrectionStore(tmp_path / "corrections.yaml"),
+        client=FakeClient(PICKS, seating=one_missing),
+    )
+    asyncio.run(live.poll_once())
+    snap = live.snapshot()
+
+    assert snap.competitive_picks == 142, "two keepers are still loose — the fact being reported"
+
+    # The count itself, which is what turned the banner green. A key naming slot 11 is not a
+    # placement, so it must not be counted as one — asserting only on the blocker would pass
+    # with the bound removed, because the out-of-range check is a separate sentence.
+    placed, expected, _unmapped = live.unresolved_keepers()
+    assert (placed, expected) == (18, 20), "18 of 20 placed; the slot-11 key places nobody"
+
+    assert snap.blockers, "and the page must not be green while that is true"
+    out_of_range = next(b for b in snap.blockers if b.startswith("SEAT OUT OF RANGE"))
+    assert "slot 11" in out_of_range and "slots 1-10" in out_of_range
+
+
+def test_a_correct_seat_still_clears_the_blocker(store: OverrideStore, tmp_path: Path) -> None:
+    """The negative case. Bounding the slot must not stop a *right* assignment working, or the
+    seating form stops being worth using."""
+    from draft_intel.store.seats import SeatStore
+
+    one_missing = {slot: name for slot, name in FIXTURE_SEATING.items() if slot != 9}
+    seats = SeatStore(tmp_path / "seats.yaml")
+    seats.assign(SeatAssignment(slot=9, owner="Burt", note="correct"))
+    live = LiveDraft(
+        ROOT,
+        league_id="L",
+        draft_id="D",
+        store=store,
+        seats=seats,
+        corrections=CorrectionStore(tmp_path / "corrections.yaml"),
+        client=FakeClient(PICKS, seating=one_missing),
+    )
+    asyncio.run(live.poll_once())
+    assert live.snapshot().competitive_picks == 140
+    assert live.snapshot().blockers == ()
+
+
+def test_a_config_file_that_will_not_parse_does_not_kill_the_poll_loop(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """`poll_once`'s docstring has always said "Never raises". That was true of the fetch and
+    false of everything after it: the fold reads two hand-editable files, and one typo raised
+    out of `run()`'s `while True` and killed polling **permanently** while `/live` kept serving
+    the last reading under a `live` banner. Fixing the file did not bring it back."""
+    corrections = CorrectionStore(tmp_path / "corrections.yaml")
+    live = LiveDraft(
+        ROOT,
+        league_id="L",
+        draft_id="D",
+        store=store,
+        corrections=corrections,
+        client=FakeClient(PICKS[:40]),
+    )
+    asyncio.run(live.poll_once())
+    assert live.snapshot().picks_seen == 40
+
+    corrections.path.write_text("corrections:\n- id: 1\n  kind: budgt\n  slot: 3\n  delta: -5\n")
+    asyncio.run(live.poll_once())  # must not raise
+    broken = live.snapshot()
+    assert broken.picks_seen == 40, "the last good ledger stands"
+    assert any(b.startswith("CONFIG NOT LOADING") for b in broken.blockers)
+
+    corrections.path.write_text("corrections: []\n")
+    live.client = FakeClient(PICKS[:60])
+    asyncio.run(live.poll_once())
+    recovered = live.snapshot()
+    assert recovered.picks_seen == 60, "and it recovers on the next poll, with no restart"
+    assert recovered.blockers == ()
+
+
+def test_the_displaced_owner_is_named_once_and_by_a_name_that_holds_keepers(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """From the review of DI-077's own text. `owner_to_slot` carries both manifest names and
+    Sleeper display names, so one displaced person was listed twice — the second under a display
+    name owning no keepers. That is this card's own thesis failing on the card itself."""
+    live = _seated(store, tmp_path, SeatAssignment(slot=2, owner="Burt", note="Jake's seat"))
+    keeper_blocker = next(b for b in live.snapshot().blockers if "cannot be placed" in b)
+
+    assert "Jake" in keeper_blocker
+    assert "jswilliams5" not in keeper_blocker, "a display name holds no keepers"
+    assert live._displaced_owners() == {"Jake"}
+
+
+def test_the_conflict_message_does_not_claim_money_moved(
+    store: OverrideStore, tmp_path: Path
+) -> None:
+    """Also from that review. Every dollar is keyed on the `draft_slot` the feed reports and no
+    assertion touches it. Saying "keepers and money are on slot N" described a mechanism that
+    does not happen, in the one sentence the user reads to understand what went wrong."""
+    live = _seated(store, tmp_path, SeatAssignment(slot=2, owner="Burt", note="Jake's seat"))
+    conflict = next(b for b in live.snapshot().blockers if b.startswith("SEAT CONFLICT"))
+
+    assert "No money has moved" in conflict
+    assert "keepers and money are on slot" not in conflict

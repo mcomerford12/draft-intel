@@ -70,7 +70,11 @@ class ArmingStore:
         if not self.path.exists():
             return False
         raw: Any = yaml.safe_load(self.path.read_text()) or {}
-        return bool(raw.get("armed", False)) if isinstance(raw, dict) else False
+        # `is True`, not `bool(...)`. `bool("false")` is True, and so is `bool("no")` and
+        # `bool([false])` -- so a file that plainly says it is off would have armed the backstop
+        # and silently reclassified picks, which is the exact outcome defaulting-to-off exists
+        # to prevent. Only a real YAML boolean arms it.
+        return isinstance(raw, dict) and raw.get("armed") is True
 
     def set(self, armed: bool) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
