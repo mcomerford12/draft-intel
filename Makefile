@@ -50,3 +50,8 @@ rehearsal-live:
 
 arm:  ## the keeper backstop: `make arm` reports, `make arm ON=1` / `ON=0` sets it
 	@uv run python -m draft_intel.cli arm $(if $(ON),$(if $(filter 1 true yes on,$(ON)),on,off),)
+
+# Observed auction prices from the completed mock draft. Writes reports/, never config/ --
+# adopting them changes every keeper price and the whole structural inflation read.
+mock-values:
+	uv run python tools/mock_values.py

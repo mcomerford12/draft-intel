@@ -3600,6 +3600,73 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-081] The mock draft's own prices, extracted
+
+- **Sprint:** 2 · **Owner:** quant-analyst · **Size:** S · **Branch:** `di-081-mock-values`
+- **The ask:** can the completed mock be run through to extract an expected auction value per
+  player. Yes — its 160 picks each carry a `metadata.amount`, and those are not estimates of
+  anything. They are **160 dollar amounts ten managers actually paid**, in a room with this
+  league's settings, roster shape and budgets. Nothing else this project has is an observation.
+- **`make mock-values`.** Resolves on `player_id` straight from the picks feed — no name
+  matching anywhere, which the CSV loader supports natively and the charter requires. Writes
+  `reports/mock_auction_values.csv`, **deliberately not** `config/auction_values.csv`: adopting
+  it moves every keeper rule price, every surplus figure and the structural inflation read, and
+  that is the user's call.
+- **145 of the 160 priced pool covered. The totals agree and the shape does not**, which is the
+  whole finding:
+
+  | | paid | model | ratio |
+  |---|---:|---:|---:|
+  | **total** | $1,941 | $1,909 | **1.017** |
+  | WR | 735 | 706 | 1.04 |
+  | RB | 701 | 624 | 1.12 |
+  | QB | 330 | 374 | 0.88 |
+  | TE | 167 | 194 | 0.86 |
+
+  Correlation 0.926, mean difference **+$0.2**, median **$0.0**. The model's *level* is right.
+  Its *distribution* is not what this room does.
+- **Stars and scrubs, measured.** Banding by what was paid:
+
+  | band | n | ratio | share of the $1,941 |
+  |---|---:|---:|---:|
+  | $30+ | 22 | **1.28** | 39.7% |
+  | $20–29 | 23 | **1.26** | 28.8% |
+  | $10–19 | 31 | 1.07 | 23.0% |
+  | $3–9 | 21 | 0.59 | 5.9% |
+  | $1–2 | 48 | **0.20** | 2.6% |
+
+  Forty-five players took 68.5% of the room's money at a ~27% premium; forty-eight took 2.6%.
+- **The QB cliff, and it is the actionable one.** A 2QB league has 20 starting slots and the
+  room bought exactly 20 QBs — supply met demand precisely, so the last ones were free:
+
+  ```
+  QB1  Allen    $39      QB12 Nix       $17
+  QB2  Maye     $38      QB13 Goff      $ 8   <-- cliff
+  QB3  Burrow   $35      QB14 Mahomes   $ 2   (model $16.8)
+  QB4  Jackson  $29      QB15 Herbert   $ 1   (model $19.5)
+  ...                    QB16-20        $ 1   each
+  ```
+
+- **The tail is not a price, and the tool says so.** 48 players went for $1–$2. In an auction the
+  last players go for the minimum by construction — a $1 sale is a fact about the room's
+  remaining money, not about the player. Adopting those rows wholesale would set a $15
+  quarterback's *retention* price at $1, so they are written with a `note` column marking them
+  and the report lists them separately from the contested prices.
+- **Honest limits, stated in the module docstring rather than left for the reader to infer:** one
+  observation per player, not a consensus; and a mock is played without money at stake, which
+  shows up worst in precisely the tail. The *shape* is the durable read; the individual tail
+  prices are not.
+- **Acceptance criteria:**
+  - [x] `make mock-values` extracts every priced pick, resolved on `player_id`, no name matching
+  - [x] output goes to `reports/`, never `config/` — adoption is a decision, with the exact
+        command printed
+  - [x] contested prices and the uncontested tail are separated, in the report and in the file
+  - [x] the comparison against the model is reported by position and by price band, since the
+        aggregate agreeing is what hides the divergence
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.
