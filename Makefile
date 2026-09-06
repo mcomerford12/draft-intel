@@ -55,3 +55,7 @@ arm:  ## the keeper backstop: `make arm` reports, `make arm ON=1` / `ON=0` sets 
 # adopting them changes every keeper price and the whole structural inflation read.
 mock-values:
 	uv run python tools/mock_values.py
+
+# The draft that actually happened, against the board that predicted it. Reads fixtures/live/.
+postmortem:
+	uv run python tools/postmortem.py

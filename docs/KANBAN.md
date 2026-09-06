@@ -3667,6 +3667,49 @@ append to. Written to schema here, retroactively for the cards already built.
 
 ---
 
+### [DI-082] The post-mortem — the draft that happened, against the board that predicted it
+
+- **Sprint:** 4 · **Owner:** quant-analyst · **Size:** M · **Branch:** `di-082-postmortem`
+- The draft completed: 160 picks, $1,994 of $1,998. `fixtures/live/` snapshots the draft,
+  picks, rosters, users and league so the analysis survives Sleeper forgetting or changing them.
+  `make postmortem` answers four questions.
+- **Three facts the snapshot forced, none of them assumptions:**
+  - **Budgets are per team and they differ** — $192 to $212, carried in
+    `draft.settings.budget_<slot>` rather than the flat `budget` field, encoding the league's
+    keeper economics. Reading the flat $200 would have shown two teams overspending and three
+    underspending, all of it fictional.
+  - **Two managers joined under names `owners.yaml` has never seen** (`knaks808`, `tdaniels7`).
+    Slot→owner is derived from **which keepers landed where** — every slot holds exactly the two
+    a single manifest owner is listed as keeping. That is the keeper slate matching, not a name
+    resemblance, so it does not breach the confirmed-not-inferred rule; it does still need the
+    user's confirmation before going into `owners.yaml`.
+  - **The commissioner re-saved**: `draft.settings.rounds` is now 16, not 15. `max_keepers` is
+    still 1.
+- **A reporting defect caught in the first run.** Keepers were being scored against
+  `baseline_value`, which is **zero by construction** for anyone off the auction board — so the
+  first output reported a $39 loss on Josh Allen and a $23 loss on Drake London. A retention is
+  a discount on *market* value, which is also what the 75% rule reads. Fixed before reporting.
+- **What it found, and the third item is the one that matters:**
+  1. The user finished 6th of 10 on price, −$9.4 against model value across 14 bids.
+  2. Spread from +$21.1 (Steve, 1.15 value per dollar) to −$32.7 (Keenan, 0.79).
+  3. **The model's total was nearly exact and its shape was badly wrong.** $1,401 paid against
+     $1,386 predicted — ratio 1.011, median error −$0.5 — while QB cleared at **1.62** and WR at
+     0.80. By price band: $25–39 cleared 1.40, $1–4 cleared 0.39. The curve is far too flat.
+  4. **The mock's QB cliff did not repeat, and inverted.** In the mock, QB14–QB20 went for $1–2.
+     With money at stake this 2QB room bid *every* QB down to 19th up to $16 or more, and paid
+     $24 for a quarterback the model priced at $11.60. The read published from the mock in
+     DI-081 — that a second QB would be nearly free — was **wrong**, and the post-mortem says so
+     rather than quietly reporting something else.
+- **Acceptance criteria:**
+  - [x] the live draft snapshotted to a fixture, so the analysis is reproducible offline
+  - [x] per-team budgets read from where the league actually keeps them
+  - [x] slot→owner derived from keeper data, with the two unknown display names named
+  - [x] ceremonial picks separated from bids everywhere, and scored on the right basis
+  - [x] the model's scorecard reported whichever way it came out
+- **Reviewer verdict:** pending. · **Evaluator verdict:** pending.
+
+---
+
 ## Ready — Sprint 2 (Intelligence Core)
 
 Cards are ordered by dependency. Each gets its own branch and PR.
